@@ -1,0 +1,15 @@
+{
+  "name": "lambda-docker-chdb",
+  "version": "1.0.0",
+  "description": "aws lambda chdb",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "chdb-node": "^0.7.0",
+  },
+  "keywords": [],
+  "author": "Lorenzo Mangani <lorenzo.mangani@gmail.com>",
+  "license": "Apache2"
+}
