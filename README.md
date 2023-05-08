@@ -14,8 +14,8 @@
 
 #### Example
 ```javascript
-const addon = require('chdb-node');
-var result = addon.Execute('SELECT version()', 'CSV');
+const chdb = require('chdb-node');
+var result = chdb.Execute('SELECT version()', 'CSV');
 console.log(result) // 22.12.1.1
 ```
 
