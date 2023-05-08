@@ -10,7 +10,7 @@
     "prebuild": "node-gyp configure build",
     "prebuild:all": "npm run prebuild -- -t 16.0.0"
   },
-  "author": "",
+  "author": "Lorenzo Mangani <lorenzo.mangani@gmail.com>",
   "license": "AGPLv3",
   "devDependencies": {
     "jest": "^29.5.0",
