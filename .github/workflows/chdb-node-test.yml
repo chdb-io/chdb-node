@@ -1,0 +1,27 @@
+name: chDB-node
+
+on:
+  pull-request:
+    paths-ignore:
+      - '**/.md'
+  push:
+    branches: [ "main" ]
+    paths-ignore:
+      - '**/.md'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Fetch library
+      run: |
+          sudo wget https://github.com/metrico/libchdb/releases/latest/download/libchdb_amd64.zip
+          sudo unzip libchdb_amd64.zip
+          sudo mv libchdb.so /usr/lib/libchdb.so
+          sudo ldconfig
+    - uses: actions/setup-node@v3
+        with:
+          node-version: 16
+    - run: npm install
+    - run: npm test
