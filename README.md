@@ -10,7 +10,7 @@
 ### Status
 
 - experimental, unstable, subject to changes
-- requires [`libchdb.so`](https://github.com/metrico/libchdb/releases) on the system
+- requires [`libchdb`](https://github.com/metrico/libchdb) on the system
 
 #### Example
 ```javascript
