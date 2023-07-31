@@ -13,10 +13,19 @@
 - requires [`libchdb`](https://github.com/metrico/libchdb) on the system
 
 #### Example
+##### Query _(query, format)_
 ```javascript
 const chdb = require('chdb-node');
 var result = chdb.Execute('SELECT version()', 'CSV');
-console.log(result) // 22.12.1.1
+console.log(result) // 23.6.1.1
+```
+
+##### Session _(query, *format, *path)_
+```javascript
+const chdb = require('chdb-node');
+chdb.Session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'", "CSV", "/tmp/)
+var result =  = chdb.Session("SELECT hello();", "CSV", "/tmp/)
+console.log(result) // chDB
 ```
 
 <br>
