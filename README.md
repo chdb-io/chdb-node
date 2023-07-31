@@ -16,15 +16,15 @@
 
 <br>
 
-#### Example
-##### Query _(query, format)_
+### Example
+#### Query _(query, format)_
 ```javascript
 const chdb = require('chdb-node');
 var result = chdb.Execute('SELECT version()', 'CSV');
 console.log(result) // 23.6.1.1
 ```
 
-##### Session _(query, *format, *path)_
+#### Session _(query, *format, *path)_
 ```javascript
 const chdb = require('chdb-node');
 chdb.Session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'")
@@ -32,9 +32,14 @@ var result =  = chdb.Session("SELECT hello();")
 console.log(result) // chDB
 ```
 
-Sessions persist table data to disk. You can specify the `path` and `format`:
+Sessions persist table data to disk. You can specify `path` to implement auto-cleanup strategies:
 ```javascript
-chdb.Session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'", "CSV", "/tmp/")
+const temperment = require('temperment');
+const tmp = temperment.directory();
+chdb.Session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'", "CSV", tmp)
+var result =  = chdb.Session("SELECT hello();")
+console.log(result) // chDB
+tmp.cleanup.sync();
 ```
 
 ⚠️ _Session folders are persistent and NOT automatically cleaned_
