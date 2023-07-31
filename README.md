@@ -34,7 +34,7 @@ console.log(result) // chDB
 
 Sessions persist table data to disk. You can specify the `path` and `format`:
 ```javascript
-chdb.Session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'", "CSV", "/tmp/)
+chdb.Session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'", "CSV", "/tmp/")
 ```
 
 ⚠️ _Session folders are persistent and NOT automatically cleaned_
