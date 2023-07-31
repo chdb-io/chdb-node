@@ -12,6 +12,10 @@
 - experimental, unstable, subject to changes
 - requires [`libchdb`](https://github.com/metrico/libchdb) on the system
 
+- :wave: _C/Node developer? Jump in and help us evolve this prototype into a stable module!_
+
+<br>
+
 #### Example
 ##### Query _(query, format)_
 ```javascript
@@ -23,11 +27,18 @@ console.log(result) // 23.6.1.1
 ##### Session _(query, *format, *path)_
 ```javascript
 const chdb = require('chdb-node');
-chdb.Session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'", "CSV", "/tmp/)
-var result =  = chdb.Session("SELECT hello();", "CSV", "/tmp/)
+chdb.Session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'")
+var result =  = chdb.Session("SELECT hello();")
 console.log(result) // chDB
 ```
 
+Sessions persist table data to disk. You can specify the `path` and `format`:
+```javascript
+chdb.Session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'", "CSV", "/tmp/)
+```
+
+⚠️ _Session folders are persistent and NOT automatically cleaned_
+
 <br>
 
-:wave: _C/Node developer? Jump in and help us evolve this prototype into a stable module!_
+
