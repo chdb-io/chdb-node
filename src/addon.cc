@@ -110,14 +110,22 @@ Napi::Value ExecuteWrapped(const Napi::CallbackInfo& info) {
 Napi::Value SessionWrapped(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
 
-    if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() || !info[2].IsString()) {
-        Napi::TypeError::New(env, "String expected").ThrowAsJavaScriptException();
+    if (info.Length() < 1 || !info[0].IsString()) {
+        Napi::TypeError::New(env, "Query expected").ThrowAsJavaScriptException();
         return env.Null();
     }
 
     std::string query = info[0].As<Napi::String>();
-    std::string format = info[1].As<Napi::String>();
-    std::string path = info[2].As<Napi::String>();
+    std::string format = "CSV";
+    std::string path = "/tmp/";
+
+    if (info[1].IsString()) {
+      format = info[1].As<Napi::String>();
+    }
+
+    if (info[2].IsString()) {
+      path = info[2].As<Napi::String>();
+    }
 
     char *result = ExecuteSession((char *)query.c_str(), (char *)format.c_str(), (char *)path.c_str());
     if (result == NULL) {
