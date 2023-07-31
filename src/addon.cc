@@ -20,11 +20,11 @@ char *Execute(char *query, char *format) {
     // Query - 10 characters + length of query
     localQuery = (char *) malloc(strlen(query)+10);
     if(localQuery == NULL) {
-    
+
         printf("Out of memmory\n");
         return NULL;
     }
-    
+
     sprintf(localQuery, "--query=%s", query);
     argv[3]=strdup(localQuery);
     free(localQuery);
@@ -41,7 +41,7 @@ char *Execute(char *query, char *format) {
 
 char *ExecuteSession(char *query, char *format, char *path) {
 
-    char * argv[] = {(char *)"clickhouse", (char *)"--multiquery", (char *)"--output-format=CSV", (char *)"--query=", (char *)"--path="};
+    char * argv[] = {(char *)"clickhouse", (char *)"--multiquery", (char *)"--output-format=CSV", (char *)"--query=", (char *)"--path=."};
     char dataFormat[100];
     char dataPath[100];
     char *localQuery;
@@ -50,7 +50,7 @@ char *ExecuteSession(char *query, char *format, char *path) {
     struct local_result *result;
 
     // Format
-    snprintf(dataFormat, sizeof(dataFormat), "--format=%s", format);
+    snprintf(dataFormat, sizeof(dataFormat), "--output-format=%s", format);
     argv[2]=strdup(dataFormat);
 
     // Query - 10 characters + length of query
@@ -67,7 +67,7 @@ char *ExecuteSession(char *query, char *format, char *path) {
 
     // Path
     snprintf(dataPath, sizeof(dataPath), "--path=%s", path);
-    argv[4]=strdup(dataFormat);
+    argv[4]=strdup(dataPath);
 
     // Main query and result
     result = query_stable(argc, argv);
@@ -75,8 +75,14 @@ char *ExecuteSession(char *query, char *format, char *path) {
     //Free it
     free(argv[2]);
     free(argv[3]);
+    free(argv[4]);
 
-    return result->buf;
+
+    if (result == NULL) {
+      return NULL;
+    } else {
+      return result->buf;
+    }
 }
 
 Napi::Value ExecuteWrapped(const Napi::CallbackInfo& info) {
@@ -104,7 +110,7 @@ Napi::Value ExecuteWrapped(const Napi::CallbackInfo& info) {
 Napi::Value SessionWrapped(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
 
-    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsString()) {
+    if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() || !info[2].IsString()) {
         Napi::TypeError::New(env, "String expected").ThrowAsJavaScriptException();
         return env.Null();
     }
@@ -115,8 +121,9 @@ Napi::Value SessionWrapped(const Napi::CallbackInfo& info) {
 
     char *result = ExecuteSession((char *)query.c_str(), (char *)format.c_str(), (char *)path.c_str());
     if (result == NULL) {
-        Napi::TypeError::New(env, "Out of memory").ThrowAsJavaScriptException();
-        return env.Null();
+        Napi::String returnValue = Napi::String::New(env, "");
+        return returnValue;
+        // return env.Null();
     }
 
     Napi::String returnValue = Napi::String::New(env, result);
