@@ -22,7 +22,7 @@
 ```javascript
 const addon = require('.');
 const chdb = require('chdb-node');
-const db = new chdb.db('CSV')
+const db = new chdb.db('CSV', '/tmp/mysession') // format, storage path
 var result;
 
 // Query (ephemeral)
