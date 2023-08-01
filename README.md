@@ -25,7 +25,7 @@ var result;
 
 // Query (ephemeral)
 const db = new chdb.db('CSV') // format
-result = db.query("SELECT version()", "TabSeparated");
+result = db.query("SELECT version()");
 console.log(result)
 
 // Query Session (persistent)
