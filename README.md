@@ -19,16 +19,16 @@
 
 #### Query Constructor
 ```javascript
-const chdb = require('chdb-node');
+const chdb = require("chdb-node");
 var result;
 
 // Query (ephemeral)
-const db = new chdb.db('CSV') // format
+const db = new chdb.db("CSV") // format
 result = db.query("SELECT version()");
 console.log(result)
 
 // Query Session (persistent)
-const dbdisk = new chdb.db('CSV', '/tmp/mysession') // format, storage path
+const dbdisk = new chdb.db("CSV", "/tmp/mysession") // format, storage path
 dbdisk.session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'");
 result = dbdisk.session("SELECT hello()", "TabSeparated"); // optional format override
 console.log(result)
@@ -36,14 +36,14 @@ console.log(result)
 
 #### Query _(query, format)_
 ```javascript
-const chdb = require('chdb-node').chdb;
-var result = chdb.Execute('SELECT version()', 'CSV');
+const chdb = require("chdb-node").chdb;
+var result = chdb.Execute("SELECT version()", "CSV");
 console.log(result) // 23.6.1.1
 ```
 
 #### Session _(query, *format, *path)_
 ```javascript
-const chdb = require('chdb-node').chdb;
+const chdb = require("chdb-node").chdb;
 chdb.Session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'")
 var result =  = chdb.Session("SELECT hello();")
 console.log(result) // chDB
@@ -51,7 +51,7 @@ console.log(result) // chDB
 
 > ⚠️ Sessions persist table data to disk. You can specify `path` to implement auto-cleanup strategies:
 ```javascript
-const temperment = require('temperment');
+const temperment = require("temperment");
 const tmp = temperment.directory();
 chdb.Session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'", "CSV", tmp)
 var result =  = chdb.Session("SELECT hello();")
