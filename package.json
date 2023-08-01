@@ -1,6 +1,6 @@
 {
   "name": "chdb-node",
-  "version": "0.11.6",
+  "version": "1.0.1",
   "description": "chdb bindings for nodejs",
   "main": "index.js",
   "scripts": {
