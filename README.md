@@ -49,7 +49,7 @@ var result =  = chdb.Session("SELECT hello();")
 console.log(result) // chDB
 ```
 
-⚠️ Sessions persist table data to disk. You can specify `path` to implement auto-cleanup strategies:
+> ⚠️ Sessions persist table data to disk. You can specify `path` to implement auto-cleanup strategies:
 ```javascript
 const temperment = require('temperment');
 const tmp = temperment.directory();
