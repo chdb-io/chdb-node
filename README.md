@@ -16,17 +16,35 @@
 
 <br>
 
-### Example
+### Examples
+
+#### Query Constructor
+```javascript
+const addon = require('.');
+const chdb = require('chdb-node');
+const db = new chdb.db('CSV')
+var result;
+
+// Query (ephemeral)
+result = db.query("SELECT version()", "TabSeparated");
+console.log(result)
+
+// Query Session (persistent)
+db.session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'");
+result = db.session("SELECT hello()", "TabSeparated");
+console.log(result)
+```
+
 #### Query _(query, format)_
 ```javascript
-const chdb = require('chdb-node');
+const chdb = require('chdb-node').chdb;
 var result = chdb.Execute('SELECT version()', 'CSV');
 console.log(result) // 23.6.1.1
 ```
 
 #### Session _(query, *format, *path)_
 ```javascript
-const chdb = require('chdb-node');
+const chdb = require('chdb-node').chdb;
 chdb.Session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'")
 var result =  = chdb.Session("SELECT hello();")
 console.log(result) // chDB

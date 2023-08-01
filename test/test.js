@@ -1,4 +1,4 @@
-const { Execute } = require('..');
+const { Execute } = require('..').chdb;
 
 describe("Execution", () => {
 	test('Execute returns correct version', () => {
