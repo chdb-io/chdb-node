@@ -31,7 +31,7 @@ console.log(result)
 // Query Session (persistent)
 const dbdisk = new chdb.db('CSV', '/tmp/mysession') // format, storage path
 dbdisk.session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'");
-result = dbdisk.session("SELECT hello()", "TabSeparated");
+result = dbdisk.session("SELECT hello()", "TabSeparated"); // optional format override
 console.log(result)
 ```
 
