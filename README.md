@@ -20,18 +20,17 @@
 #### Query Constructor
 ```javascript
 const chdb = require("chdb-node");
-var result;
 
 // Query (ephemeral)
 const db = new chdb.db("CSV") // format
-result = db.query("SELECT version()");
-console.log(result)
+var result = db.query("SELECT version()");
+console.log(result) // 23.6.1.1
 
 // Query Session (persistent)
 const dbdisk = new chdb.db("CSV", "/tmp/mysession") // format, storage path
 dbdisk.session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'");
-result = dbdisk.session("SELECT hello()", "TabSeparated"); // optional format override
-console.log(result)
+var result = dbdisk.session("SELECT hello()", "TabSeparated"); // optional format override
+console.log(result) // chDB
 ```
 
 #### Query _(query, format)_
