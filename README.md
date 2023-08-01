@@ -21,16 +21,17 @@
 #### Query Constructor
 ```javascript
 const chdb = require('chdb-node');
-const db = new chdb.db('CSV', '/tmp/mysession') // format, storage path
 var result;
 
 // Query (ephemeral)
+const db = new chdb.db('CSV') // format
 result = db.query("SELECT version()", "TabSeparated");
 console.log(result)
 
 // Query Session (persistent)
-db.session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'");
-result = db.session("SELECT hello()", "TabSeparated");
+const dbdisk = new chdb.db('CSV', '/tmp/mysession') // format, storage path
+dbdisk.session("CREATE FUNCTION IF NOT EXISTS hello AS () -> 'chDB'");
+result = dbdisk.session("SELECT hello()", "TabSeparated");
 console.log(result)
 ```
 
