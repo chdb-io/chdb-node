@@ -1,5 +1,5 @@
 <a href="https://chdb.fly.dev" target="_blank">
-  <img src="https://user-images.githubusercontent.com/1423657/236688026-812c5d02-ddcc-4726-baf8-c7fe804c0046.png" width=130 />
+  <img src="https://avatars.githubusercontent.com/u/132536224" width=130 />
 </a>
 
 [![chDB-node](https://github.com/chdb-io/chdb-node/actions/workflows/chdb-node-test.yml/badge.svg)](https://github.com/chdb-io/chdb-node/actions/workflows/chdb-node-test.yml)
