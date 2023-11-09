@@ -24,7 +24,7 @@ const chdb = require("chdb-node");
 // Query (ephemeral)
 const db = new chdb.db("CSV") // format
 var result = db.query("SELECT version()");
-console.log(result) // 23.6.1.1
+console.log(result) // 23.10.1.1
 
 // Query Session (persistent)
 const dbdisk = new chdb.db("CSV", "/tmp/mysession") // format, storage path
@@ -37,7 +37,7 @@ console.log(result) // chDB
 ```javascript
 const chdb = require("chdb-node").chdb;
 var result = chdb.Execute("SELECT version()", "CSV");
-console.log(result) // 23.6.1.1
+console.log(result) // 23.10.1.1
 ```
 
 #### Session _(query, *format, *path)_
