@@ -17,6 +17,7 @@ struct local_result
 const char* ares_query(const char* queryStr, const char* format);
 struct local_result* query_stable(int arg, char ** argv);
 struct local_result * queryToBuffer(const char *queryStr, const char *format);
+void free_result(local_result * result);
 
 #ifdef __cplusplus
 }
