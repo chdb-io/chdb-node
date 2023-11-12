@@ -5,84 +5,109 @@
 #include <stdlib.h>
 
 char *Execute(char *query, char *format) {
-
-    char * argv[] = {(char *)"clickhouse", (char *)"--multiquery", (char *)"--output-format=CSV", (char *)"--query="};
-    char dataFormat[100]; 
+    const char *base_argv[] = {"clickhouse", "--multiquery", "--output-format=CSV", "--query="};
+    char dataFormat[100];
     char *localQuery;
-    // Total 4 = 3 arguments + 1 programm name
     int argc = 4;
-    struct local_result *result;
+    local_result *result;
 
-    // Format
     snprintf(dataFormat, sizeof(dataFormat), "--format=%s", format);
-    argv[2]=strdup(dataFormat);
+    char *argv[] = {
+        strdup(base_argv[0]),
+        strdup(base_argv[1]),
+        strdup(dataFormat),
+        NULL
+    };
 
-    // Query - 10 characters + length of query
-    localQuery = (char *) malloc(strlen(query)+10);
-    if(localQuery == NULL) {
-
-        printf("Out of memmory\n");
+    localQuery = (char *)malloc(strlen(query) + 10);
+    if (localQuery == NULL) {
+        printf("Out of memory\n");
+        for (int i = 0; i < 3; ++i) {
+            free(argv[i]);
+        }
         return NULL;
     }
 
     sprintf(localQuery, "--query=%s", query);
-    argv[3]=strdup(localQuery);
+    argv[3] = strdup(localQuery);
     free(localQuery);
 
-    // Main query and result
+    if (argv[3] == NULL) {
+        printf("Out of memory\n");
+        for (int i = 0; i < 3; ++i) {
+            free(argv[i]);
+        }
+        return NULL;
+    }
+
     result = query_stable(argc, argv);
 
-    //Free it
-    free(argv[2]);
-    free(argv[3]);
+    for (int i = 0; i < 4; ++i) {
+        free(argv[i]);
+    }
 
-    return result->buf;
+    if (result == NULL) {
+        return NULL;
+    }
+
+    char *result_buf = strdup(result->buf);
+    free_result(result);
+    return result_buf;
 }
 
 char *ExecuteSession(char *query, char *format, char *path) {
-
-    char * argv[] = {(char *)"clickhouse", (char *)"--multiquery", (char *)"--output-format=CSV", (char *)"--query=", (char *)"--path=."};
+    const char *base_argv[] = {"clickhouse", "--multiquery", "--output-format=CSV", "--query=", "--path=."};
     char dataFormat[100];
     char dataPath[100];
     char *localQuery;
-    // Total 4 = 3 arguments + 1 programm name + 1 path for session
     int argc = 5;
-    struct local_result *result;
+    local_result *result;
 
-    // Format
     snprintf(dataFormat, sizeof(dataFormat), "--output-format=%s", format);
-    argv[2]=strdup(dataFormat);
+    snprintf(dataPath, sizeof(dataPath), "--path=%s", path);
 
-    // Query - 10 characters + length of query
-    localQuery = (char *) malloc(strlen(query)+10);
-    if(localQuery == NULL) {
+    char *argv[] = {
+        strdup(base_argv[0]),
+        strdup(base_argv[1]),
+        strdup(dataFormat),
+        NULL,
+        strdup(dataPath)
+    };
 
-        printf("Out of memmory\n");
+    localQuery = (char *)malloc(strlen(query) + 10);
+    if (localQuery == NULL) {
+        printf("Out of memory\n");
+        for (int i = 0; i < 4; ++i) {
+            free(argv[i]);
+        }
         return NULL;
     }
 
     sprintf(localQuery, "--query=%s", query);
-    argv[3]=strdup(localQuery);
+    argv[3] = strdup(localQuery);
     free(localQuery);
 
-    // Path
-    snprintf(dataPath, sizeof(dataPath), "--path=%s", path);
-    argv[4]=strdup(dataPath);
+    if (argv[3] == NULL) {
+        printf("Out of memory\n");
+        for (int i = 0; i < 4; ++i) {
+            free(argv[i]);
+        }
+        return NULL;
+    }
 
-    // Main query and result
     result = query_stable(argc, argv);
 
-    //Free it
-    free(argv[2]);
-    free(argv[3]);
-    free(argv[4]);
-
+    for (int i = 0; i < 5; ++i) {
+        free(argv[i]);
+    }
 
     if (result == NULL) {
-      return NULL;
-    } else {
-      return result->buf;
+        return NULL;
     }
+
+    char *result_buf = strdup(result->buf);
+    free_result(result);
+    return result_buf;
 }
 
 Napi::Value ExecuteWrapped(const Napi::CallbackInfo& info) {
@@ -98,8 +123,8 @@ Napi::Value ExecuteWrapped(const Napi::CallbackInfo& info) {
 
     char *result = Execute((char *)query.c_str(), (char *)format.c_str());
     if (result == NULL) {
-        Napi::TypeError::New(env, "Out of memory").ThrowAsJavaScriptException();
-        return env.Null();
+        Napi::String returnValue = Napi::String::New(env, "");
+        return returnValue;
     }
 
     Napi::String returnValue = Napi::String::New(env, result);
@@ -148,4 +173,3 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
 }
 
 NODE_API_MODULE(NODE_GYP_MODULE_NAME, Init)
-
