@@ -7,14 +7,10 @@ function db(format, path) {
   this.path = path || '.';
 
   // add properties to this
-  this.query = function(query, format){
-	return chdb.Execute(query, format || this.format);
-  }.bind(this);
-  this.session = function(query, format, path) {
-	return chdb.Session(query, format || this.format, path || this.path);
-  }.bind(this);
+  this.query = (query, format) => chdb.Execute(query, format || this.format);
+  this.session = (query, format, path) => chdb.Session(query, format || this.format, path || this.path);
 
-  return this;  (implicitly)
+  return this;
 }
 
 module.exports = { chdb, db };
