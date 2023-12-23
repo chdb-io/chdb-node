@@ -1,10 +1,8 @@
-//const chdb = require('./build/chdb.node');
-const chdb = require('node-gyp-build')(__dirname)
+const chdb = require("node-gyp-build")(__dirname);
 
 function db(format, path) {
-
-  this.format = format || 'JSONCompact';
-  this.path = path || '.';
+  this.format = format || "JSONCompact";
+  this.path = path || ".";
 
   // add properties to this
   this.query = (query, format) => chdb.Execute(query, format || this.format);

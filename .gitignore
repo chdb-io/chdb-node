@@ -1,2 +1,4 @@
 node_modules
 build
+/metadata
+/user_defined
