@@ -5,12 +5,12 @@
 [![chDB-node](https://github.com/chdb-io/chdb-node/actions/workflows/chdb-node-test.yml/badge.svg)](https://github.com/chdb-io/chdb-node/actions/workflows/chdb-node-test.yml)
 
 # chdb-node
-[chDB](https://github.com/auxten/chdb) nodejs bindings for fun and hacking.
+[chDB](https://github.com/chdb-io/chdb) nodejs bindings for fun and hacking.
 
 ### Status
 
 - experimental, unstable, subject to changes
-- requires [`libchdb`](https://github.com/metrico/libchdb) on the system
+- requires [`libchdb`](https://github.com/chdb-io/chdb) on the system
 - :wave: _C/Node developer? Jump in and help us evolve this prototype into a stable module!_
 
 <br>
