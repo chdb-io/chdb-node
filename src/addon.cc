@@ -1,11 +1,10 @@
 #include <napi.h>
-#include "libchdb.h"
+#include "chdb.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-char *Execute(char *query, char *format) {
-
+local_result* Execute(char *query, char *format) {
     char * argv[] = {(char *)"clickhouse", (char *)"--multiquery", (char *)"--output-format=CSV", (char *)"--query="};
     char dataFormat[100]; 
     char *localQuery;
@@ -15,18 +14,17 @@ char *Execute(char *query, char *format) {
 
     // Format
     snprintf(dataFormat, sizeof(dataFormat), "--format=%s", format);
-    argv[2]=strdup(dataFormat);
+    argv[2] = strdup(dataFormat);
 
     // Query - 10 characters + length of query
     localQuery = (char *) malloc(strlen(query)+10);
-    if(localQuery == NULL) {
-
+    if (localQuery == NULL) {
         printf("Out of memmory\n");
         return NULL;
     }
 
     sprintf(localQuery, "--query=%s", query);
-    argv[3]=strdup(localQuery);
+    argv[3] = strdup(localQuery);
     free(localQuery);
 
     // Main query and result
@@ -36,11 +34,10 @@ char *Execute(char *query, char *format) {
     free(argv[2]);
     free(argv[3]);
 
-    return result->buf;
+    return result;
 }
 
-char *ExecuteSession(char *query, char *format, char *path) {
-
+local_result* ExecuteSession(char *query, char *format, char *path) {
     char * argv[] = {(char *)"clickhouse", (char *)"--multiquery", (char *)"--output-format=CSV", (char *)"--query=", (char *)"--path=."};
     char dataFormat[100];
     char dataPath[100];
@@ -51,23 +48,22 @@ char *ExecuteSession(char *query, char *format, char *path) {
 
     // Format
     snprintf(dataFormat, sizeof(dataFormat), "--output-format=%s", format);
-    argv[2]=strdup(dataFormat);
+    argv[2] = strdup(dataFormat);
 
     // Query - 10 characters + length of query
     localQuery = (char *) malloc(strlen(query)+10);
-    if(localQuery == NULL) {
-
+    if (localQuery == NULL) {
         printf("Out of memmory\n");
         return NULL;
     }
 
     sprintf(localQuery, "--query=%s", query);
-    argv[3]=strdup(localQuery);
+    argv[3] = strdup(localQuery);
     free(localQuery);
 
     // Path
     snprintf(dataPath, sizeof(dataPath), "--path=%s", path);
-    argv[4]=strdup(dataPath);
+    argv[4] = strdup(dataPath);
 
     // Main query and result
     result = query_stable(argc, argv);
@@ -81,7 +77,7 @@ char *ExecuteSession(char *query, char *format, char *path) {
     if (result == NULL) {
       return NULL;
     } else {
-      return result->buf;
+      return result;
     }
 }
 
@@ -96,14 +92,14 @@ Napi::Value ExecuteWrapped(const Napi::CallbackInfo& info) {
     std::string query = info[0].As<Napi::String>();
     std::string format = info[1].As<Napi::String>();
 
-    char *result = Execute((char *)query.c_str(), (char *)format.c_str());
+    local_result *result = Execute((char *)query.c_str(), (char *)format.c_str());
     if (result == NULL) {
         Napi::TypeError::New(env, "Out of memory").ThrowAsJavaScriptException();
         return env.Null();
     }
 
-    Napi::String returnValue = Napi::String::New(env, result);
-    free(result);
+    Napi::Value returnValue = Napi::String::New(env, result->buf, result->len);
+    free_result(result);
     return returnValue;
 }
 
@@ -127,15 +123,15 @@ Napi::Value SessionWrapped(const Napi::CallbackInfo& info) {
       path = info[2].As<Napi::String>();
     }
 
-    char *result = ExecuteSession((char *)query.c_str(), (char *)format.c_str(), (char *)path.c_str());
+    local_result *result = ExecuteSession((char *)query.c_str(), (char *)format.c_str(), (char *)path.c_str());
     if (result == NULL) {
-        Napi::String returnValue = Napi::String::New(env, "");
+        Napi::Value returnValue = Napi::String::New(env, "");
         return returnValue;
         // return env.Null();
     }
 
-    Napi::String returnValue = Napi::String::New(env, result);
-    free(result);
+    Napi::Value returnValue = Napi::String::New(env, result->buf, result->len);
+    free_result(result);
     return returnValue;
 }
 
