@@ -1,14 +1,38 @@
-const chdb = require("node-gyp-build")(__dirname);
+const chdbNode = require('./build/Release/chdb_node.node');
+const { mkdtempSync, rmdirSync } = require('fs');
+const { join } = require('path');
+const os = require('os');
 
-function db(format, path) {
-  this.format = format || "JSONCompact";
-  this.path = path || ".";
-
-  // add properties to this
-  this.query = (query, format) => chdb.Execute(query, format || this.format);
-  this.session = (query, format, path) => chdb.Session(query, format || this.format, path || this.path);
-
-  return this;
+// Standalone exported query function
+function query(query, format = "CSV") {
+  if (!query) {
+    return "";
+  }
+  return chdbNode.Query(query, format);
 }
 
-module.exports = { chdb, db };
+// Session class with path handling
+class Session {
+  constructor(path = "") {
+    if (path === "") {
+      // Create a temporary directory
+      this.path = mkdtempSync(join(os.tmpdir(), 'tmp-chdb-node'));
+      this.isTemp = true;
+    } else {
+      this.path = path;
+      this.isTemp = false;
+    }
+  }
+
+  query(query, format = "CSV") {
+    if (!query) return "";
+    return chdbNode.QuerySession(query, format, this.path);
+  }
+
+  // Cleanup method to delete the temporary directory
+  cleanup() {
+    rmdirSync(this.path, { recursive: true });
+  }
+}
+
+module.exports = { query, Session };
