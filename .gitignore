@@ -4,3 +4,4 @@ build
 /user_defined
 .vscode/
 libchdb.so
+chdb.h

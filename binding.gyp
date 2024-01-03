@@ -10,9 +10,9 @@
         "<!@(node -p \"require('node-addon-api').include\")",
         "."
       ],
-      "libraries": [ "-L<(module_root_dir)/", "-lchdb" ],
-      # "cflags!": [ "-fno-exceptions" ],
-      # "cflags_cc!": [ "-fno-exceptions" ],
+      "libraries": [ "<(module_root_dir)/libchdb.so" ],
+      "cflags!": [ "-fno-exceptions" ],
+      "cflags_cc!": [ "-fno-exceptions" ],
       "defines": [ "NAPI_DISABLE_CPP_EXCEPTIONS" ]
     }
   ]

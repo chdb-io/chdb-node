@@ -31,10 +31,6 @@ jobs:
         registry-url: 'https://registry.npmjs.org'
     - name: Install dependencies
       run: npm install
-    - name: Build libchdb
-      run: npm run libchdb
-    - name: Build project
-      run: npm run build
     - name: Run tests
       run: npm run test
     - name: Publish to npm
