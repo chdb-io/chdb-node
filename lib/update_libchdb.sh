@@ -1,5 +1,12 @@
-
 #!/bin/bash
+
+# This script will download the latest libchdb release from GitHub and extract
+# the libchdb.so file to the current directory. This script is intended to be
+# used by the build process to ensure that the latest version of libchdb is
+# used.
+
+# Change directory to the script's directory
+cd "$(dirname "$0")"
 
 # Get the newest release version
 LATEST_RELEASE=$(curl --silent "https://api.github.com/repos/chdb-io/chdb/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
