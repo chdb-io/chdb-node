@@ -1,5 +1,6 @@
-const chdbNode = require('./build/Release/chdb_node.node');
-const { mkdtempSync, rmdirSync } = require('fs');
+const path = require('path');
+const chdbNode = require(path.join(__dirname, 'build', 'Release', 'chdb_node.node'));
+const { mkdtempSync, rmSync } = require('fs');
 const { join } = require('path');
 const os = require('os');
 
@@ -31,7 +32,7 @@ class Session {
 
   // Cleanup method to delete the temporary directory
   cleanup() {
-    rmdirSync(this.path, { recursive: true });
+    rmSync(this.path, { recursive: true }); // Replaced rmdirSync with rmSync
   }
 }
 
