@@ -1,6 +1,5 @@
 <img src="https://avatars.githubusercontent.com/u/132536224" width=130 />
 
-[![chDB-node](https://github.com/chdb-io/chdb-node/actions/workflows/chdb-node-test.yml/badge.svg)](https://github.com/chdb-io/chdb-node/actions/workflows/chdb-node-test.yml)
 [![npm version](https://badge.fury.io/js/chdb.svg)](https://badge.fury.io/js/chdb)
 
 # chdb-node
