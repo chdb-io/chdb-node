@@ -11,7 +11,8 @@
     "install": "npm run libchdb && npm run build",
     "test": "node example.js",
     "libchdb": "./update_libchdb.sh",
-    "build": "node-gyp configure build --verbose"
+    "fixloaderpath": "./fix_loader_path.sh",
+    "build": "node-gyp configure build --verbose && npm run fixloaderpath"
   },
   "author": {
     "name": "chdb",
