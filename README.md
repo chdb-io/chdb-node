@@ -15,7 +15,6 @@
 ```bash
 npm run libchdb
 npm install
-npm build
 npm run test
 ```
 
