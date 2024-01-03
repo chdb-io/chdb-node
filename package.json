@@ -11,7 +11,7 @@
     "install": "npm run libchdb && npm run build",
     "test": "node example.js",
     "libchdb": "./update_libchdb.sh",
-    "build": "node-gyp configure build"
+    "build": "node-gyp configure build --verbose"
   },
   "author": {
     "name": "chdb",
