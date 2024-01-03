@@ -10,7 +10,7 @@
   "scripts": {
     "install": "npm run libchdb && npm run build",
     "test": "node example.js",
-    "libchdb": "cd lib && ./update_libchdb.sh",
+    "libchdb": "./update_libchdb.sh",
     "build": "node-gyp configure build"
   },
   "author": {
