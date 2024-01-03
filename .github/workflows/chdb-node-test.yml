@@ -2,6 +2,7 @@ name: chDB-node
 
 on:
   pull_request:
+    branches: [ "main" ]
     paths-ignore:
       - '**/.md'
   push:
@@ -9,21 +10,31 @@ on:
     paths-ignore:
       - '**/.md'
 
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: [14.x, 16.x, 18.x]
     steps:
     - uses: actions/checkout@v3
-    - name: Fetch library
-      run: |
-          wget https://github.com/chdb-io/chdb/releases/latest/download/linux-x86_64-libchdb.tar.gz
-          tar -xzf linux-x86_64-libchdb.tar.gz
-          sudo mv libchdb.so /usr/lib/libchdb.so
-          sudo ldconfig
-    - uses: actions/setup-node@v3
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v3
       with:
-        node-version: 16
-    - run: npm run libchdb
-    - run: npm install
-    - run: npm run build
-    - run: npm test
+        node-version: ${{ matrix.node-version }}
+        registry-url: 'https://registry.npmjs.org'
+    - name: Install dependencies
+      run: npm install
+    - name: Build libchdb
+      run: npm run libchdb
+    - name: Build project
+      run: npm run build
+    - name: Run tests
+      run: npm run test
+    - name: Publish to npm
+      if: github.ref == 'refs/heads/main' && matrix.node-version == '14.x' && matrix.os == 'ubuntu-latest'
+      run: npm publish
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
