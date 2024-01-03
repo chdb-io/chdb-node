@@ -25,5 +25,17 @@
   "dependencies": {
     "node-addon-api": "^6.1.0",
     "node-gyp-build": "^4.6.0"
-  }
+  },
+  "keywords": [
+    "chdb",
+    "chdb.io",
+    "chdb-node",
+    "chdb bindings",
+    "chdb nodejs",
+    "chdb node",
+    "chdb bindings nodejs",
+    "chdb bindings node",
+    "ClickHouse",
+    "Embedded Database"
+  ]
 }
