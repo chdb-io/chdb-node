@@ -3,12 +3,15 @@
   "version": "1.1.0",
   "description": "chDB bindings for nodejs",
   "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chdb-io/chdb-node.git"
+  },
   "scripts": {
     "install": "npm run libchdb && npm run build",
     "test": "node example.js",
     "libchdb": "cd lib && ./update_libchdb.sh",
-    "build": "node-gyp configure build",
-    "postinstall": "npm run libchdb && npm run build"
+    "build": "node-gyp configure build"
   },
   "author": {
     "name": "chdb",
@@ -16,8 +19,7 @@
   },
   "license": "Apache-2.0",
   "devDependencies": {
-    "node-gyp": "^9.3.1",
-    "prebuild-install": "^6.0.0"
+    "node-gyp": "^9.3.1"
   },
   "dependencies": {
     "node-addon-api": "^6.1.0",
