@@ -17,18 +17,32 @@ void construct_arg(char *dest, const char *prefix, const char *value,
 }
 
 // Generalized query function
-char *general_query(int argc, char *args[]) {
-  struct local_result *result = query_stable(argc, args);
+char *general_query(int argc, char *args[], char **error_message) {
+  struct local_result_v2 *result = query_stable_v2(argc, args);
 
   if (result == NULL) {
     return NULL;
+  }
+
+  if (result->error_message != NULL) {
+    if (error_message != NULL) {
+      *error_message = strdup(result->error_message);
+    }
+    free_result_v2(result);
+    return NULL;
   } else {
-    return result->buf;
+    if (result->buf == NULL) {
+      free_result_v2(result);
+      return NULL;
+    }
+    char *output = strdup(result->buf); // copy the result buffer
+    free_result_v2(result);
+    return output;
   }
 }
 
 // Query function without session
-char *Query(const char *query, const char *format) {
+char *Query(const char *query, const char *format, char **error_message) {
   char dataFormat[MAX_FORMAT_LENGTH];
   char *dataQuery;
   char *args[MAX_ARG_COUNT] = {"clickhouse", "--multiquery", NULL, NULL};
@@ -45,14 +59,14 @@ char *Query(const char *query, const char *format) {
                 strlen(query) + strlen("--query=") + 1);
   args[3] = dataQuery;
 
-  char *result = general_query(argc, args);
+  char *result = general_query(argc, args, error_message);
   free(dataQuery);
   return result;
 }
 
 // QuerySession function will save the session to the path
-// queries with same path will use the same session
-char *QuerySession(const char *query, const char *format, const char *path) {
+char *QuerySession(const char *query, const char *format, const char *path,
+                   char **error_message) {
   char dataFormat[MAX_FORMAT_LENGTH];
   char dataPath[MAX_PATH_LENGTH];
   char *dataQuery;
@@ -73,7 +87,7 @@ char *QuerySession(const char *query, const char *format, const char *path) {
   construct_arg(dataPath, "--path=", path, MAX_PATH_LENGTH);
   args[4] = dataPath;
 
-  char *result = general_query(argc, args);
+  char *result = general_query(argc, args, error_message);
   free(dataQuery);
   return result;
 }
@@ -91,8 +105,17 @@ Napi::String QueryWrapper(const Napi::CallbackInfo &info) {
   std::string query = info[0].As<Napi::String>().Utf8Value();
   std::string format = info[1].As<Napi::String>().Utf8Value();
 
+  char *error_message = nullptr;
   // Call the native function
-  char *result = Query(query.c_str(), format.c_str());
+  char *result = Query(query.c_str(), format.c_str(), &error_message);
+
+  if (result == NULL) {
+    if (error_message != NULL) {
+      Napi::Error::New(env, error_message).ThrowAsJavaScriptException();
+      free(error_message);
+    }
+    return Napi::String::New(env, "");
+  }
 
   // Return the result
   return Napi::String::New(env, result);
@@ -113,13 +136,16 @@ Napi::String QuerySessionWrapper(const Napi::CallbackInfo &info) {
   std::string format = info[1].As<Napi::String>().Utf8Value();
   std::string path = info[2].As<Napi::String>().Utf8Value();
 
-  // std::cerr << query << std::endl;
-  // std::cerr << format << std::endl;
-  // std::cerr << path << std::endl;
+  char *error_message = nullptr;
   // Call the native function
-  char *result = QuerySession(query.c_str(), format.c_str(), path.c_str());
+  char *result =
+      QuerySession(query.c_str(), format.c_str(), path.c_str(), &error_message);
+
   if (result == NULL) {
-    // std::cerr << "result is null" << std::endl;
+    if (error_message != NULL) {
+      Napi::Error::New(env, error_message).ThrowAsJavaScriptException();
+      free(error_message);
+    }
     return Napi::String::New(env, "");
   }
 

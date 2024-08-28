@@ -9,8 +9,8 @@
 cd "$(dirname "$0")"
 
 # Get the newest release version
-# LATEST_RELEASE=$(curl --silent "https://api.github.com/repos/chdb-io/chdb/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-LATEST_RELEASE=v2.0.0b0
+LATEST_RELEASE=$(curl --silent "https://api.github.com/repos/chdb-io/chdb/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+# LATEST_RELEASE=v2.0.0b0
 
 # Download the correct version based on the platform
 case "$(uname -s)" in
