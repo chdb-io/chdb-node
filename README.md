@@ -35,6 +35,14 @@ session.query("USE testdb; INSERT INTO testtable VALUES (1), (2), (3);")
 ret = session.query("SELECT * FROM testtable;")
 console.log("Session Query Result:", ret);
 
+// If an error occurs, it will be thrown
+try {
+    session.query("SELECT * FROM non_existent_table;", "CSV");
+}
+catch (e) {
+    console.log("Error:", e.message);
+}
+
 // Clean up the session
 session.cleanup();
 
