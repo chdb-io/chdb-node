@@ -10,8 +10,8 @@
   "scripts": {
     "install": "npm run libchdb && npm run build",
     "test": "mocha --timeout 15000",
-    "libchdb": "curl -sL https://lib.chdb.io | bash && cp -a /usr/local/lib/libchdb.so ./ && cp -a /usr/local/include/chdb.h ./",
-    "fixloaderpath": "./fix_loader_path.sh",
+    "libchdb": "bash ./update_libchdb.sh",
+    "fixloaderpath": "bash ./fix_loader_path.sh",
     "build": "node-gyp configure build --verbose && npm run fixloaderpath"
   },
   "author": {
