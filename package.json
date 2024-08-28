@@ -1,6 +1,6 @@
 {
   "name": "chdb",
-  "version": "1.1.4",
+  "version": "1.2.0",
   "description": "chDB bindings for nodejs",
   "main": "index.js",
   "repository": {
@@ -9,17 +9,19 @@
   },
   "scripts": {
     "install": "npm run libchdb && npm run build",
-    "test": "node example.js",
-    "libchdb": "./update_libchdb.sh",
+    "test": "mocha --timeout 15000",
+    "libchdb": "curl -sL https://lib.chdb.io | bash && cp -a /usr/local/lib/libchdb.so ./ && cp -a /usr/local/include/chdb.h ./",
     "fixloaderpath": "./fix_loader_path.sh",
     "build": "node-gyp configure build --verbose && npm run fixloaderpath"
   },
   "author": {
     "name": "chdb",
-    "email": "me@chdb.io"
+    "email": "auxten@clickhouse.com"
   },
   "license": "Apache-2.0",
   "devDependencies": {
+    "chai": "^4.5.0",
+    "mocha": "^10.7.3",
     "node-gyp": "^9.3.1"
   },
   "dependencies": {

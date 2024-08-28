@@ -4,7 +4,7 @@
 npm install
 
 # install dependencies
-./update_libchdb.sh
+curl -sL https://lib.chdb.io | bash
 
 # build the dynamic library
 node-gyp build
