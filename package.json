@@ -10,7 +10,7 @@
   "scripts": {
     "install": "npm run libchdb && npm run build",
     "test": "mocha",
-    "libchdb": "./update_libchdb.sh",
+    "libchdb": "curl -sL https://lib.chdb.io | bash",
     "fixloaderpath": "./fix_loader_path.sh",
     "build": "node-gyp configure build --verbose && npm run fixloaderpath"
   },
