@@ -12,6 +12,63 @@ function query(query, format = "CSV") {
   return chdbNode.Query(query, format);
 }
 
+// Standalone exported query function
+function queryBuffer(query, format = "CSV") {
+  if (!query) {
+    return "";
+  }
+  return chdbNode.QueryBuffer(query, format);
+}
+
+class LocalChDB {
+  constructor(path = ":memory:") {
+    let args = []
+    if (path === ":memory:") {
+      this.in_memory = true;
+      this.isTemp = false;
+    } else {
+      this.in_memory = false;
+      if (path === "") {
+        // Create a temporary directory
+        this.path = mkdtempSync(join(os.tmpdir(), 'tmp-chdb-node'));
+        this.isTemp = true;
+      } else {
+        this.path = path;
+        this.isTemp = false;
+      }
+      args.push(["--path", this.path]);
+    }
+    this.conn = chdbNode.connectChdb(args);
+    if (this.in_memory) {
+      this.query("CREATE DATABASE IF NOT EXISTS default ENGINE = Memory; USE default; SHOW DATABASES;");
+    } else if (this.isTemp) {
+      this.query("CREATE DATABASE IF NOT EXISTS default ENGINE = Atomic; USE default; SHOW DATABASES;");
+    }
+  }
+
+  query(query, format = "CSV") {
+
+    if (!query) return "";
+    let res = chdbNode.queryConn(this.conn, query, format);
+    if (res.getErrorMessage()) {
+      throw new Error(res.getErrorMessage());
+    }
+    return res;
+  }
+
+  cleanup() {
+    console.log("cleanup: ", this.isTemp, this.in_memory);
+
+    if (this.isTemp) {
+      console.log("removing: ", this.path);
+      rmSync(this.path, { recursive: true }); // Replaced rmdirSync with rmSync
+    }
+    chdbNode.closeConn(this.conn);
+  }
+
+
+}
+
 // Session class with path handling
 class Session {
   constructor(path = "") {
@@ -30,10 +87,17 @@ class Session {
     return chdbNode.QuerySession(query, format, this.path);
   }
 
+  queryBuffer(query, format = "CSV") {
+    if (!query) return "";
+    return chdbNode.QuerySessionBuffer(query, format, this.path);
+  }
+
   // Cleanup method to delete the temporary directory
   cleanup() {
-    rmSync(this.path, { recursive: true }); // Replaced rmdirSync with rmSync
+    if (this.isTemp) {
+      rmSync(this.path, { recursive: true }); // Replaced rmdirSync with rmSync
+    }
   }
 }
 
-module.exports = { query, Session };
+module.exports = { query, queryBuffer, Session, LocalChDB };
