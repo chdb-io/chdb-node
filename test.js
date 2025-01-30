@@ -1,5 +1,5 @@
 const { expect } = require('chai');
-const { query, Session, LocalChDB } = require(".");
+const { query, Session, Connect } = require(".");
 
 describe('chDB Queries', function () {
 
@@ -58,12 +58,12 @@ describe('chDB Queries', function () {
     });
 
 
-    describe('LocalChDB Queries in memory', function () {
+    describe('Connect Queries in memory', function () {
         let session;
 
         before(function () {
             // Create a new session instance before running the tests
-            session = new LocalChDB();
+            session = new Connect();
         });
 
         after(function () {

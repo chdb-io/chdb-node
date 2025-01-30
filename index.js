@@ -12,15 +12,7 @@ function query(query, format = "CSV") {
   return chdbNode.Query(query, format);
 }
 
-// Standalone exported query function
-function queryBuffer(query, format = "CSV") {
-  if (!query) {
-    return "";
-  }
-  return chdbNode.QueryBuffer(query, format);
-}
-
-class LocalChDB {
+class Connect {
   constructor(path = ":memory:") {
     let args = []
     if (path === ":memory:") {
@@ -56,6 +48,11 @@ class LocalChDB {
     return res;
   }
 
+  insert_into(query, values, format = "CSV") {
+    let q = Buffer.concat([Buffer.from(query), values])
+    return this.query(q, format)
+  }
+
   cleanup() {
     console.log("cleanup: ", this.isTemp, this.in_memory);
 
@@ -87,11 +84,6 @@ class Session {
     return chdbNode.QuerySession(query, format, this.path);
   }
 
-  queryBuffer(query, format = "CSV") {
-    if (!query) return "";
-    return chdbNode.QuerySessionBuffer(query, format, this.path);
-  }
-
   // Cleanup method to delete the temporary directory
   cleanup() {
     if (this.isTemp) {
@@ -100,4 +92,4 @@ class Session {
   }
 }
 
-module.exports = { query, queryBuffer, Session, LocalChDB };
+module.exports = { query, Session, Connect };
