@@ -2,7 +2,11 @@
   "targets": [
     {
       "target_name": "chdb_node",
-      "sources": [ "lib/chdb_node.cpp" ],
+      "sources": [ "lib/chdb_node.cpp", 
+                   "lib/chdb_connect_api.cpp",
+                   "lib/LocalResultV2Wrapper.cpp",
+                   "lib/module.cpp"
+                   ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
         "."

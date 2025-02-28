@@ -1,10 +1,15 @@
-#include "chdb.h"
 #include "chdb_node.h"
+
+#include <napi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #include <iostream>
-#include <napi.h>
+
+#include "LocalResultV2Wrapper.h"
+#include "chdb.h"
+#include "chdb_connect_api.h"
 
 #define MAX_FORMAT_LENGTH 64
 #define MAX_PATH_LENGTH 4096
@@ -64,34 +69,6 @@ char *Query(const char *query, const char *format, char **error_message) {
   return result;
 }
 
-// QuerySession function will save the session to the path
-char *QuerySession(const char *query, const char *format, const char *path,
-                   char **error_message) {
-  char dataFormat[MAX_FORMAT_LENGTH];
-  char dataPath[MAX_PATH_LENGTH];
-  char *dataQuery;
-  char *args[MAX_ARG_COUNT] = {"clickhouse", "--multiquery", NULL, NULL, NULL};
-  int argc = 5;
-
-  construct_arg(dataFormat, "--output-format=", format, MAX_FORMAT_LENGTH);
-  args[2] = dataFormat;
-
-  dataQuery = (char *)malloc(strlen(query) + strlen("--query=") + 1);
-  if (dataQuery == NULL) {
-    return NULL;
-  }
-  construct_arg(dataQuery, "--query=", query,
-                strlen(query) + strlen("--query=") + 1);
-  args[3] = dataQuery;
-
-  construct_arg(dataPath, "--path=", path, MAX_PATH_LENGTH);
-  args[4] = dataPath;
-
-  char *result = general_query(argc, args, error_message);
-  free(dataQuery);
-  return result;
-}
-
 Napi::String QueryWrapper(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
@@ -119,6 +96,34 @@ Napi::String QueryWrapper(const Napi::CallbackInfo &info) {
 
   // Return the result
   return Napi::String::New(env, result);
+}
+
+// QuerySession function will save the session to the path
+char *QuerySession(const char *query, const char *format, const char *path,
+                   char **error_message) {
+  char dataFormat[MAX_FORMAT_LENGTH];
+  char dataPath[MAX_PATH_LENGTH];
+  char *dataQuery;
+  char *args[MAX_ARG_COUNT] = {"clickhouse", "--multiquery", NULL, NULL, NULL};
+  int argc = 5;
+
+  construct_arg(dataFormat, "--output-format=", format, MAX_FORMAT_LENGTH);
+  args[2] = dataFormat;
+
+  dataQuery = (char *)malloc(strlen(query) + strlen("--query=") + 1);
+  if (dataQuery == NULL) {
+    return NULL;
+  }
+  construct_arg(dataQuery, "--query=", query,
+                strlen(query) + strlen("--query=") + 1);
+  args[3] = dataQuery;
+
+  construct_arg(dataPath, "--path=", path, MAX_PATH_LENGTH);
+  args[4] = dataPath;
+
+  char *result = general_query(argc, args, error_message);
+  free(dataQuery);
+  return result;
 }
 
 Napi::String QuerySessionWrapper(const Napi::CallbackInfo &info) {
@@ -152,12 +157,3 @@ Napi::String QuerySessionWrapper(const Napi::CallbackInfo &info) {
   // Return the result
   return Napi::String::New(env, result);
 }
-
-Napi::Object Init(Napi::Env env, Napi::Object exports) {
-  // Export the functions
-  exports.Set("Query", Napi::Function::New(env, QueryWrapper));
-  exports.Set("QuerySession", Napi::Function::New(env, QuerySessionWrapper));
-  return exports;
-}
-
-NODE_API_MODULE(NODE_GYP_MODULE_NAME, Init)
