@@ -1,5 +1,5 @@
 const { expect } = require('chai');
-const { query, Session } = require(".");
+const { query, Session, Connect } = require(".");
 
 describe('chDB Queries', function () {
 
@@ -21,7 +21,7 @@ describe('chDB Queries', function () {
 
         before(function () {
             // Create a new session instance before running the tests
-            session = new Session("./chdb-node-tmp");
+            session = new Session("");
         });
 
         after(function () {
@@ -57,5 +57,46 @@ describe('chDB Queries', function () {
         });
     });
 
+
+    describe('Connect Queries in memory', function () {
+        let session;
+
+        before(function () {
+            // Create a new session instance before running the tests
+            session = new Connect();
+        });
+
+        after(function () {
+            // Clean up the session after all tests are done
+            session.cleanup();
+        });
+
+        it('should return a simple query result from session', function () {
+            const ret = session.query("SELECT 123", "CSV");
+            console.log("Session Query Result:", ret);
+
+            expect(ret.getBuffer()).to.be.instanceOf(Buffer);
+            expect(ret.getBuffer().toString()).to.include('123');
+        });
+
+        it('should create database and table, then insert and query data', function () {
+            session.query("CREATE TABLE IF NOT EXISTS testtable (id UInt32) ENGINE = Memory");    
+            session.query("INSERT INTO testtable VALUES (1), (2), (3);");
+            
+            const ret = session.query("SELECT * FROM testtable;", "CSV");
+            console.log("Session Query Result:", ret);
+            expect(ret.getBuffer()).to.be.instanceOf(Buffer);
+            let retString = ret.getBuffer().toString();
+            expect(retString).to.include('1');
+            expect(retString).to.include('2');
+            expect(retString).to.include('3');
+        });
+
+        it('should throw an error when querying a non-existent table', function () {
+            expect(() => {
+                session.query("SELECT * FROM non_existent_table;", "CSV");
+            }).to.throw(Error, /Unknown table expression identifier/);
+        });
+    });
 });
 
