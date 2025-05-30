@@ -1,5 +1,5 @@
 const { expect } = require('chai');
-const { query, Session } = require(".");
+const { query, queryBind, Session } = require(".");
 
 describe('chDB Queries', function () {
 
@@ -14,6 +14,42 @@ describe('chDB Queries', function () {
         expect(() => {
             query("SELECT * FROM non_existent_table;", "CSV");
         }).to.throw(Error, /Unknown table expression identifier/);
+    });
+
+    it('should return version, greeting message, and chDB() using bind query', () => {
+          const ret = queryBind("SELECT version(), 'Hello chDB', chDB()", {}, "CSV");
+          console.log("Bind Query Result:", ret);
+          expect(ret).to.be.a('string');
+          expect(ret).to.include('Hello chDB');
+    });
+
+    it('binds a numeric parameter (stand-alone query)', () => {
+         const out = queryBind('SELECT {id:UInt32}', { id: 42 }, 'CSV').trim();
+         console.log(out)
+         expect(out).to.equal('42');
+    });
+
+    it('binds a string parameter (stand-alone query)', () => {
+        const out = queryBind(
+          `SELECT concat('Hello ', {name:String})`,
+          { name: 'Alice' },
+          'CSV'
+         ).trim();
+        console.log(out)
+        expect(out).to.equal('"Hello Alice"');
+    });
+
+    it('binds Date and Map correctly', () => {
+        const res = queryBind("SELECT {t: DateTime} AS t, {m: Map(String, Array(UInt8))} AS m",
+          {
+            t: new Date('2025-05-29T12:00:00Z'),
+            m: { "abc": Uint8Array.from([1, 2, 3]) }
+          },
+          'JSONEachRow'
+        );
+        const row = JSON.parse(res.trim());
+        expect(row.t).to.equal('2025-05-29 12:00:00');
+        expect(row.m).to.deep.equal({ abc: [1, 2, 3] });
     });
 
     describe('Session Queries', function () {
@@ -55,6 +91,14 @@ describe('chDB Queries', function () {
                 session.query("SELECT * FROM non_existent_table;", "CSV");
             }).to.throw(Error, /Unknown table expression identifier/);
         });
+
+        it('should return result of the query made using bind parameters', () => {
+          const ret = session.queryBind("SELECT * from testtable where id > {id: UInt32}", { id: 2}, "CSV");
+          console.log("Bind Session result:", ret);
+          expect(ret).to.not.include('1');
+          expect(ret).to.not.include('2');
+          expect(ret).to.include('3');
+        })
     });
 
 });

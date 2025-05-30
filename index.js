@@ -12,6 +12,13 @@ function query(query, format = "CSV") {
   return chdbNode.Query(query, format);
 }
 
+function queryBind(query, args = {}, format = "CSV") {
+  if(!query) {
+    return "";
+  }
+  return chdbNode.QueryBindSession(query, args, format);
+}
+
 // Session class with path handling
 class Session {
   constructor(path = "") {
@@ -30,10 +37,15 @@ class Session {
     return chdbNode.QuerySession(query, format, this.path);
   }
 
+  queryBind(query, args = {}, format = "CSV") {
+    if(!query) return "";
+    return chdbNode.QueryBindSession(query, args, format, this.path)
+  }
+
   // Cleanup method to delete the temporary directory
   cleanup() {
     rmSync(this.path, { recursive: true }); // Replaced rmdirSync with rmSync
   }
 }
 
-module.exports = { query, Session };
+module.exports = { query, queryBind, Session };
