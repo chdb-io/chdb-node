@@ -10,6 +10,76 @@
 #define MAX_PATH_LENGTH 4096
 #define MAX_ARG_COUNT 6
 
+
+static std::string toCHLiteral(const Napi::Env& env, const Napi::Value& v);
+
+
+static std::string chEscape(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size() + 4);
+    out += '\'';
+    for (char c : s) {
+        if (c == '\'') out += "\\'";
+        else out += c;
+    }
+    out += '\'';
+    return out;
+}
+
+static std::string toCHLiteral(const Napi::Env& env, const Napi::Value& v)
+{
+    if (v.IsNumber() || v.IsBoolean() || v.IsString())
+        return v.ToString().Utf8Value();                 
+
+    if (v.IsDate()) {                                    
+        double ms = v.As<Napi::Date>().ValueOf();
+        std::time_t t = static_cast<std::time_t>(ms / 1000);
+        std::tm tm{};
+        gmtime_r(&t, &tm);
+        char buf[32];
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+        return std::string(&buf[0], sizeof(buf));
+    }
+
+    if (v.IsTypedArray()) {
+        Napi::Object arr = env.Global().Get("Array").As<Napi::Object>();
+        Napi::Function from = arr.Get("from").As<Napi::Function>();
+        return toCHLiteral(env, from.Call(arr, { v }));
+    }
+
+    if (v.IsArray()) {
+        Napi::Array a = v.As<Napi::Array>();
+        size_t n = a.Length();
+        std::string out = "[";
+        for (size_t i = 0; i < n; ++i) {
+            if (i) out += ",";
+            out += toCHLiteral(env, a.Get(i));
+        }
+        out += "]";
+        return out;
+    }
+
+    if (v.IsObject()) {
+        Napi::Object o = v.As<Napi::Object>();
+        Napi::Array keys = o.GetPropertyNames();
+        size_t n = keys.Length();
+        std::string out = "{";
+        for (size_t i = 0; i < n; ++i) {
+            if (i) out += ",";
+            std::string k = keys.Get(i).ToString().Utf8Value();
+            out += chEscape(k);               // escape the map key with single-qoutes for click house query to work i.e 'key' not "key"
+            out += ":";
+            out += toCHLiteral(env, o.Get(keys.Get(i)));
+        }
+        out += "}";
+        return out;
+    }
+
+    /* Fallback – stringify & quote */
+    return chEscape(v.ToString().Utf8Value());
+}
+
 // Utility function to construct argument string
 void construct_arg(char *dest, const char *prefix, const char *value,
                    size_t dest_size) {
@@ -92,21 +162,46 @@ char *QuerySession(const char *query, const char *format, const char *path,
   return result;
 }
 
+char *QueryBindSession(const char *query, const char *format, const char *path, 
+    const std::vector<std::string>& params, char **error_message) {
+
+   std::vector<std::string> store;
+    store.reserve(4 + params.size() + (path && path[0] ? 1 : 0));
+
+    store.emplace_back("clickhouse");
+    store.emplace_back("--multiquery");
+    store.emplace_back(std::string("--output-format=") + format);
+    store.emplace_back(std::string("--query=") + query);
+
+    for (const auto& p : params) store.emplace_back(p);
+    if (path && path[0])         store.emplace_back(std::string("--path=") + path);
+
+    std::vector<char*> argv;
+    argv.reserve(store.size());
+    for (auto& s : store)
+        argv.push_back(const_cast<char*>(s.c_str())); 
+
+    #ifdef CHDB_DEBUG
+    std::cerr << "=== chdb argv (" << argv.size() << ") ===\n";
+    for (char* a : argv) std::cerr << a << '\n';
+    #endif
+
+    return query_stable_v2(static_cast<int>(argv.size()), argv.data())->buf;
+}
+
 Napi::String QueryWrapper(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
-  // Check argument types and count
   if (info.Length() < 2 || !info[0].IsString() || !info[1].IsString()) {
     Napi::TypeError::New(env, "String expected").ThrowAsJavaScriptException();
     return Napi::String::New(env, "");
   }
 
-  // Get the arguments
   std::string query = info[0].As<Napi::String>().Utf8Value();
   std::string format = info[1].As<Napi::String>().Utf8Value();
 
   char *error_message = nullptr;
-  // Call the native function
+
   char *result = Query(query.c_str(), format.c_str(), &error_message);
 
   if (result == NULL) {
@@ -117,7 +212,6 @@ Napi::String QueryWrapper(const Napi::CallbackInfo &info) {
     return Napi::String::New(env, "");
   }
 
-  // Return the result
   return Napi::String::New(env, result);
 }
 
@@ -153,10 +247,55 @@ Napi::String QuerySessionWrapper(const Napi::CallbackInfo &info) {
   return Napi::String::New(env, result);
 }
 
+static std::string jsToParam(const Napi::Env& env, const Napi::Value& v) {
+    return toCHLiteral(env, v);
+}
+
+Napi::String QueryBindSessionWrapper(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsObject())
+        Napi::TypeError::New(env,"Usage: sql, params, [format]").ThrowAsJavaScriptException();
+
+    std::string sql    = info[0].As<Napi::String>();
+    Napi::Object obj   = info[1].As<Napi::Object>();
+    std::string format = (info.Length() > 2 && info[2].IsString())
+                           ? info[2].As<Napi::String>() : std::string("CSV");
+    std::string path = (info.Length() > 3 && info[3].IsString()) 
+                          ? info[3].As<Napi::String>() : std::string("");
+
+    // Build param vector
+    std::vector<std::string> cliParams;
+    Napi::Array keys = obj.GetPropertyNames();
+    int len = keys.Length();
+    for (int i = 0; i < len; i++) {
+        Napi::Value k = keys.Get(i);
+        if(!k.IsString()) continue;
+
+        std::string key = k.As<Napi::String>();
+        std::string val = jsToParam(env, obj.Get(k));
+        cliParams.emplace_back("--param_" + key + "=" + val);
+    }
+
+    #ifdef CHDB_DEBUG
+    std::cerr << "=== cliParams ===\n";
+    for (const auto& s : cliParams)
+        std::cerr << s << '\n';
+    #endif
+
+    char* err = nullptr;
+    char* out = QueryBindSession(sql.c_str(), format.c_str(), path.c_str(), cliParams, &err);
+    if (!out) {
+        Napi::Error::New(env, err ? err : "unknown error").ThrowAsJavaScriptException();
+        return Napi::String::New(env,"");
+    }
+    return Napi::String::New(env, out);
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   // Export the functions
   exports.Set("Query", Napi::Function::New(env, QueryWrapper));
   exports.Set("QuerySession", Napi::Function::New(env, QuerySessionWrapper));
+  exports.Set("QueryBindSession", Napi::Function::New(env, QueryBindSessionWrapper));
   return exports;
 }
 
