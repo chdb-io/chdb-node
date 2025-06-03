@@ -1,6 +1,6 @@
 {
   "name": "chdb",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "chDB bindings for nodejs",
   "main": "index.js",
   "repository": {
