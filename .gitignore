@@ -5,3 +5,4 @@ build
 .vscode/
 libchdb.so
 chdb.h
+chdb.hpp

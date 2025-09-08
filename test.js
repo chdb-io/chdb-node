@@ -78,7 +78,7 @@ describe('chDB Queries', function () {
 
             session.query("USE testdb; INSERT INTO testtable VALUES (1), (2), (3);");
 
-            const ret = session.query("SELECT * FROM testtable;", "CSV");
+            const ret = session.query("SELECT * FROM testdb.testtable;", "CSV");
             console.log("Session Query Result:", ret);
             expect(ret).to.be.a('string');
             expect(ret).to.include('1');
@@ -93,7 +93,7 @@ describe('chDB Queries', function () {
         });
 
         it('should return result of the query made using bind parameters', () => {
-          const ret = session.queryBind("SELECT * from testtable where id > {id: UInt32}", { id: 2}, "CSV");
+          const ret = session.queryBind("SELECT * from testdb.testtable where id > {id: UInt32}", { id: 2}, "CSV");
           console.log("Bind Session result:", ret);
           expect(ret).to.not.include('1');
           expect(ret).to.not.include('2');
