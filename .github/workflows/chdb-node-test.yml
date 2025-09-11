@@ -17,7 +17,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        node-version: [16.x, 18.x]
+        node-version: [18.x, 20.x, 22.x]
     steps:
     - name: Use Python 3.11
       uses: actions/setup-python@v2
@@ -34,7 +34,7 @@ jobs:
     - name: Run tests
       run: npm run test
     - name: Publish to npm
-      if: github.ref == 'refs/heads/main' && matrix.node-version == '16.x' && matrix.os == 'ubuntu-latest'
+      if: github.ref == 'refs/heads/main' && matrix.node-version == '18.x' && matrix.os == 'ubuntu-latest'
       run: npm publish
       env:
         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
