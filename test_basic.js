@@ -56,8 +56,16 @@ describe('chDB Queries', function () {
         let session;
 
         before(function () {
-            // Create a new session instance before running the tests
-            session = new Session("./chdb-node-tmp");
+            // Delete existing directory and create a new session instance
+            const fs = require('fs');
+            const path = require('path');
+            const tmpDir = "./chdb-node-tmp";
+
+            if (fs.existsSync(tmpDir)) {
+                fs.rmSync(tmpDir, { recursive: true, force: true });
+            }
+
+            session = new Session(tmpDir);
         });
 
         after(function () {
@@ -92,12 +100,10 @@ describe('chDB Queries', function () {
             }).to.throw(Error, /Unknown table expression identifier/);
         });
 
-        it('should return result of the query made using bind parameters', () => {
-          const ret = session.queryBind("SELECT * from testdb.testtable where id > {id: UInt32}", { id: 2}, "CSV");
-          console.log("Bind Session result:", ret);
-          expect(ret).to.not.include('1');
-          expect(ret).to.not.include('2');
-          expect(ret).to.include('3');
+        it('should throw an error when using queryBind with session', () => {
+          expect(() => {
+            session.queryBind("SELECT * from testdb.testtable where id > {id: UInt32}", { id: 2}, "CSV");
+          }).to.throw(Error, /QueryBind is not supported with connection-based sessions. Please use the standalone queryBind function instead./);
         })
     });
 

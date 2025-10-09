@@ -19,7 +19,7 @@ function queryBind(query, args = {}, format = "CSV") {
   return chdbNode.QueryBindSession(query, args, format);
 }
 
-// Session class with path handling
+// Session class with connection-based path handling
 class Session {
   constructor(path = "") {
     if (path === "") {
@@ -30,21 +30,38 @@ class Session {
       this.path = path;
       this.isTemp = false;
     }
+
+    // Create a connection for this session
+    this.connection = chdbNode.CreateConnection(this.path);
+    if (!this.connection) {
+      throw new Error("Failed to create connection");
+    }
   }
 
   query(query, format = "CSV") {
     if (!query) return "";
-    return chdbNode.QuerySession(query, format, this.path);
+    if (!this.connection) {
+      throw new Error("No active connection available");
+    }
+    return chdbNode.QueryWithConnection(this.connection, query, format);
   }
 
   queryBind(query, args = {}, format = "CSV") {
-    if(!query) return "";
-    return chdbNode.QueryBindSession(query, args, format, this.path)
+    throw new Error("QueryBind is not supported with connection-based sessions. Please use the standalone queryBind function instead.");
   }
 
-  // Cleanup method to delete the temporary directory
+  // Cleanup method to close connection and delete directory if temp
   cleanup() {
-    rmSync(this.path, { recursive: true }); // Replaced rmdirSync with rmSync
+    // Close the connection if it exists
+    if (this.connection) {
+        chdbNode.CloseConnection(this.connection);
+        this.connection = null;
+    }
+
+    // Only delete directory if it's temporary
+    if (this.isTemp) {
+      rmSync(this.path, { recursive: true });
+    }
   }
 }
 

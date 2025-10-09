@@ -9,7 +9,7 @@
   },
   "scripts": {
     "install": "npm run libchdb && npm run build",
-    "test": "mocha --timeout 15000",
+    "test": "mocha test_basic.js test_connection.js --timeout 15000",
     "libchdb": "bash ./update_libchdb.sh",
     "fixloaderpath": "bash ./fix_loader_path.sh",
     "build": "node-gyp configure build --verbose && npm run fixloaderpath"
