@@ -109,4 +109,67 @@ describe('chDB Connection Tests', function () {
         });
     });
 
+    describe('Session without Path (In-Memory)', function () {
+        let session;
+
+        it('should create session successfully without path', function () {
+            session = new Session();
+            expect(session.path).to.not.be.null;
+            expect(session.path).to.not.be.undefined;
+            expect(session.connection).to.not.be.null;
+            expect(session.connection).to.not.be.undefined;
+            console.log("✓ In-memory session created successfully");
+            console.log("✓ Connection:", session.connection);
+        });
+
+        it('should execute simple query in memory session', function () {
+            const result = session.query("SELECT 1 as test_col", "CSV");
+            console.log("Query result:", result.trim());
+            expect(result).to.be.a('string');
+            expect(result.trim()).to.equal('1');
+        });
+
+        it('should create table and insert data in memory session', function () {
+            expect(() => {
+                session.query("CREATE TABLE memory_test (id UInt32, name String) ENGINE = Memory");
+                session.query("INSERT INTO memory_test VALUES (1, 'MemoryAlice'), (2, 'MemoryBob')");
+            }).to.not.throw();
+            console.log("✓ Memory table created and data inserted successfully");
+        });
+
+        it('should query data from memory table', function () {
+            const result = session.query("SELECT * FROM memory_test ORDER BY id", "CSV");
+            console.log("Memory query result:", result.trim());
+            expect(result).to.be.a('string');
+            expect(result).to.include('MemoryAlice');
+            expect(result).to.include('MemoryBob');
+            expect(result).to.include('1');
+            expect(result).to.include('2');
+        });
+
+        it('should cleanup session and verify data is not accessible in new session', function () {
+            // Cleanup the current session
+            session.cleanup();
+            console.log("✓ Memory session cleaned up");
+
+            // Create a new session without path
+            session = new Session();
+            console.log("✓ New memory session created");
+
+            // Try to query the previous table - should fail or return empty
+            expect(() => {
+                const result = session.query("SELECT * FROM memory_test", "CSV");
+            }).to.throw(); // Expected to throw error since table shouldn't exist
+
+            console.log("✓ Data correctly cleaned up - table not accessible in new session");
+        });
+
+        after(function () {
+            // Clean up the session after all tests are done
+            if (session) {
+                session.cleanup();
+            }
+        });
+    });
+
 });
