@@ -88,6 +88,25 @@ describe('chDB Connection Tests', function () {
             expect(result3.trim()).to.include('Alice');
             console.log("✓ Connection persistence test passed");
         });
+
+        it('should persist data after session cleanup and reopen', function () {
+            session.cleanup();
+
+            // Create a new session with the same path
+            session = new Session("./test-connection-tmp");
+            session.query("USE test_conn_db")
+
+            // Query the data to see if it persists
+            const result = session.query("SELECT * FROM test_table ORDER BY id", "CSV");
+            console.log("Query result after session reopen:", result.trim());
+
+            expect(result).to.be.a('string');
+            expect(result).to.include('Alice');
+            expect(result).to.include('Bob');
+            expect(result).to.include('1');
+            expect(result).to.include('2');
+            console.log("✓ Data persisted after session cleanup and reopen");
+        });
     });
 
 });
