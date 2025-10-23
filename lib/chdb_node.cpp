@@ -6,6 +6,11 @@
 #include <iostream>
 #include <napi.h>
 
+typedef void * ChdbConnection;
+ChdbConnection CreateConnection(const char * path);
+void CloseConnection(ChdbConnection conn);
+char * QueryWithConnection(ChdbConnection conn, const char * query, const char * format, char ** error_message);
+
 #define MAX_FORMAT_LENGTH 64
 #define MAX_PATH_LENGTH 4096
 #define MAX_ARG_COUNT 6
@@ -189,6 +194,56 @@ char *QueryBindSession(const char *query, const char *format, const char *path,
     return query_stable_v2(static_cast<int>(argv.size()), argv.data())->buf;
 }
 
+ChdbConnection CreateConnection(const char * path) {
+    char dataPath[MAX_PATH_LENGTH];
+    char * args[MAX_ARG_COUNT] = {"clickhouse", NULL};
+    int argc = 1;
+
+    if (path && path[0]) {
+        construct_arg(dataPath, "--path=", path, MAX_PATH_LENGTH);
+        args[1] = dataPath;
+        argc = 2;
+    }
+
+    return static_cast<ChdbConnection>(chdb_connect(argc, args));
+}
+
+void CloseConnection(ChdbConnection conn) {
+    if (conn) {
+        chdb_close_conn(static_cast<chdb_connection *>(conn));
+    }
+}
+
+char * QueryWithConnection(ChdbConnection conn, const char * query, const char * format, char ** error_message) {
+    if (!conn || !query || !format) {
+        return nullptr;
+    }
+
+    chdb_connection * inner_conn = static_cast<chdb_connection *>(conn);
+    chdb_result * result = chdb_query(*inner_conn, query, format);
+    if (!result) {
+        return nullptr;
+    }
+
+    const char * error = chdb_result_error(result);
+    if (error) {
+        if (error_message) {
+            *error_message = strdup(error);
+        }
+        chdb_destroy_query_result(result);
+        return nullptr;
+    }
+
+    const char * buffer = chdb_result_buffer(result);
+    char * output = nullptr;
+    if (buffer) {
+        output = strdup(buffer);
+    }
+
+    chdb_destroy_query_result(result);
+    return output;
+}
+
 Napi::String QueryWrapper(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
@@ -291,11 +346,81 @@ Napi::String QueryBindSessionWrapper(const Napi::CallbackInfo& info) {
     return Napi::String::New(env, out);
 }
 
+Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 1 || !info[0].IsString()) {
+        Napi::TypeError::New(env, "Path string expected").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    std::string path = info[0].As<Napi::String>().Utf8Value();
+    ChdbConnection conn = CreateConnection(path.c_str());
+
+    if (!conn) {
+        Napi::Error::New(env, "Failed to create connection").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    return Napi::External<void>::New(env, conn);
+}
+
+Napi::Value CloseConnectionWrapper(const Napi::CallbackInfo & info) {
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 1 || !info[0].IsExternal()) {
+        Napi::TypeError::New(env, "Connection handle expected").ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+
+    ChdbConnection conn = info[0].As<Napi::External<void>>().Data();
+    CloseConnection(conn);
+
+    return env.Undefined();
+}
+
+Napi::String QueryWithConnectionWrapper(const Napi::CallbackInfo & info) {
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 3 || !info[0].IsExternal() || !info[1].IsString() || !info[2].IsString()) {
+        Napi::TypeError::New(env, "Usage: connection, query, format").ThrowAsJavaScriptException();
+        return Napi::String::New(env, "");
+    }
+
+    ChdbConnection conn = info[0].As<Napi::External<void>>().Data();
+    std::string query = info[1].As<Napi::String>().Utf8Value();
+    std::string format = info[2].As<Napi::String>().Utf8Value();
+
+    char * error_message = nullptr;
+    char * result = QueryWithConnection(conn, query.c_str(), format.c_str(), &error_message);
+
+    if (error_message) {
+        std::string error_msg = std::string("Query failed: ") + error_message;
+        free(error_message);
+        Napi::Error::New(env, error_msg).ThrowAsJavaScriptException();
+        return Napi::String::New(env, "");
+    }
+
+    if (!result) {
+        return Napi::String::New(env, "");
+    }
+
+    Napi::String output = Napi::String::New(env, result);
+    free(result);
+    return output;
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   // Export the functions
   exports.Set("Query", Napi::Function::New(env, QueryWrapper));
   exports.Set("QuerySession", Napi::Function::New(env, QuerySessionWrapper));
   exports.Set("QueryBindSession", Napi::Function::New(env, QueryBindSessionWrapper));
+
+  // Export connection management functions
+  exports.Set("CreateConnection", Napi::Function::New(env, CreateConnectionWrapper));
+  exports.Set("CloseConnection", Napi::Function::New(env, CloseConnectionWrapper));
+  exports.Set("QueryWithConnection", Napi::Function::New(env, QueryWithConnectionWrapper));
+
   return exports;
 }
 
