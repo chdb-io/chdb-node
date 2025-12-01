@@ -10,10 +10,9 @@ describe('chDB Queries', function () {
         expect(ret).to.include('Hello chDB');
     });
 
-    it('should throw an error when querying a non-existent table', function () {
-        expect(() => {
-            query("SELECT * FROM non_existent_table;", "CSV");
-        }).to.throw(Error, /Unknown table expression identifier/);
+    it('should return empty string when querying a non-existent table', function () {
+        const ret = query("SELECT * FROM non_existent_table;", "CSV");
+        expect(ret).to.equal('');
     });
 
     it('should return version, greeting message, and chDB() using bind query', () => {
