@@ -8,9 +8,7 @@
 # Change directory to the script's directory
 cd "$(dirname "$0")"
 
-# Get the newest release version
-# LATEST_RELEASE=$(curl --silent "https://api.github.com/repos/chdb-io/chdb/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-LATEST_RELEASE=v3.7.2
+LATEST_RELEASE=v26.3.0
 
 # Download the correct version based on the platform
 case "$(uname -s)" in
@@ -34,7 +32,7 @@ case "$(uname -s)" in
         ;;
 esac
 
-DOWNLOAD_URL="https://github.com/chdb-io/chdb/releases/download/$LATEST_RELEASE/$PLATFORM"
+DOWNLOAD_URL="https://github.com/chdb-io/chdb-core/releases/download/$LATEST_RELEASE/$PLATFORM"
 
 echo "Downloading $PLATFORM from $DOWNLOAD_URL"
 

@@ -37,14 +37,14 @@ static std::string toCHLiteral(const Napi::Env& env, const Napi::Value& v)
     if (v.IsNumber() || v.IsBoolean() || v.IsString())
         return v.ToString().Utf8Value();                 
 
-    if (v.IsDate()) {                                    
+    if (v.IsDate()) {
         double ms = v.As<Napi::Date>().ValueOf();
         std::time_t t = static_cast<std::time_t>(ms / 1000);
         std::tm tm{};
         gmtime_r(&t, &tm);
         char buf[32];
-        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
-        return std::string(&buf[0], sizeof(buf));
+        std::size_t len = strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+        return std::string(buf, len);
     }
 
     if (v.IsTypedArray()) {
@@ -85,116 +85,97 @@ static std::string toCHLiteral(const Napi::Env& env, const Napi::Value& v)
     return chEscape(v.ToString().Utf8Value());
 }
 
-// Utility function to construct argument string
-void construct_arg(char *dest, const char *prefix, const char *value,
-                   size_t dest_size) {
+static void construct_arg(char *dest, const char *prefix, const char *value,
+                          size_t dest_size) {
   snprintf(dest, dest_size, "%s%s", prefix, value);
 }
 
-// Generalized query function
-char *general_query(int argc, char *args[], char **error_message) {
-  struct local_result_v2 *result = query_stable_v2(argc, args);
+// chDB v26+ requires that the embedded ClickHouse server be initialized only
+// once per process. We share a lazily-initialized in-memory connection for
+// every standalone query/queryBind call.
+static chdb_connection g_default_conn = nullptr;
 
-  if (result == NULL) {
-    return NULL;
+static void release_default_conn() {
+  if (g_default_conn) {
+    chdb_close_conn(&g_default_conn);
+    g_default_conn = nullptr;
+  }
+}
+
+static chdb_connection get_default_conn() {
+  if (g_default_conn == nullptr) {
+    char prog[] = "clickhouse";
+    char *args[] = { prog };
+    chdb_connection *conn_ptr = chdb_connect(1, args);
+    if (conn_ptr && *conn_ptr) {
+      g_default_conn = *conn_ptr;
+      std::atexit(release_default_conn);
+    }
+  }
+  return g_default_conn;
+}
+
+static char *exec_query(chdb_connection conn, const char *query,
+                        const char *format, char **error_message) {
+  if (!conn) {
+    if (error_message) *error_message = strdup("Failed to acquire default connection");
+    return nullptr;
+  }
+  chdb_result *result = chdb_query(conn, query, format);
+  if (!result) return nullptr;
+
+  const char *error = chdb_result_error(result);
+  if (error) {
+    if (error_message) *error_message = strdup(error);
+    chdb_destroy_query_result(result);
+    return nullptr;
   }
 
-  if (result->error_message != NULL) {
-    if (error_message != NULL) {
-      *error_message = strdup(result->error_message);
-    }
-    free_result_v2(result);
-    return NULL;
-  } else {
-    if (result->buf == NULL) {
-      free_result_v2(result);
-      return NULL;
-    }
-    char *output = strdup(result->buf); // copy the result buffer
-    free_result_v2(result);
-    return output;
-  }
+  const char *buffer = chdb_result_buffer(result);
+  char *output = buffer ? strdup(buffer) : nullptr;
+  chdb_destroy_query_result(result);
+  return output;
 }
 
 // Query function without session
 char *Query(const char *query, const char *format, char **error_message) {
-  char dataFormat[MAX_FORMAT_LENGTH];
-  char *dataQuery;
-  char *args[MAX_ARG_COUNT] = {"clickhouse", "--multiquery", NULL, NULL};
-  int argc = 4;
-
-  construct_arg(dataFormat, "--output-format=", format, MAX_FORMAT_LENGTH);
-  args[2] = dataFormat;
-
-  dataQuery = (char *)malloc(strlen(query) + strlen("--query=") + 1);
-  if (dataQuery == NULL) {
-    return NULL;
-  }
-  construct_arg(dataQuery, "--query=", query,
-                strlen(query) + strlen("--query=") + 1);
-  args[3] = dataQuery;
-
-  char *result = general_query(argc, args, error_message);
-  free(dataQuery);
-  return result;
+  return exec_query(get_default_conn(), query, format, error_message);
 }
 
-// QuerySession function will save the session to the path
-char *QuerySession(const char *query, const char *format, const char *path,
-                   char **error_message) {
-  char dataFormat[MAX_FORMAT_LENGTH];
-  char dataPath[MAX_PATH_LENGTH];
-  char *dataQuery;
-  char *args[MAX_ARG_COUNT] = {"clickhouse", "--multiquery", NULL, NULL, NULL};
-  int argc = 5;
-
-  construct_arg(dataFormat, "--output-format=", format, MAX_FORMAT_LENGTH);
-  args[2] = dataFormat;
-
-  dataQuery = (char *)malloc(strlen(query) + strlen("--query=") + 1);
-  if (dataQuery == NULL) {
-    return NULL;
-  }
-  construct_arg(dataQuery, "--query=", query,
-                strlen(query) + strlen("--query=") + 1);
-  args[3] = dataQuery;
-
-  construct_arg(dataPath, "--path=", path, MAX_PATH_LENGTH);
-  args[4] = dataPath;
-
-  char *result = general_query(argc, args, error_message);
-  free(dataQuery);
-  return result;
-}
-
-char *QueryBindSession(const char *query, const char *format, const char *path, 
+// Parameterized query. Parameters are injected through prepended
+// "SET param_<key> = '<value>'" statements so we can reuse the shared
+// connection (chdb_query has no native parameter-binding API).
+char *QueryBindSession(const char *query, const char *format, const char *path,
     const std::vector<std::string>& params, char **error_message) {
 
-   std::vector<std::string> store;
-    store.reserve(4 + params.size() + (path && path[0] ? 1 : 0));
+  std::string fullSql;
+  const std::string prefix = "--param_";
+  for (const auto& p : params) {
+    if (p.compare(0, prefix.size(), prefix) != 0) continue;
+    size_t eq = p.find('=', prefix.size());
+    if (eq == std::string::npos) continue;
+    std::string key = p.substr(prefix.size(), eq - prefix.size());
+    std::string val = p.substr(eq + 1);
+    fullSql += "SET param_" + key + " = " + chEscape(val) + "; ";
+  }
+  fullSql += query;
 
-    store.emplace_back("clickhouse");
-    store.emplace_back("--multiquery");
-    store.emplace_back(std::string("--output-format=") + format);
-    store.emplace_back(std::string("--query=") + query);
+  #ifdef CHDB_DEBUG
+  std::cerr << "=== chdb queryBind sql ===\n" << fullSql << '\n';
+  #endif
 
-    for (const auto& p : params) store.emplace_back(p);
-    if (path && path[0])         store.emplace_back(std::string("--path=") + path);
-
-    std::vector<char*> argv;
-    argv.reserve(store.size());
-    for (auto& s : store)
-        argv.push_back(const_cast<char*>(s.c_str())); 
-
-    #ifdef CHDB_DEBUG
-    std::cerr << "=== chdb argv (" << argv.size() << ") ===\n";
-    for (char* a : argv) std::cerr << a << '\n';
-    #endif
-
-    return query_stable_v2(static_cast<int>(argv.size()), argv.data())->buf;
+  // path is currently always empty from the JS layer (Session.queryBind throws);
+  // standalone queryBind always uses the shared default connection.
+  (void)path;
+  return exec_query(get_default_conn(), fullSql.c_str(), format, error_message);
 }
 
 ChdbConnection CreateConnection(const char * path) {
+    // chDB v26+ allows only one active connection per process.
+    // Release the shared default connection (if any) so the new Session
+    // connection can be created.
+    release_default_conn();
+
     char dataPath[MAX_PATH_LENGTH];
     char * args[MAX_ARG_COUNT] = {"clickhouse", NULL};
     int argc = 1;
@@ -267,38 +248,6 @@ Napi::String QueryWrapper(const Napi::CallbackInfo &info) {
     return Napi::String::New(env, "");
   }
 
-  return Napi::String::New(env, result);
-}
-
-Napi::String QuerySessionWrapper(const Napi::CallbackInfo &info) {
-  Napi::Env env = info.Env();
-
-  // Check argument types and count
-  if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() ||
-      !info[2].IsString()) {
-    Napi::TypeError::New(env, "String expected").ThrowAsJavaScriptException();
-    return Napi::String::New(env, "");
-  }
-
-  // Get the arguments
-  std::string query = info[0].As<Napi::String>().Utf8Value();
-  std::string format = info[1].As<Napi::String>().Utf8Value();
-  std::string path = info[2].As<Napi::String>().Utf8Value();
-
-  char *error_message = nullptr;
-  // Call the native function
-  char *result =
-      QuerySession(query.c_str(), format.c_str(), path.c_str(), &error_message);
-
-  if (result == NULL) {
-    if (error_message != NULL) {
-      Napi::Error::New(env, error_message).ThrowAsJavaScriptException();
-      free(error_message);
-    }
-    return Napi::String::New(env, "");
-  }
-
-  // Return the result
   return Napi::String::New(env, result);
 }
 
@@ -413,7 +362,6 @@ Napi::String QueryWithConnectionWrapper(const Napi::CallbackInfo & info) {
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   // Export the functions
   exports.Set("Query", Napi::Function::New(env, QueryWrapper));
-  exports.Set("QuerySession", Napi::Function::New(env, QuerySessionWrapper));
   exports.Set("QueryBindSession", Napi::Function::New(env, QueryBindSessionWrapper));
 
   // Export connection management functions
