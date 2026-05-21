@@ -22,6 +22,16 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "binding.gyp",
+    "lib/chdb_node.cpp",
+    "lib/chdb_node.h",
+    "update_libchdb.sh",
+    "fix_loader_path.sh",
+    "example.js"
+  ],
   "devDependencies": {
     "chai": "^4.5.0",
     "mocha": "^10.7.3",

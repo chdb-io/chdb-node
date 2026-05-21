@@ -6,3 +6,5 @@ build
 libchdb.so
 chdb.h
 chdb.hpp
+
+*-tmp/
