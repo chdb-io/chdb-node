@@ -349,6 +349,143 @@ Napi::String QueryWithParamsConnectionWrapper(const Napi::CallbackInfo &info) {
   return r;
 }
 
+//===--------------------------------------------------------------------===//
+// Async query (Napi::AsyncWorker) — runs chdb_query{,_with_params_n} on the
+// libuv thread pool so the event loop is never frozen. Returns a Promise that
+// resolves to { bytes, elapsed, rowsRead, bytesRead } or rejects with the
+// native error message (the JS layer maps it to a typed ChdbError).
+//
+// Honest single-shot cancellation (§10): there is no interrupt for chdb_query,
+// so AbortSignal/timeout are handled JS-side (reject early; the native thread
+// runs to completion and its result is discarded). The connection handle is
+// resolved on the main thread (registry is not touched off-thread).
+//===--------------------------------------------------------------------===//
+class QueryAsyncWorker : public Napi::AsyncWorker {
+public:
+  QueryAsyncWorker(Napi::Env env, chdb_connection conn, std::string sql, std::string format,
+                   bool hasParams, std::vector<std::string> names, std::vector<std::string> values)
+      : Napi::AsyncWorker(env),
+        deferred_(Napi::Promise::Deferred::New(env)),
+        conn_(conn), sql_(std::move(sql)), format_(std::move(format)),
+        hasParams_(hasParams), names_(std::move(names)), values_(std::move(values)) {}
+
+  Napi::Promise GetPromise() { return deferred_.Promise(); }
+
+  void Execute() override {
+    chdb_result *result;
+    if (hasParams_) {
+      size_t n = names_.size();
+      std::vector<const char *> cnames(n), cvalues(n);
+      std::vector<size_t> vlens(n);
+      for (size_t i = 0; i < n; i++) {
+        cnames[i] = names_[i].c_str();
+        cvalues[i] = values_[i].data();
+        vlens[i] = values_[i].size();
+      }
+      result = chdb_query_with_params_n(
+          conn_, sql_.data(), sql_.size(), format_.data(), format_.size(),
+          n ? cnames.data() : nullptr, nullptr,
+          n ? cvalues.data() : nullptr, n ? vlens.data() : nullptr, n);
+    } else {
+      result = chdb_query_n(conn_, sql_.data(), sql_.size(), format_.data(), format_.size());
+    }
+    if (!result) { SetError("chdb query returned a null result"); return; }
+    const char *error = chdb_result_error(result);
+    if (error) {
+      std::string msg = error;
+      chdb_destroy_query_result(result);
+      SetError(msg);
+      return;
+    }
+    size_t len = chdb_result_length(result);
+    const char *buf = chdb_result_buffer(result);
+    if (buf && len) data_.assign(buf, buf + len);
+    elapsed_ = chdb_result_elapsed(result);
+    rowsRead_ = chdb_result_rows_read(result);
+    bytesRead_ = chdb_result_bytes_read(result);
+    chdb_destroy_query_result(result);
+  }
+
+  void OnOK() override {
+    Napi::Env env = Env();
+    Napi::HandleScope scope(env);
+    Napi::Object res = Napi::Object::New(env);
+    res.Set("bytes", Napi::Buffer<char>::Copy(env, data_.data(), data_.size()));
+    res.Set("elapsed", Napi::Number::New(env, elapsed_));
+    res.Set("rowsRead", Napi::Number::New(env, static_cast<double>(rowsRead_)));
+    res.Set("bytesRead", Napi::Number::New(env, static_cast<double>(bytesRead_)));
+    deferred_.Resolve(res);
+  }
+
+  void OnError(const Napi::Error &e) override { deferred_.Reject(e.Value()); }
+
+private:
+  Napi::Promise::Deferred deferred_;
+  chdb_connection conn_;
+  std::string sql_, format_;
+  bool hasParams_;
+  std::vector<std::string> names_, values_;
+  std::vector<char> data_;
+  double elapsed_ = 0.0;
+  uint64_t rowsRead_ = 0, bytesRead_ = 0;
+};
+
+static Napi::Value rejectedPromise(Napi::Env env, const char *msg) {
+  auto def = Napi::Promise::Deferred::New(env);
+  def.Reject(Napi::Error::New(env, msg).Value());
+  return def.Promise();
+}
+
+// Standalone async query. Args: (sql, format, paramsObjOrNull)
+Napi::Value QueryAsyncWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsString() || !info[1].IsString()) {
+    Napi::TypeError::New(env, "Usage: sql, format, [params]").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  std::string sql = info[0].As<Napi::String>();
+  std::string format = info[1].As<Napi::String>();
+  bool hasParams = info.Length() > 2 && info[2].IsObject();
+  std::vector<std::string> names, values;
+  if (hasParams && !collectParams(info[2].As<Napi::Object>(), names, values))
+    return rejectedPromise(env, "param values must be pre-formatted strings");
+
+  char *err = nullptr;
+  chdb_connection *conn_ptr = get_default_conn(&err); // registry: main thread only
+  if (!conn_ptr) {
+    Napi::Value p = rejectedPromise(env, err ? err : "Failed to acquire default connection");
+    if (err) free(err);
+    return p;
+  }
+  auto *worker = new QueryAsyncWorker(env, *conn_ptr, std::move(sql), std::move(format),
+                                      hasParams, std::move(names), std::move(values));
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+// Session async query. Args: (connection, sql, format, paramsObjOrNull)
+Napi::Value QueryAsyncConnectionWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[0].IsExternal() || !info[1].IsString() || !info[2].IsString()) {
+    Napi::TypeError::New(env, "Usage: connection, sql, format, [params]").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  ChdbConnection conn = info[0].As<Napi::External<void>>().Data();
+  chdb_connection *inner = static_cast<chdb_connection *>(conn);
+  if (!inner) return rejectedPromise(env, "No active connection available");
+  std::string sql = info[1].As<Napi::String>();
+  std::string format = info[2].As<Napi::String>();
+  bool hasParams = info.Length() > 3 && info[3].IsObject();
+  std::vector<std::string> names, values;
+  if (hasParams && !collectParams(info[3].As<Napi::Object>(), names, values))
+    return rejectedPromise(env, "param values must be pre-formatted strings");
+
+  auto *worker = new QueryAsyncWorker(env, *inner, std::move(sql), std::move(format),
+                                      hasParams, std::move(names), std::move(values));
+  worker->Queue();
+  return worker->GetPromise();
+}
+
 Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
     Napi::Env env = info.Env();
 
@@ -421,6 +558,10 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("Query", Napi::Function::New(env, QueryWrapper));
   exports.Set("QueryWithParams", Napi::Function::New(env, QueryWithParamsWrapper));
   exports.Set("QueryWithParamsConnection", Napi::Function::New(env, QueryWithParamsConnectionWrapper));
+
+  // Async query (AsyncWorker -> Promise)
+  exports.Set("QueryAsync", Napi::Function::New(env, QueryAsyncWrapper));
+  exports.Set("QueryAsyncConnection", Napi::Function::New(env, QueryAsyncConnectionWrapper));
 
   // Export connection management functions
   exports.Set("CreateConnection", Napi::Function::New(env, CreateConnectionWrapper));

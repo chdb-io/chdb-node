@@ -7,9 +7,53 @@ const os = require('os');
 const {
   ChdbConnectionError,
   ChdbClosedError,
+  ChdbAbortError,
+  ChdbTimeoutError,
   mapNativeError,
 } = require('./dist/errors.js');
 const { formatParamValue } = require('./dist/serialize.js');
+const { ChdbResult } = require('./dist/result.js');
+
+function emptyResult() {
+  return new ChdbResult({ bytes: new Uint8Array(0), elapsed: 0, rowsRead: 0, bytesRead: 0 });
+}
+
+// Wrap a native query Promise ({bytes,elapsed,...}) into a ChdbResult, applying
+// optional AbortSignal / timeout. Single-shot queries cannot be truly cancelled
+// (no interrupt in the C ABI), so abort/timeout reject early and the native
+// computation runs to completion in the background — the message says so.
+function withAbortTimeout(nativePromise, opts) {
+  const signal = opts && opts.signal;
+  const timeout = opts && opts.timeout;
+  if (!signal && !timeout) {
+    return nativePromise.then((raw) => new ChdbResult(raw), (e) => { throw asQueryError(e); });
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+    };
+    const finish = (fn, v) => { if (!settled) { settled = true; cleanup(); fn(v); } };
+    function onAbort() {
+      finish(reject, new ChdbAbortError(
+        'Query aborted (the underlying computation may still run to completion in the background)'));
+    }
+    if (signal) {
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    if (timeout) {
+      timer = setTimeout(() => finish(reject, new ChdbTimeoutError(
+        `Query timed out after ${timeout}ms (the underlying computation may still run in the background)`)), timeout);
+    }
+    nativePromise.then(
+      (raw) => finish(resolve, new ChdbResult(raw)),
+      (e) => finish(reject, asQueryError(e)),
+    );
+  });
+}
 
 // Format a JS params object into { name: paramString } for server-side binding
 // (chdb_query_with_params). Throws ChdbBindError (typed) on bad values; that
@@ -63,6 +107,21 @@ function queryBind(query, args = {}, format = "CSV") {
   } catch (e) {
     throw asQueryError(e);
   }
+}
+
+// v3 async (non-blocking) standalone query. opts: { format?, signal?, timeout? }
+function queryAsync(query, opts = {}) {
+  if (!query) return Promise.resolve(emptyResult());
+  const format = opts.format || "CSV";
+  return withAbortTimeout(chdbNode.QueryAsync(query, format), opts);
+}
+
+function queryBindAsync(query, params = {}, opts = {}) {
+  if (!query) return Promise.resolve(emptyResult());
+  const format = opts.format || "CSV";
+  let bound;
+  try { bound = formatParams(params); } catch (e) { return Promise.reject(e); }
+  return withAbortTimeout(chdbNode.QueryAsync(query, format, bound), opts);
 }
 
 // Track open sessions so a normal process exit can release native connections
@@ -143,6 +202,23 @@ class Session {
     }
   }
 
+  // v3 async (non-blocking) session query. opts: { format?, signal?, timeout? }
+  queryAsync(query, opts = {}) {
+    if (!this.connection) return Promise.reject(new ChdbClosedError("No active connection available"));
+    if (!query) return Promise.resolve(emptyResult());
+    const format = opts.format || "CSV";
+    return withAbortTimeout(chdbNode.QueryAsyncConnection(this.connection, query, format), opts);
+  }
+
+  queryBindAsync(query, params = {}, opts = {}) {
+    if (!this.connection) return Promise.reject(new ChdbClosedError("No active connection available"));
+    if (!query) return Promise.resolve(emptyResult());
+    const format = opts.format || "CSV";
+    let bound;
+    try { bound = formatParams(params); } catch (e) { return Promise.reject(e); }
+    return withAbortTimeout(chdbNode.QueryAsyncConnection(this.connection, query, format, bound), opts);
+  }
+
   // close(): release the connection and (for temp sessions) remove the temp
   // dir. Idempotent and never throws (design §10).
   close() {
@@ -221,4 +297,4 @@ function version() {
   };
 }
 
-module.exports = { query, queryBind, Session, version };
+module.exports = { query, queryBind, queryAsync, queryBindAsync, Session, version };
