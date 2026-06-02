@@ -84,6 +84,44 @@ export interface InsertSummary {
 export function insert(params: InsertParams): Promise<InsertSummary>;
 
 /**
+ * Options for {@link Session.queryStream}.
+ */
+export interface StreamOptions {
+  /** Output format (default "JSONEachRow"). rows() needs a JSON row format. */
+  format?: string;
+  /** Abort between chunks (real cancellation for streaming). */
+  signal?: AbortSignal;
+}
+
+/**
+ * One materialized chunk of a streaming result.
+ */
+export interface StreamChunk {
+  readonly numRows: number;
+  readonly numBytes: number;
+  /** Raw chunk bytes in the chosen format. */
+  raw(): Uint8Array;
+  /** UTF-8 text of the chunk. */
+  text(): string;
+  /** Parsed rows (requires a JSON row format). */
+  rows<T = unknown>(): T[];
+}
+
+/**
+ * AsyncIterable over streaming result chunks. Cancelled/freed automatically on
+ * completion, early break, throw, or an explicit cancel().
+ */
+export interface ChdbQueryStream extends AsyncIterable<StreamChunk> {
+  readonly closed: boolean;
+  /** Row-level async iterator (flattens chunk.rows()). */
+  rows<T = unknown>(): AsyncIterableIterator<T>;
+  /** Node Readable (object mode) over rows. */
+  toReadable(): import('stream').Readable;
+  /** Cancel the stream and release resources. */
+  cancel(): void;
+}
+
+/**
  * Options for constructing a {@link Session}.
  */
 export interface SessionOptions {
@@ -161,6 +199,11 @@ export class Session {
    * Inserts rows via an inline multi-row INSERT. Async; never reads stdin.
    */
   insert(params: InsertParams): Promise<InsertSummary>;
+
+  /**
+   * Streams a query result chunk-by-chunk (only one active stream per session).
+   */
+  queryStream(query: string, opts?: StreamOptions): ChdbQueryStream;
 
   /**
    * Closes the session: releases the native connection and, for a temporary

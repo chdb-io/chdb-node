@@ -486,6 +486,135 @@ Napi::Value QueryAsyncConnectionWrapper(const Napi::CallbackInfo &info) {
   return worker->GetPromise();
 }
 
+//===--------------------------------------------------------------------===//
+// Streaming query (chdb_stream_query / _fetch_result / _cancel_query). Each
+// fetch runs on the libuv thread pool (non-blocking, §6 / #29). v1 copies each
+// chunk into a JS Buffer and destroys the native chunk immediately (simple,
+// no UAF); true zero-copy is a later optimization.
+//===--------------------------------------------------------------------===//
+struct StreamState {
+  chdb_connection conn;   // dereferenced handle
+  chdb_result *handle;    // stream handle from chdb_stream_query
+  bool finished;
+};
+
+static void stream_close(StreamState *st) {
+  if (st && !st->finished && st->handle) {
+    chdb_stream_cancel_query(st->conn, st->handle);
+    chdb_destroy_query_result(st->handle);
+    st->handle = nullptr;
+    st->finished = true;
+  }
+}
+
+// Args: (connection, sql, format) -> External<StreamState>
+Napi::Value StreamQueryWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[0].IsExternal() || !info[1].IsString() || !info[2].IsString()) {
+    Napi::TypeError::New(env, "Usage: connection, sql, format").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection *connPtr = static_cast<chdb_connection *>(info[0].As<Napi::External<void>>().Data());
+  if (!connPtr) {
+    Napi::Error::New(env, "No active connection available").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection conn = *connPtr;
+  std::string sql = info[1].As<Napi::String>();
+  std::string format = info[2].As<Napi::String>();
+
+  chdb_result *handle = chdb_stream_query_n(conn, sql.data(), sql.size(), format.data(), format.size());
+  if (!handle) {
+    Napi::Error::New(env, "chdb stream query returned a null handle").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const char *err = chdb_result_error(handle);
+  if (err) {
+    std::string msg = err;
+    chdb_destroy_query_result(handle);
+    Napi::Error::New(env, msg).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  auto *st = new StreamState{conn, handle, false};
+  return Napi::External<StreamState>::New(env, st, [](Napi::Env, StreamState *p) {
+    stream_close(p);
+    delete p;
+  });
+}
+
+class StreamFetchWorker : public Napi::AsyncWorker {
+public:
+  StreamFetchWorker(Napi::Env env, StreamState *st)
+      : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)), st_(st) {}
+  Napi::Promise GetPromise() { return deferred_.Promise(); }
+
+  void Execute() override {
+    if (!st_ || st_->finished || !st_->handle) { done_ = true; return; }
+    chdb_result *chunk = chdb_stream_fetch_result(st_->conn, st_->handle);
+    if (!chunk) { finish(); return; }
+    const char *err = chdb_result_error(chunk);
+    if (err) {
+      std::string msg = err;
+      chdb_destroy_query_result(chunk);
+      finish();
+      SetError(msg);
+      return;
+    }
+    size_t len = chdb_result_length(chunk);
+    if (len == 0) { chdb_destroy_query_result(chunk); finish(); return; }
+    const char *buf = chdb_result_buffer(chunk);
+    data_.assign(buf, buf + len);
+    numRows_ = chdb_result_rows_read(chunk);
+    chdb_destroy_query_result(chunk);
+  }
+
+  void OnOK() override {
+    Napi::Env env = Env();
+    Napi::HandleScope scope(env);
+    Napi::Object res = Napi::Object::New(env);
+    res.Set("bytes", Napi::Buffer<char>::Copy(env, data_.data(), data_.size()));
+    res.Set("numRows", Napi::Number::New(env, static_cast<double>(numRows_)));
+    res.Set("done", Napi::Boolean::New(env, done_));
+    deferred_.Resolve(res);
+  }
+  void OnError(const Napi::Error &e) override { deferred_.Reject(e.Value()); }
+
+private:
+  // End of stream: destroy the handle once and mark finished.
+  void finish() {
+    done_ = true;
+    if (st_ && st_->handle) {
+      chdb_destroy_query_result(st_->handle);
+      st_->handle = nullptr;
+      st_->finished = true;
+    }
+  }
+  Napi::Promise::Deferred deferred_;
+  StreamState *st_;
+  std::vector<char> data_;
+  uint64_t numRows_ = 0;
+  bool done_ = false;
+};
+
+// Args: (streamHandle) -> Promise<{ bytes, numRows, done }>
+Napi::Value StreamFetchWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsExternal())
+    return rejectedPromise(env, "Usage: streamHandle");
+  StreamState *st = info[0].As<Napi::External<StreamState>>().Data();
+  auto *worker = new StreamFetchWorker(env, st);
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+// Args: (streamHandle) -> undefined
+Napi::Value StreamCancelWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() >= 1 && info[0].IsExternal())
+    stream_close(info[0].As<Napi::External<StreamState>>().Data());
+  return env.Undefined();
+}
+
 Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
     Napi::Env env = info.Env();
 
@@ -562,6 +691,11 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   // Async query (AsyncWorker -> Promise)
   exports.Set("QueryAsync", Napi::Function::New(env, QueryAsyncWrapper));
   exports.Set("QueryAsyncConnection", Napi::Function::New(env, QueryAsyncConnectionWrapper));
+
+  // Streaming query
+  exports.Set("StreamQuery", Napi::Function::New(env, StreamQueryWrapper));
+  exports.Set("StreamFetch", Napi::Function::New(env, StreamFetchWrapper));
+  exports.Set("StreamCancel", Napi::Function::New(env, StreamCancelWrapper));
 
   // Export connection management functions
   exports.Set("CreateConnection", Napi::Function::New(env, CreateConnectionWrapper));

@@ -10,8 +10,11 @@ const {
   ChdbAbortError,
   ChdbTimeoutError,
   ChdbInsertError,
+  ChdbStreamError,
   mapNativeError,
 } = require('./dist/errors.js');
+
+const streamDecoder = new TextDecoder('utf-8');
 const { formatParamValue } = require('./dist/serialize.js');
 const { ChdbResult } = require('./dist/result.js');
 const { buildInsertSQL } = require('./dist/insert.js');
@@ -111,6 +114,79 @@ function asConnectionError(e) {
   if (e instanceof ChdbConnectionError) return e;
   const message = e && e.message != null ? String(e.message) : String(e);
   return new ChdbConnectionError(message, { cause: e });
+}
+
+// One materialized chunk of a streaming result.
+class StreamChunk {
+  constructor(bytes, numRows, format) {
+    this._bytes = bytes;
+    this.numRows = numRows;
+    this.numBytes = bytes.length;
+    this._format = format;
+  }
+  raw() { return this._bytes; }
+  text() { return streamDecoder.decode(this._bytes); }
+  rows() {
+    if (this._format === 'JSONEachRow' || this._format === 'JSONCompactEachRow') {
+      const t = this.text().replace(/\n$/, '');
+      return t.length ? t.split('\n').map((l) => JSON.parse(l)) : [];
+    }
+    throw new ChdbStreamError(
+      `rows() requires a JSON row format (got ${this._format}); use raw()/text() instead`);
+  }
+}
+
+// AsyncIterable over StreamChunks. Each fetch runs off the event loop; the
+// stream is cancelled/freed on completion, break, throw, or cancel().
+class ChdbQueryStream {
+  constructor(handle, format, signal) {
+    this._handle = handle;
+    this._format = format;
+    this._signal = signal;
+    this._closed = false;
+  }
+
+  get closed() { return this._closed; }
+
+  async *[Symbol.asyncIterator]() {
+    try {
+      while (true) {
+        if (this._signal && this._signal.aborted) {
+          throw new ChdbAbortError('Stream aborted');
+        }
+        let raw;
+        try {
+          raw = await chdbNode.StreamFetch(this._handle);
+        } catch (e) {
+          this._closed = true;
+          throw new ChdbStreamError(asQueryError(e).message, { cause: e });
+        }
+        if (raw.done) { this._closed = true; break; }
+        yield new StreamChunk(raw.bytes, raw.numRows, this._format);
+      }
+    } finally {
+      this.cancel();
+    }
+  }
+
+  // Row-level sugar: flattens chunk.rows() across the stream.
+  async *rows() {
+    for await (const chunk of this) {
+      for (const row of chunk.rows()) yield row;
+    }
+  }
+
+  // Node Readable (object mode) over rows.
+  toReadable() {
+    const { Readable } = require('stream');
+    return Readable.from(this.rows());
+  }
+
+  cancel() {
+    if (this._closed) return;
+    this._closed = true;
+    try { chdbNode.StreamCancel(this._handle); } catch (_) { /* best effort */ }
+  }
 }
 
 // Standalone exported query function
@@ -257,6 +333,27 @@ class Session {
   insert(opts) {
     if (!this.connection) return Promise.reject(new ChdbClosedError("No active connection available"));
     return runInsert((sql) => chdbNode.QueryAsyncConnection(this.connection, sql, "CSV"), opts || {});
+  }
+
+  // v3 streaming. opts: { format?='JSONEachRow', signal? }. Returns a
+  // ChdbQueryStream (AsyncIterable). Only one stream may be active per session
+  // at a time (single active connection).
+  queryStream(sql, opts = {}) {
+    if (!this.connection) throw new ChdbClosedError("No active connection available");
+    if (!sql) throw new ChdbStreamError("queryStream requires a non-empty query");
+    if (this._activeStream && !this._activeStream.closed) {
+      throw new ChdbStreamError("a stream is already active on this session; finish or cancel it first");
+    }
+    const format = opts.format || "JSONEachRow";
+    let handle;
+    try {
+      handle = chdbNode.StreamQuery(this.connection, sql, format);
+    } catch (e) {
+      throw asQueryError(e);
+    }
+    const stream = new ChdbQueryStream(handle, format, opts.signal);
+    this._activeStream = stream;
+    return stream;
   }
 
   // close(): release the connection and (for temp sessions) remove the temp
