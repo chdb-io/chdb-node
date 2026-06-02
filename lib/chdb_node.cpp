@@ -446,6 +446,11 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("CloseConnection", Napi::Function::New(env, CloseConnectionWrapper));
   exports.Set("QueryWithConnection", Napi::Function::New(env, QueryWithConnectionWrapper));
 
+  // Most-reliable exit cleanup (§10): close the active connection on env
+  // teardown, ahead of (and complementary to) the std::atexit backstop. Both
+  // call the idempotent hard_close_active, so running twice is harmless.
+  env.AddCleanupHook([] { hard_close_active(); });
+
   return exports;
 }
 

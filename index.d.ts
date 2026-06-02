@@ -18,6 +18,18 @@ export function query(query: string, format?: string): string;
 export function queryBind(query:string, args: object, format?:string): string;
 
 /**
+ * Options for constructing a {@link Session}.
+ */
+export interface SessionOptions {
+  /**
+   * Opt-in: install SIGINT/SIGTERM handlers that close this session. Default
+   * is `false` (a library must not steal the user's signals). These handlers
+   * never call `process.exit`; the app decides how to terminate.
+   */
+  installSignalHandlers?: boolean;
+}
+
+/**
  * Session class for managing queries and temporary paths.
  */
 export class Session {
@@ -38,10 +50,16 @@ export class Session {
 
   /**
    * Creates a new session. If no path is provided, a temporary directory is created.
-   * 
+   *
    * @param path Optional path for the session. If not provided, a temporary directory is used.
+   * @param opts Optional session options.
    */
-  constructor(path?: string);
+  constructor(path?: string, opts?: SessionOptions);
+
+  /**
+   * True while the native connection is live (i.e. not yet closed).
+   */
+  get open(): boolean;
 
   /**
    * Executes a session-bound query.
@@ -64,9 +82,20 @@ export class Session {
   queryBind(query:string, args: object, format?: string): string;
 
   /**
-   * Cleans up the session, deleting the temporary directory if one was created.
+   * Closes the session: releases the native connection and, for a temporary
+   * session, removes the temporary directory. Idempotent and never throws.
+   */
+  close(): void;
+
+  /**
+   * Alias for {@link Session.close} (v2 compatibility).
    */
   cleanup(): void;
+
+  /**
+   * `using` support: closes the session on scope exit.
+   */
+  [Symbol.dispose](): void;
 }
 
 /**
