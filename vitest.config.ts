@@ -9,5 +9,10 @@ export default defineConfig({
     environment: 'node',
     testTimeout: 30_000,
     hookTimeout: 30_000,
+    // libchdb allows ONE active connection per process, so all test files must
+    // share a single process and run serially (no parallelism).
+    fileParallelism: false,
+    pool: 'forks',
+    poolOptions: { forks: { singleFork: true } },
   },
 })

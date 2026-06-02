@@ -7,7 +7,7 @@
 #include <napi.h>
 
 typedef void * ChdbConnection;
-ChdbConnection CreateConnection(const char * path);
+ChdbConnection CreateConnection(const char * path, char ** error_message);
 void CloseConnection(ChdbConnection conn);
 char * QueryWithConnection(ChdbConnection conn, const char * query, const char * format, char ** error_message);
 
@@ -85,40 +85,124 @@ static std::string toCHLiteral(const Napi::Env& env, const Napi::Value& v)
     return chEscape(v.ToString().Utf8Value());
 }
 
-static void construct_arg(char *dest, const char *prefix, const char *value,
-                          size_t dest_size) {
-  snprintf(dest, dest_size, "%s%s", prefix, value);
+// Connection registry (design §3.2). chDB / libchdb allow only ONE active
+// connection per process; this registry is the single owner of that constraint.
+// It tracks the one live connection by a canonical key, reference-counts session
+// handles, and REJECTS a second concurrent data directory rather than silently
+// switching (silent switching was the #17 crash source). The lazily-created
+// default in-memory connection serves standalone query()/queryBind() and yields
+// to a session when one opens (matching v2's release_default_conn behaviour).
+//
+// The canonical handle passed around is the `chdb_connection*` returned by
+// chdb_connect (dereferenced for chdb_query, passed as-is to chdb_close_conn),
+// matching the External handle layout v2 exposed to JS.
+struct ActiveConn {
+  chdb_connection *conn = nullptr;  // chdb_connect() result, or nullptr
+  std::string key;                  // "" = default in-memory; otherwise the path
+  int refcount = 0;                 // open Session handles (default is transient)
+  bool isDefault = false;
+};
+static ActiveConn g_active;
+
+static chdb_connection *open_raw(const std::string &path) {
+  char prog[] = "clickhouse";
+  std::string pathArg;
+  char *args[2] = { prog, nullptr };
+  int argc = 1;
+  if (!path.empty()) {
+    pathArg = "--path=" + path;
+    args[1] = const_cast<char *>(pathArg.c_str());
+    argc = 2;
+  }
+  chdb_connection *conn_ptr = chdb_connect(argc, args);
+  return (conn_ptr && *conn_ptr) ? conn_ptr : nullptr;
 }
 
-// chDB v26+ requires that the embedded ClickHouse server be initialized only
-// once per process. We share a lazily-initialized in-memory connection for
-// every standalone query/queryBind call.
-static chdb_connection g_default_conn = nullptr;
+static void hard_close_active() {
+  if (g_active.conn) {
+    chdb_close_conn(g_active.conn);
+  }
+  g_active.conn = nullptr;
+  g_active.key.clear();
+  g_active.refcount = 0;
+  g_active.isDefault = false;
+}
 
-static void release_default_conn() {
-  if (g_default_conn) {
-    chdb_close_conn(&g_default_conn);
-    g_default_conn = nullptr;
+static void ensure_atexit() {
+  static bool done = false;
+  if (!done) {
+    std::atexit(hard_close_active);
+    done = true;
   }
 }
 
-static chdb_connection get_default_conn() {
-  if (g_default_conn == nullptr) {
-    char prog[] = "clickhouse";
-    char *args[] = { prog };
-    chdb_connection *conn_ptr = chdb_connect(1, args);
-    if (conn_ptr && *conn_ptr) {
-      g_default_conn = *conn_ptr;
-      std::atexit(release_default_conn);
+// Default connection for standalone query()/queryBind() (lazy, in-memory).
+static chdb_connection *get_default_conn(char **error_message) {
+  ensure_atexit();
+  if (g_active.conn) {
+    if (g_active.isDefault) return g_active.conn;
+    if (error_message && !*error_message)
+      *error_message = strdup((std::string("chdb: a session (path='") + g_active.key +
+                               "') is active; close it before using standalone query()").c_str());
+    return nullptr;
+  }
+  chdb_connection *c = open_raw("");
+  if (!c) {
+    if (error_message && !*error_message)
+      *error_message = strdup("Failed to acquire default connection");
+    return nullptr;
+  }
+  g_active.conn = c;
+  g_active.key = "";
+  g_active.refcount = 0;
+  g_active.isDefault = true;
+  return c;
+}
+
+// Session connection: same path reuses (refcount++); a live default yields; a
+// different active data directory is rejected (not silently switched).
+static chdb_connection *acquire_session_conn(const std::string &path, char **error_message) {
+  ensure_atexit();
+  if (g_active.conn) {
+    if (!g_active.isDefault && g_active.key == path) {
+      g_active.refcount++;
+      return g_active.conn;
+    }
+    if (g_active.isDefault) {
+      hard_close_active();
+    } else {
+      if (error_message && !*error_message)
+        *error_message = strdup((std::string("chdb: only one active data directory per "
+                                 "process; close the current session (path='") + g_active.key +
+                                 "') before opening '" + path + "'").c_str());
+      return nullptr;
     }
   }
-  return g_default_conn;
+  chdb_connection *c = open_raw(path);
+  if (!c) {
+    if (error_message && !*error_message)
+      *error_message = strdup((std::string("Failed to create connection for path '") + path + "'").c_str());
+    return nullptr;
+  }
+  g_active.conn = c;
+  g_active.key = path;
+  g_active.refcount = 1;
+  g_active.isDefault = false;
+  return c;
+}
+
+static void release_session_conn(chdb_connection *conn) {
+  if (!conn) return;
+  if (g_active.conn == conn && !g_active.isDefault) {
+    if (--g_active.refcount <= 0) hard_close_active();
+  }
 }
 
 static char *exec_query(chdb_connection conn, const char *query,
                         const char *format, char **error_message) {
   if (!conn) {
-    if (error_message) *error_message = strdup("Failed to acquire default connection");
+    if (error_message && !*error_message)
+      *error_message = strdup("Failed to acquire default connection");
     return nullptr;
   }
   chdb_result *result = chdb_query(conn, query, format);
@@ -137,9 +221,11 @@ static char *exec_query(chdb_connection conn, const char *query,
   return output;
 }
 
-// Query function without session
+// Query function without session (uses the registry default connection)
 char *Query(const char *query, const char *format, char **error_message) {
-  return exec_query(get_default_conn(), query, format, error_message);
+  chdb_connection *conn_ptr = get_default_conn(error_message);
+  if (!conn_ptr) return nullptr;
+  return exec_query(*conn_ptr, query, format, error_message);
 }
 
 // Parameterized query. Parameters are injected through prepended
@@ -167,32 +253,20 @@ char *QueryBindSession(const char *query, const char *format, const char *path,
   // path is currently always empty from the JS layer (Session.queryBind throws);
   // standalone queryBind always uses the shared default connection.
   (void)path;
-  return exec_query(get_default_conn(), fullSql.c_str(), format, error_message);
+  chdb_connection *conn_ptr = get_default_conn(error_message);
+  if (!conn_ptr) return nullptr;
+  return exec_query(*conn_ptr, fullSql.c_str(), format, error_message);
 }
 
-ChdbConnection CreateConnection(const char * path) {
-    // chDB v26+ allows only one active connection per process.
-    // Release the shared default connection (if any) so the new Session
-    // connection can be created.
-    release_default_conn();
-
-    char dataPath[MAX_PATH_LENGTH];
-    char * args[MAX_ARG_COUNT] = {"clickhouse", NULL};
-    int argc = 1;
-
-    if (path && path[0]) {
-        construct_arg(dataPath, "--path=", path, MAX_PATH_LENGTH);
-        args[1] = dataPath;
-        argc = 2;
-    }
-
-    return static_cast<ChdbConnection>(chdb_connect(argc, args));
+ChdbConnection CreateConnection(const char * path, char ** error_message) {
+    // Sessions always pass a real path (a temp dir for in-memory sessions), so
+    // an empty key here never collides with the default connection's "" key.
+    std::string p = (path && path[0]) ? std::string(path) : std::string();
+    return static_cast<ChdbConnection>(acquire_session_conn(p, error_message));
 }
 
 void CloseConnection(ChdbConnection conn) {
-    if (conn) {
-        chdb_close_conn(static_cast<chdb_connection *>(conn));
-    }
+    release_session_conn(static_cast<chdb_connection *>(conn));
 }
 
 char * QueryWithConnection(ChdbConnection conn, const char * query, const char * format, char ** error_message) {
@@ -304,10 +378,13 @@ Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
     }
 
     std::string path = info[0].As<Napi::String>().Utf8Value();
-    ChdbConnection conn = CreateConnection(path.c_str());
+    char *error_message = nullptr;
+    ChdbConnection conn = CreateConnection(path.c_str(), &error_message);
 
     if (!conn) {
-        Napi::Error::New(env, "Failed to create connection").ThrowAsJavaScriptException();
+        std::string msg = error_message ? error_message : "Failed to create connection";
+        if (error_message) free(error_message);
+        Napi::Error::New(env, msg).ThrowAsJavaScriptException();
         return env.Null();
     }
 

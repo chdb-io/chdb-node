@@ -3,20 +3,47 @@ const chdbNode = require(path.join(__dirname, 'build', 'Release', 'chdb_node.nod
 const { mkdtempSync, rmSync } = require('fs');
 const { join } = require('path');
 const os = require('os');
+const {
+  ChdbConnectionError,
+  ChdbClosedError,
+  mapNativeError,
+} = require('./dist/errors.js');
+
+// Map an error thrown by the native addon to a typed ChdbError, preserving the
+// original message (so v2 string matching keeps working) and chaining .cause.
+function asQueryError(e) {
+  if (e && typeof e.code === 'string' && e.code.startsWith('CHDB_')) return e;
+  const message = e && e.message != null ? String(e.message) : String(e);
+  return mapNativeError(message, undefined, e);
+}
+
+function asConnectionError(e) {
+  if (e instanceof ChdbConnectionError) return e;
+  const message = e && e.message != null ? String(e.message) : String(e);
+  return new ChdbConnectionError(message, { cause: e });
+}
 
 // Standalone exported query function
 function query(query, format = "CSV") {
   if (!query) {
     return "";
   }
-  return chdbNode.Query(query, format);
+  try {
+    return chdbNode.Query(query, format);
+  } catch (e) {
+    throw asQueryError(e);
+  }
 }
 
 function queryBind(query, args = {}, format = "CSV") {
-  if(!query) {
+  if (!query) {
     return "";
   }
-  return chdbNode.QueryBindSession(query, args, format);
+  try {
+    return chdbNode.QueryBindSession(query, args, format);
+  } catch (e) {
+    throw asQueryError(e);
+  }
 }
 
 // Session class with connection-based path handling
@@ -31,22 +58,31 @@ class Session {
       this.isTemp = false;
     }
 
-    // Create a connection for this session
-    this.connection = chdbNode.CreateConnection(this.path);
+    // Create a connection for this session (registry enforces single-active).
+    try {
+      this.connection = chdbNode.CreateConnection(this.path);
+    } catch (e) {
+      throw asConnectionError(e);
+    }
     if (!this.connection) {
-      throw new Error("Failed to create connection");
+      throw new ChdbConnectionError("Failed to create connection");
     }
   }
 
   query(query, format = "CSV") {
     if (!query) return "";
     if (!this.connection) {
-      throw new Error("No active connection available");
+      throw new ChdbClosedError("No active connection available");
     }
-    return chdbNode.QueryWithConnection(this.connection, query, format);
+    try {
+      return chdbNode.QueryWithConnection(this.connection, query, format);
+    } catch (e) {
+      throw asQueryError(e);
+    }
   }
 
   queryBind(query, args = {}, format = "CSV") {
+    // v2 behaviour preserved (fixed in Item 5 once the C ABI param path lands).
     throw new Error("QueryBind is not supported with connection-based sessions. Please use the standalone queryBind function instead.");
   }
 
@@ -65,4 +101,24 @@ class Session {
   }
 }
 
-module.exports = { query, queryBind, Session };
+// Diagnostic version info (design §5). libchdb is probed via SELECT version();
+// falls back to 'unknown' if a session is holding the single active connection.
+function version() {
+  let libchdb = 'unknown';
+  try {
+    libchdb = query('SELECT version()', 'CSV').trim();
+  } catch (_) {
+    /* diagnostic only — never throws */
+  }
+  const pkg = require('./package.json');
+  const napi = parseInt(process.versions.napi || '', 10);
+  return {
+    chdb: pkg.version,
+    libchdb,
+    platform: process.platform,
+    arch: process.arch,
+    napi: Number.isNaN(napi) ? undefined : napi,
+  };
+}
+
+module.exports = { query, queryBind, Session, version };

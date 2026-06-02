@@ -32,6 +32,11 @@ export class Session {
   isTemp: boolean;
 
   /**
+   * The opaque native connection handle, or null after cleanup().
+   */
+  connection: unknown;
+
+  /**
    * Creates a new session. If no path is provided, a temporary directory is created.
    * 
    * @param path Optional path for the session. If not provided, a temporary directory is used.
@@ -63,3 +68,15 @@ export class Session {
    */
   cleanup(): void;
 }
+
+/**
+ * Diagnostic version information for the package, the loaded libchdb, and the
+ * current runtime.
+ */
+export function version(): {
+  chdb: string;
+  libchdb: string;
+  platform: string;
+  arch: string;
+  napi?: number;
+};

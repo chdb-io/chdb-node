@@ -15,7 +15,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "libchdb": "bash ./update_libchdb.sh",
     "fixloaderpath": "bash ./fix_loader_path.sh",
-    "build": "node-gyp configure build --verbose && npm run fixloaderpath"
+    "build": "node-gyp configure build --verbose && npm run fixloaderpath && npm run build:ts",
+    "build:ts": "tsc -p tsconfig.build.json"
   },
   "author": {
     "name": "chdb",
