@@ -10,6 +10,9 @@
   "scripts": {
     "install": "npm run libchdb && npm run build",
     "test": "mocha test_basic.js test_connection.js --timeout 15000",
+    "test:v3": "vitest run",
+    "test:all": "npm run test && npm run test:v3",
+    "typecheck": "tsc -p tsconfig.json",
     "libchdb": "bash ./update_libchdb.sh",
     "fixloaderpath": "bash ./fix_loader_path.sh",
     "build": "node-gyp configure build --verbose && npm run fixloaderpath"
@@ -33,9 +36,12 @@
     "example.js"
   ],
   "devDependencies": {
+    "@types/node": "^20.14.0",
     "chai": "^4.5.0",
     "mocha": "^10.7.3",
-    "node-gyp": "^9.3.1"
+    "node-gyp": "^9.3.1",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
   },
   "dependencies": {
     "node-addon-api": "^6.1.0",
