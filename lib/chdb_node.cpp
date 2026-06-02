@@ -16,74 +16,11 @@ char * QueryWithConnection(ChdbConnection conn, const char * query, const char *
 #define MAX_ARG_COUNT 6
 
 
-static std::string toCHLiteral(const Napi::Env& env, const Napi::Value& v);
-
-
-static std::string chEscape(const std::string& s)
-{
-    std::string out;
-    out.reserve(s.size() + 4);
-    out += '\'';
-    for (char c : s) {
-        if (c == '\'') out += "\\'";
-        else out += c;
-    }
-    out += '\'';
-    return out;
-}
-
-static std::string toCHLiteral(const Napi::Env& env, const Napi::Value& v)
-{
-    if (v.IsNumber() || v.IsBoolean() || v.IsString())
-        return v.ToString().Utf8Value();                 
-
-    if (v.IsDate()) {
-        double ms = v.As<Napi::Date>().ValueOf();
-        std::time_t t = static_cast<std::time_t>(ms / 1000);
-        std::tm tm{};
-        gmtime_r(&t, &tm);
-        char buf[32];
-        std::size_t len = strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
-        return std::string(buf, len);
-    }
-
-    if (v.IsTypedArray()) {
-        Napi::Object arr = env.Global().Get("Array").As<Napi::Object>();
-        Napi::Function from = arr.Get("from").As<Napi::Function>();
-        return toCHLiteral(env, from.Call(arr, { v }));
-    }
-
-    if (v.IsArray()) {
-        Napi::Array a = v.As<Napi::Array>();
-        size_t n = a.Length();
-        std::string out = "[";
-        for (size_t i = 0; i < n; ++i) {
-            if (i) out += ",";
-            out += toCHLiteral(env, a.Get(i));
-        }
-        out += "]";
-        return out;
-    }
-
-    if (v.IsObject()) {
-        Napi::Object o = v.As<Napi::Object>();
-        Napi::Array keys = o.GetPropertyNames();
-        size_t n = keys.Length();
-        std::string out = "{";
-        for (size_t i = 0; i < n; ++i) {
-            if (i) out += ",";
-            std::string k = keys.Get(i).ToString().Utf8Value();
-            out += chEscape(k);               // escape the map key with single-qoutes for click house query to work i.e 'key' not "key"
-            out += ":";
-            out += toCHLiteral(env, o.Get(keys.Get(i)));
-        }
-        out += "}";
-        return out;
-    }
-
-    /* Fallback – stringify & quote */
-    return chEscape(v.ToString().Utf8Value());
-}
+// NOTE: the v2 chEscape/toCHLiteral SET-param machinery has been removed.
+// Parameter binding now goes through libchdb's server-side chdb_query_with_params
+// (Item 5 / path A): values are bound by the engine, never interpolated into SQL,
+// so there is no string-escaping attack surface at all. The JS layer formats each
+// value to its param-string form (src/serialize.ts: formatParamValue).
 
 // Connection registry (design §3.2). chDB / libchdb allow only ONE active
 // connection per process; this registry is the single owner of that constraint.
@@ -228,34 +165,45 @@ char *Query(const char *query, const char *format, char **error_message) {
   return exec_query(*conn_ptr, query, format, error_message);
 }
 
-// Parameterized query. Parameters are injected through prepended
-// "SET param_<key> = '<value>'" statements so we can reuse the shared
-// connection (chdb_query has no native parameter-binding API).
-char *QueryBindSession(const char *query, const char *format, const char *path,
-    const std::vector<std::string>& params, char **error_message) {
-
-  std::string fullSql;
-  const std::string prefix = "--param_";
-  for (const auto& p : params) {
-    if (p.compare(0, prefix.size(), prefix) != 0) continue;
-    size_t eq = p.find('=', prefix.size());
-    if (eq == std::string::npos) continue;
-    std::string key = p.substr(prefix.size(), eq - prefix.size());
-    std::string val = p.substr(eq + 1);
-    fullSql += "SET param_" + key + " = " + chEscape(val) + "; ";
+// Server-side parameter binding (Item 5 / path A). Values are pre-formatted to
+// param strings by the JS layer; the engine resolves each type from the
+// {name:Type} placeholder. Binary-safe (uses *_params_n with explicit value
+// lengths) so String params may contain embedded null bytes.
+static char *exec_query_params(chdb_connection conn,
+                               const std::string &query,
+                               const std::string &format,
+                               const std::vector<std::string> &names,
+                               const std::vector<std::string> &values,
+                               char **error_message) {
+  if (!conn) {
+    if (error_message && !*error_message)
+      *error_message = strdup("Failed to acquire default connection");
+    return nullptr;
   }
-  fullSql += query;
+  size_t n = names.size();
+  std::vector<const char *> cnames(n), cvalues(n);
+  std::vector<size_t> vlens(n);
+  for (size_t i = 0; i < n; i++) {
+    cnames[i] = names[i].c_str();
+    cvalues[i] = values[i].data();
+    vlens[i] = values[i].size();
+  }
+  chdb_result *result = chdb_query_with_params_n(
+      conn, query.data(), query.size(), format.data(), format.size(),
+      n ? cnames.data() : nullptr, nullptr /* name lens => strlen */,
+      n ? cvalues.data() : nullptr, n ? vlens.data() : nullptr, n);
+  if (!result) return nullptr;
 
-  #ifdef CHDB_DEBUG
-  std::cerr << "=== chdb queryBind sql ===\n" << fullSql << '\n';
-  #endif
-
-  // path is currently always empty from the JS layer (Session.queryBind throws);
-  // standalone queryBind always uses the shared default connection.
-  (void)path;
-  chdb_connection *conn_ptr = get_default_conn(error_message);
-  if (!conn_ptr) return nullptr;
-  return exec_query(*conn_ptr, fullSql.c_str(), format, error_message);
+  const char *error = chdb_result_error(result);
+  if (error) {
+    if (error_message) *error_message = strdup(error);
+    chdb_destroy_query_result(result);
+    return nullptr;
+  }
+  const char *buffer = chdb_result_buffer(result);
+  char *output = buffer ? strdup(buffer) : nullptr;
+  chdb_destroy_query_result(result);
+  return output;
 }
 
 ChdbConnection CreateConnection(const char * path, char ** error_message) {
@@ -325,48 +273,80 @@ Napi::String QueryWrapper(const Napi::CallbackInfo &info) {
   return Napi::String::New(env, result);
 }
 
-static std::string jsToParam(const Napi::Env& env, const Napi::Value& v) {
-    return toCHLiteral(env, v);
+// Collect a JS params object { name: preformattedString } into parallel
+// name/value vectors. Values MUST already be strings (the JS layer runs
+// formatParamValue before calling in), so the native side never re-derives
+// CH literals.
+static bool collectParams(const Napi::Object &obj,
+                          std::vector<std::string> &names,
+                          std::vector<std::string> &values) {
+  Napi::Array keys = obj.GetPropertyNames();
+  uint32_t len = keys.Length();
+  for (uint32_t i = 0; i < len; i++) {
+    Napi::Value k = keys.Get(i);
+    Napi::Value v = obj.Get(k);
+    if (!v.IsString()) return false;
+    names.push_back(k.ToString().Utf8Value());
+    values.push_back(v.As<Napi::String>().Utf8Value());
+  }
+  return true;
 }
 
-Napi::String QueryBindSessionWrapper(const Napi::CallbackInfo& info) {
-    Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsObject())
-        Napi::TypeError::New(env,"Usage: sql, params, [format]").ThrowAsJavaScriptException();
+// Standalone parameterized query (default connection).
+// Args: (sql, format, paramsObj)
+Napi::String QueryWithParamsWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() || !info[2].IsObject()) {
+    Napi::TypeError::New(env, "Usage: sql, format, params").ThrowAsJavaScriptException();
+    return Napi::String::New(env, "");
+  }
+  std::string sql = info[0].As<Napi::String>();
+  std::string format = info[1].As<Napi::String>();
+  std::vector<std::string> names, values;
+  if (!collectParams(info[2].As<Napi::Object>(), names, values)) {
+    Napi::TypeError::New(env, "param values must be pre-formatted strings").ThrowAsJavaScriptException();
+    return Napi::String::New(env, "");
+  }
 
-    std::string sql    = info[0].As<Napi::String>();
-    Napi::Object obj   = info[1].As<Napi::Object>();
-    std::string format = (info.Length() > 2 && info[2].IsString())
-                           ? info[2].As<Napi::String>() : std::string("CSV");
-    std::string path = (info.Length() > 3 && info[3].IsString()) 
-                          ? info[3].As<Napi::String>() : std::string("");
+  char *err = nullptr;
+  chdb_connection *conn_ptr = get_default_conn(&err);
+  char *out = conn_ptr ? exec_query_params(*conn_ptr, sql, format, names, values, &err) : nullptr;
+  if (!out) {
+    if (err) { Napi::Error::New(env, err).ThrowAsJavaScriptException(); free(err); }
+    return Napi::String::New(env, "");
+  }
+  Napi::String r = Napi::String::New(env, out);
+  free(out);
+  return r;
+}
 
-    // Build param vector
-    std::vector<std::string> cliParams;
-    Napi::Array keys = obj.GetPropertyNames();
-    int len = keys.Length();
-    for (int i = 0; i < len; i++) {
-        Napi::Value k = keys.Get(i);
-        if(!k.IsString()) continue;
+// Session parameterized query (explicit connection).
+// Args: (connection, sql, format, paramsObj)
+Napi::String QueryWithParamsConnectionWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 4 || !info[0].IsExternal() || !info[1].IsString() || !info[2].IsString() || !info[3].IsObject()) {
+    Napi::TypeError::New(env, "Usage: connection, sql, format, params").ThrowAsJavaScriptException();
+    return Napi::String::New(env, "");
+  }
+  ChdbConnection conn = info[0].As<Napi::External<void>>().Data();
+  std::string sql = info[1].As<Napi::String>();
+  std::string format = info[2].As<Napi::String>();
+  std::vector<std::string> names, values;
+  if (!collectParams(info[3].As<Napi::Object>(), names, values)) {
+    Napi::TypeError::New(env, "param values must be pre-formatted strings").ThrowAsJavaScriptException();
+    return Napi::String::New(env, "");
+  }
 
-        std::string key = k.As<Napi::String>();
-        std::string val = jsToParam(env, obj.Get(k));
-        cliParams.emplace_back("--param_" + key + "=" + val);
-    }
-
-    #ifdef CHDB_DEBUG
-    std::cerr << "=== cliParams ===\n";
-    for (const auto& s : cliParams)
-        std::cerr << s << '\n';
-    #endif
-
-    char* err = nullptr;
-    char* out = QueryBindSession(sql.c_str(), format.c_str(), path.c_str(), cliParams, &err);
-    if (!out) {
-        Napi::Error::New(env, err ? err : "unknown error").ThrowAsJavaScriptException();
-        return Napi::String::New(env,"");
-    }
-    return Napi::String::New(env, out);
+  chdb_connection *inner = static_cast<chdb_connection *>(conn);
+  char *err = nullptr;
+  char *out = inner ? exec_query_params(*inner, sql, format, names, values, &err) : nullptr;
+  if (!out) {
+    if (err) { Napi::Error::New(env, err).ThrowAsJavaScriptException(); free(err); }
+    return Napi::String::New(env, "");
+  }
+  Napi::String r = Napi::String::New(env, out);
+  free(out);
+  return r;
 }
 
 Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
@@ -439,7 +419,8 @@ Napi::String QueryWithConnectionWrapper(const Napi::CallbackInfo & info) {
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   // Export the functions
   exports.Set("Query", Napi::Function::New(env, QueryWrapper));
-  exports.Set("QueryBindSession", Napi::Function::New(env, QueryBindSessionWrapper));
+  exports.Set("QueryWithParams", Napi::Function::New(env, QueryWithParamsWrapper));
+  exports.Set("QueryWithParamsConnection", Napi::Function::New(env, QueryWithParamsConnectionWrapper));
 
   // Export connection management functions
   exports.Set("CreateConnection", Napi::Function::New(env, CreateConnectionWrapper));

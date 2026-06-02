@@ -9,6 +9,18 @@ const {
   ChdbClosedError,
   mapNativeError,
 } = require('./dist/errors.js');
+const { formatParamValue } = require('./dist/serialize.js');
+
+// Format a JS params object into { name: paramString } for server-side binding
+// (chdb_query_with_params). Throws ChdbBindError (typed) on bad values; that
+// propagates as-is.
+function formatParams(args) {
+  const bound = {};
+  for (const k of Object.keys(args || {})) {
+    bound[k] = formatParamValue(args[k]);
+  }
+  return bound;
+}
 
 // D4: the v2 temp prefix was 'tmp-chdb-node' (no separator before the random
 // suffix); 'chdb-node-' gives a clean, recognizable prefix used by the cleanup
@@ -45,8 +57,9 @@ function queryBind(query, args = {}, format = "CSV") {
   if (!query) {
     return "";
   }
+  const bound = formatParams(args); // may throw a typed ChdbBindError
   try {
-    return chdbNode.QueryBindSession(query, args, format);
+    return chdbNode.QueryWithParams(query, format, bound);
   } catch (e) {
     throw asQueryError(e);
   }
@@ -115,9 +128,19 @@ class Session {
     }
   }
 
+  // Item 5: server-side parameter binding now works on sessions too (the v2
+  // behaviour was an unconditional throw; chdb_query_with_params makes it real).
   queryBind(query, args = {}, format = "CSV") {
-    // v2 behaviour preserved (fixed in Item 5 once the C ABI param path lands).
-    throw new Error("QueryBind is not supported with connection-based sessions. Please use the standalone queryBind function instead.");
+    if (!query) return "";
+    if (!this.connection) {
+      throw new ChdbClosedError("No active connection available");
+    }
+    const bound = formatParams(args); // may throw a typed ChdbBindError
+    try {
+      return chdbNode.QueryWithParamsConnection(this.connection, query, format, bound);
+    } catch (e) {
+      throw asQueryError(e);
+    }
   }
 
   // close(): release the connection and (for temp sessions) remove the temp

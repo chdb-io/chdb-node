@@ -41,6 +41,27 @@ export function escapeStringLiteral(s: string): string {
   return `'${body}'`
 }
 
+// ClickHouse parses query-parameter values with TSV/Escaped rules: backslash is
+// an escape introducer and a raw TAB/newline terminates the field. So a String
+// param value must be escaped the same way (NOT SQL-quoted). This is distinct
+// from escapeStringLiteral (which targets the SQL parser).
+const TSV_ESCAPES: ReadonlyArray<[RegExp, string]> = [
+  [/\\/g, '\\\\'], // backslash first
+  [/\0/g, '\\0'],
+  [/\x08/g, '\\b'],
+  [/\f/g, '\\f'],
+  [/\n/g, '\\n'],
+  [/\r/g, '\\r'],
+  [/\t/g, '\\t'],
+]
+
+/** Escape a string for ClickHouse TSV/Escaped query-parameter transport. */
+export function tsvEscape(s: string): string {
+  let out = s
+  for (const [re, rep] of TSV_ESCAPES) out = out.replace(re, rep)
+  return out
+}
+
 const IDENTIFIER_RE = /^[A-Za-z0-9_.]+$/
 
 /**
@@ -153,4 +174,33 @@ export function serializeValue(value: unknown): string {
 
 function serializeArray(arr: ReadonlyArray<unknown>): string {
   return `[${arr.map((x) => serializeValue(x)).join(',')}]`
+}
+
+/**
+ * Format a JS value as a ClickHouse **parameter** string for server-side
+ * binding via `chdb_query_with_params` ({name:Type} placeholders). This is NOT
+ * a SQL literal: the engine binds the value (resolving its type from the
+ * placeholder) using TSV/Escaped parsing. A top-level string is TSV-escaped
+ * (backslash/TAB/newline escaped, but NOT SQL-quoted); a Date is its plain
+ * 'YYYY-MM-DD HH:MM:SS' form. Nested values inside Array/Map keep SQL-literal
+ * quoting (e.g. `['a','b']`) because that is how the engine parses composite
+ * param values.
+ *
+ * Because the engine binds the value (never interpolates it into SQL), there is
+ * no escaping/injection surface here at all.
+ *
+ * @throws ChdbBindError on null/undefined (use a typed NULL in SQL instead),
+ *   non-finite or unsafe-integer numbers, invalid Dates, or unsupported types.
+ */
+export function formatParamValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    throw new ChdbBindError(
+      'null/undefined parameter values are not supported; omit the parameter or use a typed NULL in SQL',
+    )
+  }
+  if (typeof value === 'string') return tsvEscape(value) // TSV/Escaped — engine binds as declared type
+  if (value instanceof Date) return formatDateTimeUTC(value) // 'YYYY-MM-DD HH:MM:SS' (no TSV-special chars)
+  // numbers / bigint / boolean / Array / TypedArray / Map / object: the
+  // SQL-literal form is exactly the param form (nested strings stay quoted).
+  return serializeValue(value)
 }

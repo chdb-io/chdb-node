@@ -71,11 +71,10 @@ describe('chDB Connection Tests', function () {
             expect(result).to.include('2');
         });
 
-        it('should throw error when using queryBind with session', function () {
-            expect(() => {
-                session.queryBind("SELECT {id:UInt32}", {id: 42});
-            }).to.throw(Error, /QueryBind is not supported with connection-based sessions. Please use the standalone queryBind function instead./);
-            console.log("✓ queryBind correctly throws error");
+        it('binds parameters in a session (Item 5: server-side binding)', function () {
+            const result = session.queryBind("SELECT {id:UInt32}", { id: 42 }, "CSV");
+            expect(result.trim()).to.equal('42');
+            console.log("✓ queryBind works in session");
         });
 
         it('should handle multiple queries in sequence (connection persistence)', function () {
