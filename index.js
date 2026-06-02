@@ -9,10 +9,38 @@ const {
   ChdbClosedError,
   ChdbAbortError,
   ChdbTimeoutError,
+  ChdbInsertError,
   mapNativeError,
 } = require('./dist/errors.js');
 const { formatParamValue } = require('./dist/serialize.js');
 const { ChdbResult } = require('./dist/result.js');
+const { buildInsertSQL } = require('./dist/insert.js');
+
+// Map a native/query error into a typed ChdbInsertError (preserving message,
+// clickhouseCode and cause).
+function asInsertError(e) {
+  if (e instanceof ChdbInsertError) return e;
+  const q = asQueryError(e);
+  return new ChdbInsertError(q.message, { cause: q, clickhouseCode: q.clickhouseCode });
+}
+
+// Shared insert impl: build the inline INSERT...VALUES and run it through the
+// async native path (no event-loop freeze, no stdin read -> closes #26).
+function runInsert(nativeAsyncCall, params) {
+  let built;
+  try {
+    built = buildInsertSQL(params);
+  } catch (e) {
+    return Promise.reject(asInsertError(e));
+  }
+  if (built.rowsWritten === 0) {
+    return Promise.resolve({ rowsWritten: 0, bytesRead: 0, elapsed: 0 });
+  }
+  return nativeAsyncCall(built.sql).then(
+    (raw) => ({ rowsWritten: built.rowsWritten, bytesRead: raw.bytesRead, elapsed: raw.elapsed }),
+    (e) => { throw asInsertError(e); },
+  );
+}
 
 function emptyResult() {
   return new ChdbResult({ bytes: new Uint8Array(0), elapsed: 0, rowsRead: 0, bytesRead: 0 });
@@ -124,6 +152,11 @@ function queryBindAsync(query, params = {}, opts = {}) {
   return withAbortTimeout(chdbNode.QueryAsync(query, format, bound), opts);
 }
 
+// v3 insert (default connection). opts: { table, values, columns? }
+function insert(opts) {
+  return runInsert((sql) => chdbNode.QueryAsync(sql, "CSV"), opts || {});
+}
+
 // Track open sessions so a normal process exit can release native connections
 // and remove temp dirs even when the user forgot to close (design §10). This
 // complements the native env cleanup hook + std::atexit backstop.
@@ -219,6 +252,13 @@ class Session {
     return withAbortTimeout(chdbNode.QueryAsyncConnection(this.connection, query, format, bound), opts);
   }
 
+  // v3 insert. opts: { table, values, columns? }. Inline INSERT ... VALUES,
+  // executed async; never reads stdin (closes #26).
+  insert(opts) {
+    if (!this.connection) return Promise.reject(new ChdbClosedError("No active connection available"));
+    return runInsert((sql) => chdbNode.QueryAsyncConnection(this.connection, sql, "CSV"), opts || {});
+  }
+
   // close(): release the connection and (for temp sessions) remove the temp
   // dir. Idempotent and never throws (design §10).
   close() {
@@ -297,4 +337,4 @@ function version() {
   };
 }
 
-module.exports = { query, queryBind, queryAsync, queryBindAsync, Session, version };
+module.exports = { query, queryBind, queryAsync, queryBindAsync, insert, Session, version };

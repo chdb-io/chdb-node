@@ -57,6 +57,33 @@ export function queryAsync(query: string, opts?: QueryOptions): Promise<ChdbResu
 export function queryBindAsync(query: string, params: object, opts?: QueryOptions): Promise<ChdbResult>;
 
 /**
+ * Parameters for {@link insert} / {@link Session.insert}.
+ */
+export interface InsertParams {
+  /** Target table (optionally db-qualified). */
+  table: string;
+  /** Rows: array of objects, or array of positional value arrays. */
+  values: ReadonlyArray<Record<string, unknown> | ReadonlyArray<unknown>>;
+  /** Explicit column list, or `{ except }` to exclude columns (positional rows). */
+  columns?: ReadonlyArray<string> | { except: ReadonlyArray<string> };
+}
+
+/**
+ * Summary returned by an insert.
+ */
+export interface InsertSummary {
+  rowsWritten: number;
+  bytesRead: number;
+  elapsed: number;
+}
+
+/**
+ * Inserts rows via an inline multi-row INSERT (default connection). Async; never
+ * reads stdin.
+ */
+export function insert(params: InsertParams): Promise<InsertSummary>;
+
+/**
  * Options for constructing a {@link Session}.
  */
 export interface SessionOptions {
@@ -129,6 +156,11 @@ export class Session {
    * Executes a session-bound parameterized query asynchronously.
    */
   queryBindAsync(query: string, params: object, opts?: QueryOptions): Promise<ChdbResult>;
+
+  /**
+   * Inserts rows via an inline multi-row INSERT. Async; never reads stdin.
+   */
+  insert(params: InsertParams): Promise<InsertSummary>;
 
   /**
    * Closes the session: releases the native connection and, for a temporary
