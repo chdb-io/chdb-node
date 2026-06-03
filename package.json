@@ -3,6 +3,15 @@
   "version": "2.0.0",
   "description": "chDB bindings for nodejs",
   "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/chdb-io/chdb-node.git"
@@ -29,6 +38,7 @@
   },
   "files": [
     "index.js",
+    "index.mjs",
     "index.d.ts",
     "binding.gyp",
     "lib/chdb_node.cpp",
