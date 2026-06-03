@@ -21,50 +21,61 @@ import { ChdbBindError } from './errors'
 // escaped only for clean round-tripping/readability; leaving them raw inside the
 // quotes would still be safe and is unambiguous. Any other byte (including all
 // UTF-8 multibyte sequences) is passed through verbatim, which is correct.
-const STRING_ESCAPES: ReadonlyArray<[RegExp, string]> = [
-  // Backslash MUST be first so we don't double-escape the escapes we add below.
-  [/\\/g, '\\\\'],
-  [/'/g, "\\'"],
-  [/\0/g, '\\0'],
-  // NB: \x08 (backspace), NOT /\b/ which is a zero-width word-boundary assertion.
-  [/\x08/g, '\\b'],
-  [/\f/g, '\\f'],
-  [/\n/g, '\\n'],
-  [/\r/g, '\\r'],
-  [/\t/g, '\\t'],
-]
+// Per-character escape table for a single-quoted ClickHouse string literal.
+// Keyed by the literal character (e.g. '\b' is the backspace char U+0008, not a
+// word boundary). Performance: escaping is a single O(n) pass that only
+// allocates when an escapable char is hit (see escapeWith), rather than 8
+// sequential whole-string regex replaces.
+const SQL_ESCAPE: Readonly<Record<string, string>> = {
+  '\\': '\\\\',
+  "'": "\\'",
+  '\0': '\\0',
+  '\b': '\\b',
+  '\f': '\\f',
+  '\n': '\\n',
+  '\r': '\\r',
+  '\t': '\\t',
+}
+
+// TSV/Escaped table for query-parameter transport: ClickHouse parses param
+// values with TSV rules (backslash escapes; a raw TAB/newline terminates the
+// field), so a String param must be escaped this way (NOT SQL-quoted). Same as
+// SQL_ESCAPE minus the single-quote (not special in TSV).
+const TSV_ESCAPE: Readonly<Record<string, string>> = {
+  '\\': '\\\\',
+  '\0': '\\0',
+  '\b': '\\b',
+  '\f': '\\f',
+  '\n': '\\n',
+  '\r': '\\r',
+  '\t': '\\t',
+}
+
+// Single-pass escape: copy runs of safe chars and substitute escapes inline.
+function escapeWith(s: string, table: Readonly<Record<string, string>>): string {
+  let out = ''
+  let last = 0
+  for (let i = 0; i < s.length; i++) {
+    const rep = table[s[i] as string]
+    if (rep !== undefined) {
+      out += s.slice(last, i) + rep
+      last = i + 1
+    }
+  }
+  return last === 0 ? s : out + s.slice(last)
+}
 
 /**
  * Escape a JS string into a single-quoted ClickHouse string literal.
  * Escapes `\`, `'`, NUL, and the C0 control chars `\b \f \n \r \t`.
  */
 export function escapeStringLiteral(s: string): string {
-  let body = s
-  for (const [re, rep] of STRING_ESCAPES) {
-    body = body.replace(re, rep)
-  }
-  return `'${body}'`
+  return `'${escapeWith(s, SQL_ESCAPE)}'`
 }
-
-// ClickHouse parses query-parameter values with TSV/Escaped rules: backslash is
-// an escape introducer and a raw TAB/newline terminates the field. So a String
-// param value must be escaped the same way (NOT SQL-quoted). This is distinct
-// from escapeStringLiteral (which targets the SQL parser).
-const TSV_ESCAPES: ReadonlyArray<[RegExp, string]> = [
-  [/\\/g, '\\\\'], // backslash first
-  [/\0/g, '\\0'],
-  [/\x08/g, '\\b'],
-  [/\f/g, '\\f'],
-  [/\n/g, '\\n'],
-  [/\r/g, '\\r'],
-  [/\t/g, '\\t'],
-]
 
 /** Escape a string for ClickHouse TSV/Escaped query-parameter transport. */
 export function tsvEscape(s: string): string {
-  let out = s
-  for (const [re, rep] of TSV_ESCAPES) out = out.replace(re, rep)
-  return out
+  return escapeWith(s, TSV_ESCAPE)
 }
 
 const IDENTIFIER_RE = /^[A-Za-z0-9_.]+$/

@@ -24,6 +24,7 @@
     "libchdb": "bash ./update_libchdb.sh",
     "fixloaderpath": "bash ./fix_loader_path.sh",
     "build:platform": "bash ./scripts/build-platform-pkg.sh",
+    "bench": "node bench/bench.js",
     "build": "node-gyp configure build --verbose && npm run fixloaderpath && npm run build:ts",
     "build:ts": "tsc -p tsconfig.build.json",
     "prepack": "npm run build:ts"
