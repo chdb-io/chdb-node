@@ -16,18 +16,25 @@ char * QueryWithConnection(ChdbConnection conn, const char * query, const char *
 #define MAX_ARG_COUNT 6
 
 
-// NOTE: the v2 chEscape/toCHLiteral SET-param machinery has been removed.
-// Parameter binding now goes through libchdb's server-side chdb_query_with_params
-// (Item 5 / path A): values are bound by the engine, never interpolated into SQL,
-// so there is no string-escaping attack surface at all. The JS layer formats each
-// value to its param-string form (src/serialize.ts: formatParamValue).
+// NOTE: the previous chEscape/toCHLiteral SET-param machinery has been removed.
+// Parameter binding now goes through libchdb's server-side chdb_query_with_params:
+// values are bound by the engine, never interpolated into SQL, so there is no
+// string-escaping attack surface at all. The JS layer formats each value to its
+// param-string form (src/serialize.ts: formatParamValue). Because parameters are
+// applied per call and reset by the engine afterwards, there is no shared mutable
+// param state between calls (unlike the old session-wide "SET param_x=" path,
+// which could race when different callers set different values).
 
-// Connection registry (design §3.2). chDB / libchdb allow only ONE active
-// connection per process; this registry is the single owner of that constraint.
-// It tracks the one live connection by a canonical key, reference-counts session
-// handles, and REJECTS a second concurrent data directory rather than silently
-// switching (silent switching was the #17 crash source). The lazily-created
-// default in-memory connection serves standalone query()/queryBind() and yields
+// Connection registry. chDB / libchdb allow only ONE active connection per
+// process; this registry is the single owner of that constraint. It tracks the
+// one live connection by its path key, reference-counts session handles for the
+// same path (so reopening the same path returns the same connection while it is
+// live), and REJECTS a second concurrent data directory rather than silently
+// switching (silent switching caused the malloc crash on repeated start/stop).
+// The path key is normalized to an absolute path by the JS layer (path.resolve)
+// so "./data" and the absolute form map to the same connection; symlink-level
+// canonicalization is a possible future refinement. The lazily-created default
+// in-memory connection serves standalone query()/queryBind() and yields
 // to a session when one opens (matching v2's release_default_conn behaviour).
 //
 // The canonical handle passed around is the `chdb_connection*` returned by
@@ -165,10 +172,11 @@ char *Query(const char *query, const char *format, char **error_message) {
   return exec_query(*conn_ptr, query, format, error_message);
 }
 
-// Server-side parameter binding (Item 5 / path A). Values are pre-formatted to
-// param strings by the JS layer; the engine resolves each type from the
-// {name:Type} placeholder. Binary-safe (uses *_params_n with explicit value
-// lengths) so String params may contain embedded null bytes.
+// Server-side parameter binding. Values are pre-formatted to param strings by
+// the JS layer; the engine resolves each type from the {name:Type} placeholder
+// and the parameters are scoped to this single call. Binary-safe (uses
+// *_params_n with explicit value lengths) so String params may contain embedded
+// null bytes.
 static char *exec_query_params(chdb_connection conn,
                                const std::string &query,
                                const std::string &format,
@@ -355,7 +363,7 @@ Napi::String QueryWithParamsConnectionWrapper(const Napi::CallbackInfo &info) {
 // resolves to { bytes, elapsed, rowsRead, bytesRead } or rejects with the
 // native error message (the JS layer maps it to a typed ChdbError).
 //
-// Honest single-shot cancellation (§10): there is no interrupt for chdb_query,
+// Honest single-shot cancellation: there is no interrupt for chdb_query,
 // so AbortSignal/timeout are handled JS-side (reject early; the native thread
 // runs to completion and its result is discarded). The connection handle is
 // resolved on the main thread (registry is not touched off-thread).
@@ -488,9 +496,9 @@ Napi::Value QueryAsyncConnectionWrapper(const Napi::CallbackInfo &info) {
 
 //===--------------------------------------------------------------------===//
 // Streaming query (chdb_stream_query / _fetch_result / _cancel_query). Each
-// fetch runs on the libuv thread pool (non-blocking, §6 / #29). v1 copies each
-// chunk into a JS Buffer and destroys the native chunk immediately (simple,
-// no UAF); true zero-copy is a later optimization.
+// fetch runs on the libuv thread pool so it does not block the event loop. It
+// copies each chunk into a JS Buffer and destroys the native chunk immediately
+// (simple, no use-after-free); true zero-copy is a later optimization.
 //===--------------------------------------------------------------------===//
 struct StreamState {
   chdb_connection conn;   // dereferenced handle
@@ -702,7 +710,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("CloseConnection", Napi::Function::New(env, CloseConnectionWrapper));
   exports.Set("QueryWithConnection", Napi::Function::New(env, QueryWithConnectionWrapper));
 
-  // Most-reliable exit cleanup (§10): close the active connection on env
+  // Most-reliable exit cleanup: close the active connection on env
   // teardown, ahead of (and complementary to) the std::atexit backstop. Both
   // call the idempotent hard_close_active, so running twice is harmless.
   env.AddCleanupHook([] { hard_close_active(); });

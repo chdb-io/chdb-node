@@ -1,5 +1,5 @@
 /**
- * Layer 1 typed error model (design §3.3).
+ * Typed error model for the low-level binding.
  *
  * Iron rules encoded here:
  *  1. Every failure surfaced to JS is a typed `ChdbError` subclass — never a

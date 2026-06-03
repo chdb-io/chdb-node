@@ -4,7 +4,7 @@ const fs = require('fs');
 // locally compiled build/Release in dev, else a diagnostic error.
 const chdbNode = require('./dist/loader.js').loadNative();
 const { mkdtempSync, rmSync, realpathSync } = fs;
-const { join } = require('path');
+const { join, resolve: resolvePath } = require('path');
 const os = require('os');
 const {
   ChdbConnectionError,
@@ -114,9 +114,11 @@ function formatParams(args) {
   return bound;
 }
 
-// D4: the v2 temp prefix was 'tmp-chdb-node' (no separator before the random
-// suffix); 'chdb-node-' gives a clean, recognizable prefix used by the cleanup
-// safety gate below.
+// Temp-dir prefix. The previous binding used 'tmp-chdb-node' — that has no
+// separator before mkdtemp's random suffix, and 'tmp-' is redundant since the
+// dir already lives under os.tmpdir(). 'chdb-node-' is a clean, recognizable
+// prefix that the cleanup safety gate below keys on (basename must start with
+// it before we will ever delete a directory).
 const TMP_PREFIX = 'chdb-node-';
 
 // Map an error thrown by the native addon to a typed ChdbError, preserving the
@@ -251,7 +253,7 @@ function insert(opts) {
 }
 
 // Track open sessions so a normal process exit can release native connections
-// and remove temp dirs even when the user forgot to close (design §10). This
+// and remove temp dirs even when the user forgot to close. This
 // complements the native env cleanup hook + std::atexit backstop.
 const openSessions = new Set();
 let exitHookInstalled = false;
@@ -279,9 +281,13 @@ class Session {
       this.isTemp = false;
     }
 
-    // Create a connection for this session (registry enforces single-active).
+    // Create a connection for this session (the native registry enforces a
+    // single active connection per process). The registry key is normalized to
+    // an absolute path so e.g. "./data" and its absolute form map to the same
+    // connection; this.path is left as the caller passed it (public surface).
     try {
-      this.connection = chdbNode.CreateConnection(this.path);
+      const key = this.path ? resolvePath(this.path) : this.path;
+      this.connection = chdbNode.CreateConnection(key);
     } catch (e) {
       if (this.isTemp) { try { this.#removeTempDir(); } catch (_) {} }
       throw asConnectionError(e);
@@ -313,8 +319,10 @@ class Session {
     }
   }
 
-  // Item 5: server-side parameter binding now works on sessions too (the v2
-  // behaviour was an unconditional throw; chdb_query_with_params makes it real).
+  // Session.queryBind binds {name:Type} placeholders against this session's
+  // connection using server-side parameter binding. (The earlier binding had no
+  // working session implementation here — it unconditionally threw; this makes
+  // it functional. Standalone queryBind() behaves the same way.)
   queryBind(query, args = {}, format = "CSV") {
     if (!query) return "";
     if (!this.connection) {
@@ -374,7 +382,7 @@ class Session {
   }
 
   // close(): release the connection and (for temp sessions) remove the temp
-  // dir. Idempotent and never throws (design §10).
+  // dir. Idempotent and never throws.
   close() {
     if (this.#closed) return;
     this.#closed = true;
@@ -431,7 +439,7 @@ class Session {
   }
 }
 
-// Diagnostic version info (design §5). libchdb is probed via SELECT version();
+// Diagnostic version info. libchdb is probed via SELECT version();
 // falls back to 'unknown' if a session is holding the single active connection.
 function version() {
   let libchdb = 'unknown';

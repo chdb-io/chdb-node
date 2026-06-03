@@ -1,21 +1,26 @@
 /**
- * Value serialization primitives (design §3.4 / §8, path B).
+ * Value serialization primitives: dependency-free building blocks that turn JS
+ * values into ClickHouse SQL literals, shared by the queryBind and insert code
+ * paths.
  *
- * These are the dependency-free building blocks that both queryBind (Item 5)
- * and insert (Item 6) consume to turn JS values into ClickHouse SQL literals.
+ * Security note: the previous binding escaped `'` but NOT `\`, so a value like
+ * `a\' OR 1=1 --` could break out of a single-quoted string literal.
+ * {@link escapeStringLiteral} escapes the backslash first to close that hole.
  *
- * Security note: this module closes the v2 `chEscape` injection hole — v2
- * escaped `'` but NOT `\`, so a value like `a\' OR 1=1 --` could break out of
- * the string literal. {@link escapeStringLiteral} escapes the backslash first.
- *
- * Scope: this is the JS-type-directed serializer (no declared `{name:Type}`).
- * The declared-type-aware binder (the 64-bit `number` rejection, Tuple vs
- * Array disambiguation, per-`:Type` coercion, @clickhouse/client 1:1 parity)
- * layers on top of these primitives in Item 5.
+ * Scope: this is the JS-type-directed serializer. The declared-type-aware
+ * binder for `{name:Type}` placeholders is layered on top (see formatParamValue
+ * and the native chdb_query_with_params path).
  */
 
 import { ChdbBindError } from './errors'
 
+// Characters that must be backslash-escaped inside a single-quoted ClickHouse
+// string literal. SECURITY-CRITICAL: only `\` (the escape introducer) and `'`
+// (the literal delimiter) can break out of the string — those two are what make
+// this injection-safe. The C0 control chars below (\0 \b \f \n \r \t) are
+// escaped only for clean round-tripping/readability; leaving them raw inside the
+// quotes would still be safe and is unambiguous. Any other byte (including all
+// UTF-8 multibyte sequences) is passed through verbatim, which is correct.
 const STRING_ESCAPES: ReadonlyArray<[RegExp, string]> = [
   // Backslash MUST be first so we don't double-escape the escapes we add below.
   [/\\/g, '\\\\'],
@@ -67,8 +72,8 @@ const IDENTIFIER_RE = /^[A-Za-z0-9_.]+$/
 /**
  * Validate an identifier (table / column / database, possibly dotted) against a
  * strict whitelist and return it unchanged. Identifiers are guarded by the
- * whitelist, NOT by quote-escaping (design §8): `db.table` must pass through as
- * `db.table`, not be wrapped as a single backtick-quoted name.
+ * whitelist, NOT by quote-escaping: `db.table` must pass through as `db.table`,
+ * not be wrapped as a single backtick-quoted name.
  *
  * @throws ChdbBindError if the identifier contains anything outside `[A-Za-z0-9_.]`.
  */
@@ -172,6 +177,14 @@ export function serializeValue(value: unknown): string {
   throw new ChdbBindError(`Cannot serialize value of type ${typeof value}`)
 }
 
+// Recursion cost: serializeValue recurses once per element/entry, so cost is
+// O(total cells) and is bounded by the input the caller already holds in
+// memory. It runs once per query/insert at serialization time, not in a
+// per-row hot loop, so for typical parameters (scalars, small arrays/maps) it
+// is negligible. The place this can matter is bulk insert of large arrays
+// (O(rows x cells) string building + one large VALUES string); that path is
+// intended to move to the Arrow/binary insert route rather than be optimized
+// here.
 function serializeArray(arr: ReadonlyArray<unknown>): string {
   return `[${arr.map((x) => serializeValue(x)).join(',')}]`
 }

@@ -1,6 +1,6 @@
 /**
- * Native binding loader (design §4 / Item 1). Resolves the prebuilt native
- * addon at runtime without any local compilation:
+ * Native binding loader. Resolves the prebuilt native addon at runtime without
+ * any local compilation:
  *
  *   1. the matching per-platform subpackage @chdb/lib-<platform> (the published
  *      path — installed via optionalDependencies + os/cpu filtering), then
@@ -13,7 +13,7 @@
 import { join } from 'path'
 import { ChdbPlatformUnsupportedError, ChdbBinaryVersionMismatchError } from './errors'
 
-/** First-batch platforms (D7): no musl, no Windows. */
+/** First-batch platforms: no musl, no Windows. */
 const PLATFORM_PACKAGES: Readonly<Record<string, string>> = {
   'darwin-arm64': '@chdb/lib-darwin-arm64',
   'darwin-x64': '@chdb/lib-darwin-x64',

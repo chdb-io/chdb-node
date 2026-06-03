@@ -1,6 +1,6 @@
 /**
- * Result of an async query (design §3.1/§3.4). Wraps the raw output bytes plus
- * engine metrics. `text()` / `json()` are lazy views over the same buffer.
+ * Result of an async query. Wraps the raw output bytes plus engine metrics;
+ * `text()` / `json()` are lazy views over the same buffer.
  */
 import { ChdbArrowError } from './errors'
 
@@ -53,9 +53,9 @@ export class ChdbResult {
    * dependency; throws ChdbArrowError if it is not installed or the bytes are
    * not valid Arrow IPC.
    *
-   * v1 is the M1 path: bytes are owned by JS (copied off the engine), so the
-   * returned Table is safe to hold. The M2 zero-copy path (chdb_query_arrow +
-   * external ArrayBuffers) is a separate opt-in, not yet wired.
+   * The bytes are owned by JS (copied off the engine), so the returned Table is
+   * safe to hold indefinitely. A future zero-copy path (exposing the engine's
+   * Arrow buffers directly via external ArrayBuffers) is tracked separately.
    *
    * @returns an apache-arrow `Table` (typed loosely to avoid a hard dependency).
    */

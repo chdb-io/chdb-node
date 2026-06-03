@@ -1,11 +1,11 @@
 /**
- * Insert support (Item 6 / §9). Builds a single multi-row `INSERT ... VALUES`
- * with the data serialized inline (via serializeValue). This NEVER triggers the
- * stdin-read fallback that hung complex-type inserts (#26, root cause chdb#152),
- * and it handles every CH type the serializer does (Array/Map/Date/bigint/…).
+ * Insert support. Builds a single multi-row `INSERT ... VALUES` with the data
+ * serialized inline (via serializeValue). Inlining the data NEVER triggers the
+ * stdin-read fallback that previously hung complex-type inserts (see issue #26),
+ * and it handles every type the serializer does (Array/Map/Date/bigint/…).
  *
- * v1 scope: in-memory row arrays (objects or positional arrays). Stream.Readable
- * input and chunking of very large inputs are a documented follow-up.
+ * Scope: in-memory row arrays (objects or positional arrays). Stream input and
+ * chunking of very large inputs are a tracked follow-up.
  */
 
 import { serializeValue, validateIdentifier } from './serialize'

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { query, version, Session } from '../../index.js'
 
 // Errors thrown by index.js come from the compiled dist/ module, so a different
@@ -91,6 +91,29 @@ describe('connection registry (single-active-connection constraint)', () => {
 
   it('allows standalone query again after all sessions are closed', () => {
     expect(query('SELECT 7', 'CSV').trim()).toBe('7')
+  })
+
+  it('maps a relative and its absolute path to the same connection (key normalized)', () => {
+    const abs = mkTmp()
+    const rel = relative(process.cwd(), abs) // e.g. ../../var/.../chdb-reg-XXXX
+    let sa: Session | undefined
+    let sb: Session | undefined
+    try {
+      sa = new Session(abs)
+      sa.query('CREATE TABLE t (x UInt32) ENGINE = MergeTree() ORDER BY x')
+      sa.query('INSERT INTO t VALUES (5)')
+      // Opening via the relative form must NOT conflict (it resolves to the same
+      // absolute key) and must see the same data.
+      sb = new Session(rel)
+      expect(sb.query('SELECT sum(x) FROM t', 'CSV').trim()).toBe('5')
+      // public .path is preserved verbatim per handle
+      expect(sa.path).toBe(abs)
+      expect(sb.path).toBe(rel)
+    } finally {
+      sa?.cleanup()
+      sb?.cleanup()
+      rmSync(abs, { recursive: true, force: true })
+    }
   })
 })
 
