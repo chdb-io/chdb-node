@@ -1,0 +1,76 @@
+name: prebuild-publish
+
+# On a version tag: build the per-platform @chdb/lib-* native subpackages on
+# each target runner and publish them, then publish the thin main `chdb` package
+# (which pulls the subpackages in via optionalDependencies). No QEMU — native
+# arm runners are used directly.
+#
+# Gated on update_libchdb.sh pointing at a libchdb release that includes
+# #73 (chdb_query_with_params) and #15 (chdb_query_arrow).
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  subpackages:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, plat: linux-x64-gnu }
+          - { os: ubuntu-24.04-arm, plat: linux-arm64-gnu }
+          - { os: macos-14, plat: darwin-arm64 }
+          - { os: macos-13, plat: darwin-x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          registry-url: "https://registry.npmjs.org"
+      - name: Install patchelf (linux rpath)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y patchelf
+      - run: npm install --ignore-scripts
+      - run: npm run libchdb
+      - run: npm run build
+      - run: npm run test:all
+      - name: Derive libchdb version from update_libchdb.sh
+        run: |
+          REL=$(grep -E '^LATEST_RELEASE=' update_libchdb.sh | cut -d= -f2)
+          echo "CHDB_LIB_VERSION=${REL#v}" >> "$GITHUB_ENV"
+      - name: Build subpackage
+        run: npm run build:platform
+      - name: Publish subpackage
+        run: npm publish --access public
+        working-directory: npm/@chdb/lib-${{ matrix.plat }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  main:
+    needs: subpackages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install --ignore-scripts
+      - name: Set main version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm pkg set version="$VERSION"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "NPM_DIST_TAG=next" >> "$GITHUB_ENV"
+          else
+            echo "NPM_DIST_TAG=latest" >> "$GITHUB_ENV"
+          fi
+      - name: Publish main (prepack builds dist)
+        run: npm publish --provenance --access public --tag "$NPM_DIST_TAG"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

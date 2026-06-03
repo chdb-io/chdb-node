@@ -3,7 +3,13 @@
 [![npm version](https://badge.fury.io/js/chdb.svg)](https://badge.fury.io/js/chdb)
 
 # chdb-node
-[chDB](https://github.com/chdb-io/chdb) nodejs bindings.
+
+[chDB](https://github.com/chdb-io/chdb) Node.js bindings — an in-process
+ClickHouse engine for Node, Bun and Deno.
+
+> **v3 (Layer 1) is in development.** The v2 `query` / `queryBind` / `Session`
+> API is preserved (your v2 code keeps working); v3 adds async queries,
+> server-side parameter binding, inserts, streaming, and Arrow output.
 
 ### Install
 
@@ -11,47 +17,76 @@
 npm i chdb
 ```
 
+Prebuilt native binaries ship as per-platform subpackages (`@chdb/lib-*`,
+resolved via `optionalDependencies`) — no local compilation, no `node-gyp`, no
+Python. First-batch platforms: Linux x64/arm64 (glibc) and macOS x64/arm64.
+Windows is not supported (use WSL2).
+
 ### Usage
 
 ```javascript
-const { query, Session } = require("chdb");
+const { query, queryAsync, insert, Session } = require("chdb"); // or: import { ... } from "chdb"
 
-var ret;
+// Sync standalone query (v2-compatible, returns a string)
+console.log(query("SELECT version(), 'Hello chDB'", "CSV"));
 
-// Test standalone query
-ret = query("SELECT version(), 'Hello chDB', chdb()", "CSV");
-console.log("Standalone Query Result:", ret);
+// Async query (non-blocking) -> ChdbResult (text() / json() / bytes() + metrics)
+const r = await queryAsync("SELECT number FROM numbers(5)", { format: "JSONEachRow" });
+console.log(r.rowsRead, r.elapsed);
 
-// Test session query
-// Create a new session instance
-const session = new Session("./chdb-node-tmp");
-ret = session.query("SELECT 123", "CSV")
-console.log("Session Query Result:", ret);
-ret = session.query("CREATE DATABASE IF NOT EXISTS testdb;" +
-    "CREATE TABLE IF NOT EXISTS testdb.testtable (id UInt32) ENGINE = MergeTree() ORDER BY id;");
+// Server-side parameter binding (no SQL injection surface)
+const { queryBind } = require("chdb");
+console.log(queryBind("SELECT {n:UInt32} * 2 AS v", { n: 21 }, "CSV")); // 42
 
-session.query("USE testdb; INSERT INTO testtable VALUES (1), (2), (3);")
+// Session: persistent/in-memory database
+const session = new Session(); // temp dir; or new Session("./data")
+session.query("CREATE TABLE t (id UInt32, name String) ENGINE = MergeTree() ORDER BY id");
 
-ret = session.query("SELECT * FROM testtable;")
-console.log("Session Query Result:", ret);
+// Insert (inline, async; never reads stdin)
+await session.insert({ table: "t", values: [{ id: 1, name: "Alice" }, { id: 2, name: "Bob" }] });
 
-// If an error occurs, it will be thrown
-try {
-    session.query("SELECT * FROM non_existent_table;", "CSV");
-}
-catch (e) {
-    console.log("Error:", e.message);
+// Streaming (chunk-by-chunk, no full buffering)
+for await (const row of session.queryStream("SELECT * FROM t").rows()) {
+  console.log(row);
 }
 
-// Clean up the session
-session.cleanup();
+// Arrow output (no serialization on your side)
+const a = await session.queryAsync("SELECT * FROM t", { format: "arrow" });
+const table = a.toArrow();   // requires the optional `apache-arrow` peer dep
+// const bytes = a.bytes();  // raw Arrow IPC if you bring your own Arrow
 
+session.close(); // (cleanup() is an alias; `using` is supported too)
 ```
 
-#### Build from source
+Errors are typed (`ChdbSyntaxError`, `ChdbQueryError`, `ChdbConnectionError`,
+`ChdbBindError`, `ChdbInsertError`, `ChdbStreamError`, `ChdbArrowError`,
+`ChdbAbortError`, `ChdbTimeoutError`, …), each carrying `.code`, the ClickHouse
+`.clickhouseCode`, and `.cause`.
+
+### Feature matrix
+
+| Capability | Status |
+| --- | --- |
+| Stateless query (sync + async) | ✅ |
+| Session (persistent / in-memory) | ✅ |
+| Server-side parameter binding (`{name:Type}`) | ✅ |
+| Insert (object / positional rows) | ✅ |
+| Streaming results (`AsyncIterable`) | ✅ |
+| Arrow **output** (`format: 'arrow'` + `toArrow()`) | ✅ |
+| AbortSignal / timeout | ✅ (single-shot is honest: rejects early; native runs to completion) |
+| Arrow **scan** (`registerArrowTable`, Arrow input) | ⏳ follow-up |
+| Arrow zero-copy (M2, `{ zeroCopy: true }`) | ⏳ follow-up |
+
+### Runtimes
+
+A single N-API binary serves **Node 18/20/22 + Bun + Deno**.
+
+### Develop / build from source
 
 ```bash
-npm run libchdb
-npm install
-npm run test
+npm install              # JS deps only (no compile-on-install)
+npm run libchdb          # download libchdb for this platform
+npm run build            # node-gyp build + fix loader path + tsc (dist)
+npm run test:all         # v2 (mocha) + v3 (vitest)
+npm run build:platform   # package this platform's @chdb/lib-* subpackage
 ```
