@@ -1,6 +1,8 @@
 const path = require('path');
-const chdbNode = require(path.join(__dirname, 'build', 'Release', 'chdb_node.node'));
 const fs = require('fs');
+// Resolve the native addon via the loader: per-platform subpackage in prod,
+// locally compiled build/Release in dev, else a diagnostic error.
+const chdbNode = require('./dist/loader.js').loadNative();
 const { mkdtempSync, rmSync, realpathSync } = fs;
 const { join } = require('path');
 const os = require('os');
