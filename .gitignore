@@ -1,6 +1,7 @@
 node_modules
 build
 dist
+npm
 /metadata
 /user_defined
 .vscode/
