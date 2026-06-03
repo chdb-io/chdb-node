@@ -55,6 +55,19 @@ export function buildInsertSQL(params: InsertParams): { sql: string; rowsWritten
   let colsClause = ''
   let tuples: string[]
 
+  // `undefined` almost always means an accidentally-missing field; serializing
+  // it as NULL would silently become a default (e.g. 0) in a non-nullable
+  // column. Reject it with a clear error and require an explicit `null` for an
+  // intentional NULL.
+  const cell = (value: unknown, where: string): string => {
+    if (value === undefined) {
+      throw new ChdbInsertError(
+        `undefined value for ${where}; pass null for an explicit NULL`,
+      )
+    }
+    return serializeValue(value)
+  }
+
   try {
     if (objectRows) {
       const cols = Array.isArray(params.columns)
@@ -62,7 +75,7 @@ export function buildInsertSQL(params: InsertParams): { sql: string; rowsWritten
         : Object.keys(rows[0] as Record<string, unknown>)
       colsClause = columnClause(cols)
       tuples = (rows as ReadonlyArray<Record<string, unknown>>).map(
-        (r) => `(${cols.map((c) => serializeValue(r[c])).join(', ')})`,
+        (r, i) => `(${cols.map((c) => cell(r[c], `column "${c}" (row ${i})`)).join(', ')})`,
       )
     } else {
       if (Array.isArray(params.columns)) {
@@ -71,7 +84,7 @@ export function buildInsertSQL(params: InsertParams): { sql: string; rowsWritten
         colsClause = ` (* EXCEPT (${params.columns.except.map(validateIdentifier).join(', ')}))`
       }
       tuples = (rows as ReadonlyArray<ReadonlyArray<unknown>>).map(
-        (arr) => `(${arr.map((v) => serializeValue(v)).join(', ')})`,
+        (arr, i) => `(${arr.map((v, j) => cell(v, `index ${j} (row ${i})`)).join(', ')})`,
       )
     }
   } catch (e) {

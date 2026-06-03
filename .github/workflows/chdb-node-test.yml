@@ -59,3 +59,36 @@ jobs:
           deno-version: vx.x.x
       - name: Deno smoke
         run: deno run --allow-read --allow-ffi --allow-env -e "import { query } from './index.mjs'; if (query('SELECT 1','CSV').trim() !== '1') Deno.exit(1); console.log('deno ok')"
+
+  cleanroom:
+    # Install the BUILT artifacts (thin main + this platform's @chdb/lib-*
+    # subpackage) into a fresh project and run the end-to-end smoke against the
+    # installed `chdb` package — the Node analogue of chDB Python's "pip install
+    # the built wheel, then run the suite". Proves the published shape actually
+    # loads and runs, not just the in-repo source.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - run: sudo apt-get update && sudo apt-get install -y patchelf
+      - run: npm install --ignore-scripts && npm run libchdb && npm run build
+      - name: Pack main + platform subpackage
+        run: |
+          npm run build:platform
+          MAIN_TGZ="$PWD/$(npm pack --silent)"
+          SUB_DIR="$PWD/npm/@chdb/lib-linux-x64-gnu"
+          SUB_TGZ="$SUB_DIR/$(cd "$SUB_DIR" && npm pack --silent)"
+          echo "MAIN_TGZ=$MAIN_TGZ" >> "$GITHUB_ENV"
+          echo "SUB_TGZ=$SUB_TGZ" >> "$GITHUB_ENV"
+      - name: Install into a clean project and run e2e
+        run: |
+          mkdir -p /tmp/cleanroom && cd /tmp/cleanroom
+          npm init -y >/dev/null
+          npm install --no-save "$SUB_TGZ" "$MAIN_TGZ"
+          cp "$GITHUB_WORKSPACE/scripts/smoke-e2e.mjs" ./smoke-e2e.mjs
+          node smoke-e2e.mjs
