@@ -2,6 +2,8 @@
  * Result of an async query (design §3.1/§3.4). Wraps the raw output bytes plus
  * engine metrics. `text()` / `json()` are lazy views over the same buffer.
  */
+import { ChdbArrowError } from './errors'
+
 export interface RawResult {
   bytes: Uint8Array
   elapsed: number
@@ -43,5 +45,34 @@ export class ChdbResult {
   /** JSON.parse of {@link text} — use with a JSON output format. */
   json<T = unknown>(): T {
     return JSON.parse(this.text()) as T
+  }
+
+  /**
+   * Parse the bytes as an Arrow Table (use with `{ format: 'arrow' }`, which
+   * emits the Arrow IPC stream). Requires the optional `apache-arrow` peer
+   * dependency; throws ChdbArrowError if it is not installed or the bytes are
+   * not valid Arrow IPC.
+   *
+   * v1 is the M1 path: bytes are owned by JS (copied off the engine), so the
+   * returned Table is safe to hold. The M2 zero-copy path (chdb_query_arrow +
+   * external ArrayBuffers) is a separate opt-in, not yet wired.
+   *
+   * @returns an apache-arrow `Table` (typed loosely to avoid a hard dependency).
+   */
+  toArrow(): unknown {
+    let arrow: { tableFromIPC: (b: Uint8Array) => unknown }
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      arrow = require('apache-arrow')
+    } catch {
+      throw new ChdbArrowError(
+        "apache-arrow is not installed; run `npm i apache-arrow` to use toArrow(), or use bytes()",
+      )
+    }
+    try {
+      return arrow.tableFromIPC(this.#bytes)
+    } catch (e) {
+      throw new ChdbArrowError(`failed to parse Arrow IPC result: ${(e as Error).message}`, { cause: e })
+    }
   }
 }

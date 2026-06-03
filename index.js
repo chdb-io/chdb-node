@@ -15,6 +15,21 @@ const {
 } = require('./dist/errors.js');
 
 const streamDecoder = new TextDecoder('utf-8');
+
+// User-facing 'arrow' is an alias for ClickHouse's Arrow IPC stream format.
+// Use the async/Buffer path for Arrow (binary-safe; the sync string path would
+// truncate at NUL bytes). ClickHouse compresses Arrow IPC (lz4) by default,
+// which apache-arrow JS cannot decode out of the box, so for 'arrow' we prefix
+// a SET that disables Arrow output compression.
+function prepArrow(query, opts, defaultFormat) {
+  if (opts.format === 'arrow') {
+    return {
+      sql: `SET output_format_arrow_compression_method='none'; ${query}`,
+      format: 'ArrowStream',
+    };
+  }
+  return { sql: query, format: opts.format || defaultFormat };
+}
 const { formatParamValue } = require('./dist/serialize.js');
 const { ChdbResult } = require('./dist/result.js');
 const { buildInsertSQL } = require('./dist/insert.js');
@@ -216,16 +231,16 @@ function queryBind(query, args = {}, format = "CSV") {
 // v3 async (non-blocking) standalone query. opts: { format?, signal?, timeout? }
 function queryAsync(query, opts = {}) {
   if (!query) return Promise.resolve(emptyResult());
-  const format = opts.format || "CSV";
-  return withAbortTimeout(chdbNode.QueryAsync(query, format), opts);
+  const { sql, format } = prepArrow(query, opts, "CSV");
+  return withAbortTimeout(chdbNode.QueryAsync(sql, format), opts);
 }
 
 function queryBindAsync(query, params = {}, opts = {}) {
   if (!query) return Promise.resolve(emptyResult());
-  const format = opts.format || "CSV";
+  const { sql, format } = prepArrow(query, opts, "CSV");
   let bound;
   try { bound = formatParams(params); } catch (e) { return Promise.reject(e); }
-  return withAbortTimeout(chdbNode.QueryAsync(query, format, bound), opts);
+  return withAbortTimeout(chdbNode.QueryAsync(sql, format, bound), opts);
 }
 
 // v3 insert (default connection). opts: { table, values, columns? }
@@ -315,17 +330,17 @@ class Session {
   queryAsync(query, opts = {}) {
     if (!this.connection) return Promise.reject(new ChdbClosedError("No active connection available"));
     if (!query) return Promise.resolve(emptyResult());
-    const format = opts.format || "CSV";
-    return withAbortTimeout(chdbNode.QueryAsyncConnection(this.connection, query, format), opts);
+    const { sql, format } = prepArrow(query, opts, "CSV");
+    return withAbortTimeout(chdbNode.QueryAsyncConnection(this.connection, sql, format), opts);
   }
 
   queryBindAsync(query, params = {}, opts = {}) {
     if (!this.connection) return Promise.reject(new ChdbClosedError("No active connection available"));
     if (!query) return Promise.resolve(emptyResult());
-    const format = opts.format || "CSV";
+    const { sql, format } = prepArrow(query, opts, "CSV");
     let bound;
     try { bound = formatParams(params); } catch (e) { return Promise.reject(e); }
-    return withAbortTimeout(chdbNode.QueryAsyncConnection(this.connection, query, format, bound), opts);
+    return withAbortTimeout(chdbNode.QueryAsyncConnection(this.connection, sql, format, bound), opts);
   }
 
   // v3 insert. opts: { table, values, columns? }. Inline INSERT ... VALUES,
@@ -344,14 +359,14 @@ class Session {
     if (this._activeStream && !this._activeStream.closed) {
       throw new ChdbStreamError("a stream is already active on this session; finish or cancel it first");
     }
-    const format = opts.format || "JSONEachRow";
+    const prep = prepArrow(sql, opts, "JSONEachRow");
     let handle;
     try {
-      handle = chdbNode.StreamQuery(this.connection, sql, format);
+      handle = chdbNode.StreamQuery(this.connection, prep.sql, prep.format);
     } catch (e) {
       throw asQueryError(e);
     }
-    const stream = new ChdbQueryStream(handle, format, opts.signal);
+    const stream = new ChdbQueryStream(handle, prep.format, opts.signal);
     this._activeStream = stream;
     return stream;
   }

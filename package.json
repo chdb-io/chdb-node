@@ -38,6 +38,7 @@
   ],
   "devDependencies": {
     "@types/node": "^20.14.0",
+    "apache-arrow": "^21.1.0",
     "chai": "^4.5.0",
     "mocha": "^10.7.3",
     "node-gyp": "^9.3.1",
@@ -47,6 +48,14 @@
   "dependencies": {
     "node-addon-api": "^6.1.0",
     "node-gyp-build": "^4.6.0"
+  },
+  "peerDependencies": {
+    "apache-arrow": ">=14"
+  },
+  "peerDependenciesMeta": {
+    "apache-arrow": {
+      "optional": true
+    }
   },
   "keywords": [
     "chdb",

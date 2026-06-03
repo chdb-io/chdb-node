@@ -44,6 +44,12 @@ export interface ChdbResult {
   bytes(): Uint8Array;
   text(): string;
   json<T = unknown>(): T;
+  /**
+   * Parse the result as an Arrow Table (use with `{ format: 'arrow' }`).
+   * Requires the optional `apache-arrow` peer dependency. Returns an
+   * apache-arrow `Table` (typed as `unknown` to avoid a hard dependency).
+   */
+  toArrow(): unknown;
 }
 
 /**
