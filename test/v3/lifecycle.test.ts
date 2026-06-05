@@ -107,6 +107,27 @@ describe('signal handlers (D3: default OFF, opt-in only)', () => {
       restore(snap)
     }
   })
+
+  it('deregisters its opt-in handler on close (no accumulation)', () => {
+    const snap = listenerSnapshot()
+    const s = new Session('', { installSignalHandlers: true })
+    expect(process.listeners('SIGINT').length).toBe(snap.SIGINT.length + 1)
+    s.close()
+    // close() must remove the handler it registered, restoring the baseline
+    expect(process.listeners('SIGINT').length).toBe(snap.SIGINT.length)
+    expect(process.listeners('SIGTERM').length).toBe(snap.SIGTERM.length)
+  })
+
+  it('does not accumulate listeners across many opt-in sessions', () => {
+    const snap = listenerSnapshot()
+    for (let i = 0; i < 50; i++) {
+      const s = new Session('', { installSignalHandlers: true })
+      s.close()
+    }
+    // every session deregistered on close — back to baseline, no leak/warning
+    expect(process.listeners('SIGINT').length).toBe(snap.SIGINT.length)
+    expect(process.listeners('SIGTERM').length).toBe(snap.SIGTERM.length)
+  })
 })
 
 describe('repeated start/stop stability (#17)', () => {

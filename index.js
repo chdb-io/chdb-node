@@ -103,6 +103,21 @@ function withAbortTimeout(nativePromise, opts) {
   });
 }
 
+// Parameterized queries set+reset parameter state ON THE CONNECTION, so two
+// param queries overlapping on the same connection corrupt each other (wrong
+// values / "Substitution not set"). We therefore serialize the parameterized
+// async path PER CONNECTION via a promise chain (the default connection and
+// each Session get their own). Non-parameterized queries are unaffected and stay
+// concurrent. The chain advances on NATIVE completion (not on early abort/
+// timeout), so an aborted param query still fully drains before the next starts.
+const defaultParamChain = { tail: Promise.resolve() };
+
+function runExclusiveParam(chain, startNative, opts) {
+  const nativeP = chain.tail.then(() => startNative());
+  chain.tail = nativeP.then(() => {}, () => {});
+  return withAbortTimeout(nativeP, opts);
+}
+
 // Format a JS params object into { name: paramString } for server-side binding
 // (chdb_query_with_params). Throws ChdbBindError (typed) on bad values; that
 // propagates as-is.
@@ -244,7 +259,7 @@ function queryBindAsync(query, params = {}, opts = {}) {
   const { sql, format } = prepArrow(query, opts, "CSV");
   let bound;
   try { bound = formatParams(params); } catch (e) { return Promise.reject(e); }
-  return withAbortTimeout(chdbNode.QueryAsync(sql, format, bound), opts);
+  return runExclusiveParam(defaultParamChain, () => chdbNode.QueryAsync(sql, format, bound), opts);
 }
 
 // v3 insert (default connection). opts: { table, values, columns? }
@@ -268,8 +283,12 @@ function ensureExitHook() {
 }
 
 // Session class with connection-based path handling
+const SESSION_SIGNALS = ['SIGINT', 'SIGTERM'];
+
 class Session {
   #closed = false;
+  #paramChain = { tail: Promise.resolve() }; // per-connection serialization for parameterized queries
+  #signalHandler = null; // opt-in signal handler, deregistered on close()
 
   constructor(path = "", opts = {}) {
     if (path === "") {
@@ -350,7 +369,7 @@ class Session {
     const { sql, format } = prepArrow(query, opts, "CSV");
     let bound;
     try { bound = formatParams(params); } catch (e) { return Promise.reject(e); }
-    return withAbortTimeout(chdbNode.QueryAsyncConnection(this.connection, sql, format, bound), opts);
+    return runExclusiveParam(this.#paramChain, () => chdbNode.QueryAsyncConnection(this.connection, sql, format, bound), opts);
   }
 
   // v3 insert. opts: { table, values, columns? }. Inline INSERT ... VALUES,
@@ -387,6 +406,13 @@ class Session {
     if (this.#closed) return;
     this.#closed = true;
     openSessions.delete(this);
+    // Deregister the opt-in signal handler so its closure (which retains `this`)
+    // is released and the listeners don't accumulate across many short-lived
+    // sessions when no signal ever fires.
+    if (this.#signalHandler) {
+      for (const sig of SESSION_SIGNALS) process.removeListener(sig, this.#signalHandler);
+      this.#signalHandler = null;
+    }
     if (this.connection) {
       try { chdbNode.CloseConnection(this.connection); } catch (_) { /* best effort */ }
       this.connection = null;
@@ -435,7 +461,8 @@ class Session {
   // decide how to terminate. See the README for the recommended app pattern.
   #installSignalHandlers() {
     const handler = () => { try { this.close(); } catch (_) { /* best effort */ } };
-    for (const sig of ['SIGINT', 'SIGTERM']) process.once(sig, handler);
+    this.#signalHandler = handler;
+    for (const sig of SESSION_SIGNALS) process.once(sig, handler);
   }
 }
 
