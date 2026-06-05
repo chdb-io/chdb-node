@@ -78,7 +78,11 @@ export function tsvEscape(s: string): string {
   return escapeWith(s, TSV_ESCAPE)
 }
 
-const IDENTIFIER_RE = /^[A-Za-z0-9_.]+$/
+// Dot-separated segments, each non-empty and limited to [A-Za-z0-9_]. The `.`
+// is only a `db.table` separator: this rejects the empty string, a leading or
+// trailing dot, and consecutive dots (`.`, `..`, `a..b`, `.tbl`, `tbl.`), all
+// of which pass a flat [A-Za-z0-9_.] whitelist but produce malformed SQL.
+const IDENTIFIER_RE = /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/
 
 /**
  * Validate an identifier (table / column / database, possibly dotted) against a
@@ -86,12 +90,13 @@ const IDENTIFIER_RE = /^[A-Za-z0-9_.]+$/
  * whitelist, NOT by quote-escaping: `db.table` must pass through as `db.table`,
  * not be wrapped as a single backtick-quoted name.
  *
- * @throws ChdbBindError if the identifier contains anything outside `[A-Za-z0-9_.]`.
+ * @throws ChdbBindError if the identifier is not non-empty `[A-Za-z0-9_]`
+ *   segments separated by `.`.
  */
 export function validateIdentifier(name: string): string {
   if (typeof name !== 'string' || !IDENTIFIER_RE.test(name)) {
     throw new ChdbBindError(
-      `Invalid identifier ${JSON.stringify(name)}: only [A-Za-z0-9_.] are allowed`,
+      `Invalid identifier ${JSON.stringify(name)}: expected non-empty [A-Za-z0-9_] segments separated by '.'`,
     )
   }
   return name

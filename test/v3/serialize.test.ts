@@ -42,6 +42,15 @@ describe('validateIdentifier', () => {
       expect(() => validateIdentifier(bad)).toThrow(ChdbBindError)
     }
   })
+
+  it('rejects empty dotted segments (leading/trailing/double dot)', () => {
+    // these pass a flat [A-Za-z0-9_.] whitelist but are malformed identifiers
+    for (const bad of ['.', '..', 'a..b', '.tbl', 'tbl.', 'db..t', '.db.t', 'db.t.']) {
+      expect(() => validateIdentifier(bad)).toThrow(ChdbBindError)
+    }
+    // well-formed dotted names still pass
+    expect(validateIdentifier('db.schema.events')).toBe('db.schema.events')
+  })
 })
 
 describe('serializeValue (string assertions)', () => {

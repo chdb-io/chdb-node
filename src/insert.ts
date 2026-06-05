@@ -52,6 +52,18 @@ export function buildInsertSQL(params: InsertParams): { sql: string; rowsWritten
   }
 
   const objectRows = !Array.isArray(rows[0])
+
+  // All rows must share the shape of the first row (all objects, or all
+  // positional arrays). A mixed batch would otherwise build wrong SQL or throw
+  // a confusing "undefined value" — reject it up front with a clear error.
+  for (let i = 1; i < rows.length; i++) {
+    if (!Array.isArray(rows[i]) !== objectRows) {
+      throw new ChdbInsertError(
+        `Inconsistent row shape at row ${i}: all rows must be ${objectRows ? 'objects' : 'arrays'}`,
+      )
+    }
+  }
+
   let colsClause = ''
   let tuples: string[]
 
@@ -70,13 +82,28 @@ export function buildInsertSQL(params: InsertParams): { sql: string; rowsWritten
 
   try {
     if (objectRows) {
-      const cols = Array.isArray(params.columns)
+      const explicitCols = Array.isArray(params.columns)
+      const cols = explicitCols
         ? (params.columns as ReadonlyArray<string>)
         : Object.keys(rows[0] as Record<string, unknown>)
       colsClause = columnClause(cols)
-      tuples = (rows as ReadonlyArray<Record<string, unknown>>).map(
-        (r, i) => `(${cols.map((c) => cell(r[c], `column "${c}" (row ${i})`)).join(', ')})`,
-      )
+      // When columns are inferred from row 0, a later row carrying a key absent
+      // from row 0 would be silently dropped (data loss). Surface it instead.
+      // An explicit `columns` list is an intentional projection, so it's exempt.
+      const colSet = explicitCols ? null : new Set(cols)
+      tuples = (rows as ReadonlyArray<Record<string, unknown>>).map((r, i) => {
+        if (colSet) {
+          for (const k of Object.keys(r)) {
+            if (!colSet.has(k)) {
+              throw new ChdbInsertError(
+                `Row ${i} has column "${k}" not present in the first row; ` +
+                  `pass an explicit \`columns\` list for a non-uniform batch`,
+              )
+            }
+          }
+        }
+        return `(${cols.map((c) => cell(r[c], `column "${c}" (row ${i})`)).join(', ')})`
+      })
     } else {
       if (Array.isArray(params.columns)) {
         colsClause = columnClause(params.columns as ReadonlyArray<string>)

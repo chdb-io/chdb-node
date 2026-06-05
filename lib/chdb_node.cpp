@@ -200,7 +200,14 @@ static char *exec_query_params(chdb_connection conn,
       conn, query.data(), query.size(), format.data(), format.size(),
       n ? cnames.data() : nullptr, nullptr /* name lens => strlen */,
       n ? cvalues.data() : nullptr, n ? vlens.data() : nullptr, n);
-  if (!result) return nullptr;
+  if (!result) {
+    // A null result is a failure, not an empty success: surface it so the
+    // caller throws instead of silently returning "". Mirrors the async path
+    // (QueryAsyncWorker::Execute), which already SetError()s on a null result.
+    if (error_message && !*error_message)
+      *error_message = strdup("chdb query returned a null result");
+    return nullptr;
+  }
 
   const char *error = chdb_result_error(result);
   if (error) {

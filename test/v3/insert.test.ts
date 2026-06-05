@@ -86,4 +86,36 @@ describe('Session.insert (Item 6: inline INSERT ... VALUES, async, no stdin)', (
       session.insert({ table: 'no_such_table_for_insert', values: [{ a: 1 }] }),
     ).rejects.toMatchObject({ name: 'ChdbInsertError', code: 'CHDB_INSERT' })
   })
+
+  it('rejects a mixed object/array row batch instead of building wrong SQL', async () => {
+    session.query('CREATE TABLE t (a UInt32, b String) ENGINE = Memory')
+    await expect(
+      session.insert({ table: 't', values: [{ a: 1, b: 'x' }, [2, 'y']] as any }),
+    ).rejects.toMatchObject({ name: 'ChdbInsertError', code: 'CHDB_INSERT' })
+    // the symmetric case (array first, object later) is rejected too
+    await expect(
+      session.insert({ table: 't', values: [[1, 'x'], { a: 2, b: 'y' }] as any }),
+    ).rejects.toMatchObject({ name: 'ChdbInsertError', code: 'CHDB_INSERT' })
+  })
+
+  it('rejects a later row with an extra inferred column instead of dropping it', async () => {
+    session.query('CREATE TABLE t (a UInt32, b String) ENGINE = Memory')
+    // columns are inferred from row 0 ({a}); row 1 carries `b`, which would be
+    // silently dropped — must surface as ChdbInsertError, not lose data.
+    await expect(
+      session.insert({ table: 't', values: [{ a: 1 }, { a: 2, b: 'leak' }] }),
+    ).rejects.toMatchObject({ name: 'ChdbInsertError', code: 'CHDB_INSERT' })
+  })
+
+  it('honors an explicit column projection without rejecting extra keys', async () => {
+    session.query('CREATE TABLE t (a UInt32) ENGINE = Memory')
+    // explicit columns = intentional projection: extra keys are ignored, not an error
+    const s = await session.insert({
+      table: 't',
+      values: [{ a: 1, ignore: 'x' }, { a: 2, ignore: 'y' }],
+      columns: ['a'],
+    })
+    expect(s.rowsWritten).toBe(2)
+    expect(session.query('SELECT sum(a) FROM t', 'CSV').trim()).toBe('3')
+  })
 })
