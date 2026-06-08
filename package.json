@@ -8,11 +8,11 @@
     "url": "https://github.com/chdb-io/chdb-node.git"
   },
   "scripts": {
-    "install": "npm run libchdb && npm run build",
+    "install": "bash ./update_libchdb.sh && node-gyp configure build --verbose && bash ./fix_loader_path.sh",
     "test": "mocha test_basic.js test_connection.js --timeout 15000",
     "libchdb": "bash ./update_libchdb.sh",
     "fixloaderpath": "bash ./fix_loader_path.sh",
-    "build": "node-gyp configure build --verbose && npm run fixloaderpath"
+    "build": "node-gyp configure build --verbose && bash ./fix_loader_path.sh"
   },
   "author": {
     "name": "chdb",
