@@ -4,8 +4,8 @@
 # the 4 target runners; the result is published as a versioned npm subpackage
 # that the main package pulls in via optionalDependencies (loader §4 / Item 1).
 #
-# Version: pass CHDB_LIB_VERSION (the chdb-core / ClickHouse release line, e.g.
-# 26.5.1); defaults to 0.0.0-dev for local builds.
+# Version: pass CHDB_LIB_VERSION (the chdb-core release line, e.g. 26.5.0 — the
+# publish workflow derives it from update_libchdb.sh); defaults to 0.0.0-dev.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
