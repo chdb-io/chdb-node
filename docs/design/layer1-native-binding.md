@@ -569,6 +569,37 @@ Review feedback addressed:
 - v2 `24/24` and v3 `118/118` were verified against released macOS arm64 libchdb.
 - Remaining release validation is tag workflow + four platform packages + thin main package.
 
+### 4.20 Streaming insert: backpressure is flow-control, failures are typed errors (design for the §9.4 stream-input follow-up)
+
+Problem: `Readable` stream input is the place Node observability tends to fall off. Backpressure, source stalls, and source errors silently degrade into hangs, unbounded memory growth, or an `unhandledRejection`. The current insert path is in-memory arrays only, so this section fixes the contract before the stream-input follow-up is implemented, not the code.
+
+Scenario: an application pipes a large or un-sized `Readable` (CSV / NDJSON / object stream) into `insert({ values: stream })`, and the producer rate differs from the chDB write rate.
+
+Backpressure is flow-control, not an error. The worker consumes the source with `for await (const row of stream)`, builds one bounded chunk (N rows / M bytes) at a time, and `await`s that chunk's `INSERT` before pulling more. While a chunk is in flight the source is naturally paused, so a fast producer is throttled to the chDB write rate and at most one chunk is buffered. A fast producer can never grow memory without bound. Normal backpressure never throws.
+
+Backpressure-adjacent failures are typed errors, and never silent. They are wired through `stream.pipeline` / `finished` rather than a bare `.on('error')`, so a source error cannot escape as an `unhandledRejection`, and the returned Promise always settles:
+
+| Failure | Surfaced as |
+| --- | --- |
+| source `Readable` emits `'error'` | `ChdbInsertError { reason: 'source-error', cause }` |
+| producer stalls (no data, no `end`) past an idle deadline | `ChdbTimeoutError { reason: 'stall' }` |
+| an un-pausable source pushes past the bounded buffer | `ChdbInsertError { reason: 'backpressure-overflow' }`, refusing to buffer unbounded rather than OOM the host process |
+| a chunk's `INSERT` fails in the engine | `ChdbInsertError { reason: 'write-failure', failedAtRow, cause }`, and the remaining stream pull is aborted |
+| `AbortSignal` fires mid-stream | `ChdbAbortError`; already-flushed chunks are not rolled back (documented) |
+
+Observability:
+
+- the returned `InsertSummary` accumulates `rows_written` / `bytes_read`;
+- on failure the error carries progress so far (`rowsWritten` / `failedAtRow`);
+- an optional `onProgress({ rowsWritten, bytesRead, chunks })` callback makes throughput and backpressure visible instead of a black box;
+- the Promise always settles, by a normal resolve or one of the typed rejects above, never a silent hang.
+
+Policy:
+
+- This is the contract for the §9.4 `Readable` stream-input follow-up; the current in-memory array insert path is unaffected.
+- Read-side streaming (`queryStream`) already provides the symmetric contract: `.cancel()` plus `ChdbStreamError` propagation.
+- Tests land with the implementation in `test/v3/robustness.test.ts`: slow consumer keeps RSS at O(one chunk); `source-error`, `stall`, `backpressure-overflow`, `write-failure`, and `abort` each assert the typed error above; `onProgress` is invoked and the error carries `rowsWritten`.
+
 ## 5. API Surface Snapshot
 
 Current public Layer 1 API:
@@ -774,7 +805,7 @@ High priority:
 Medium priority:
 
 - Binary insert path: Arrow -> engine Block.
-- `Readable` stream input.
+- `Readable` stream input. Must meet the backpressure and observability contract in §4.20: honor backpressure via `for await` plus a bounded single-chunk buffer; surface source-error / stall / backpressure-overflow / write-failure / abort as typed errors wired through `stream.pipeline`; expose progress via `InsertSummary` and an optional `onProgress`.
 
 ### 9.5 Streaming finish
 
