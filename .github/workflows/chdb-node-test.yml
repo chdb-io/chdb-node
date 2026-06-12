@@ -1,53 +1,101 @@
-name: chDB-node
+name: test
 
 on:
   pull_request:
-    branches: [ "main" ]
-    paths-ignore:
-      - '**/.md'
+    branches: ["main"]
+    paths-ignore: ["**/*.md"]
   push:
-    branches: [ "main" ]
-    paths-ignore:
-      - '**/.md'
-    tags:
-      - 'v*'
+    branches: ["main"]
+    paths-ignore: ["**/*.md"]
 
+# update_libchdb.sh pins the published chdb-core v26.5.0 libchdb, which ships
+# chdb_query_with_params (#73) and chdb_query_arrow (#15) across all four target
+# platforms, so the full v2 + v3 suite is expected green here.
 
 jobs:
-  build:
+  test:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-15-intel]
         node-version: [18.x, 20.x, 22.x]
     steps:
-    - name: Use Python 3.11
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    - uses: actions/checkout@v4
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ matrix.node-version }}
-        registry-url: 'https://registry.npmjs.org'
-    - name: Install dependencies
-      run: npm install
-    - name: Run tests
-      run: npm run test
-    - name: Set version from tag
-      if: startsWith(github.ref, 'refs/tags/v') && matrix.node-version == '18.x' && matrix.os == 'ubuntu-latest'
-      run: |
-        VERSION="${GITHUB_REF_NAME#v}"
-        echo "Publishing version: $VERSION"
-        npm pkg set version="$VERSION"
-        if [[ "$VERSION" == *-* ]]; then
-          echo "NPM_DIST_TAG=next" >> "$GITHUB_ENV"
-        else
-          echo "NPM_DIST_TAG=latest" >> "$GITHUB_ENV"
-        fi
-    - name: Publish to npm
-      if: startsWith(github.ref, 'refs/tags/v') && matrix.node-version == '18.x' && matrix.os == 'ubuntu-latest'
-      run: npm publish --tag "$NPM_DIST_TAG"
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install JS deps (no compile-on-install)
+        run: npm install --ignore-scripts
+      - name: Fetch libchdb
+        run: npm run libchdb
+      - name: Build (addon + dist)
+        run: npm run build
+      - name: Test (v2 mocha + v3 vitest)
+        run: npm run test:all
+
+  runtimes:
+    # Best-effort smoke that the N-API binary loads under Bun and Deno.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - run: npm install --ignore-scripts && npm run libchdb && npm run build
+      - uses: oven-sh/setup-bun@v2
+      - name: Bun smoke
+        run: bun -e "const {query}=require('./index.js'); if(query('SELECT 1','CSV').trim()!=='1') process.exit(1); console.log('bun ok')"
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: vx.x.x
+      - name: Deno smoke
+        run: |
+          # newer Deno dropped `deno run -e`; run a script file instead (the
+          # relative import resolves from this file's dir = the repo root)
+          cat > deno-smoke.mjs <<'EOF'
+          import { query } from './index.mjs'
+          if (query('SELECT 1', 'CSV').trim() !== '1') Deno.exit(1)
+          console.log('deno ok')
+          EOF
+          deno run --allow-read --allow-ffi --allow-env deno-smoke.mjs
+
+  cleanroom:
+    # Install the BUILT artifacts (thin main + this platform's @chdb/lib-*
+    # subpackage) into a fresh project and run the end-to-end smoke against the
+    # installed `chdb` package — the Node analogue of chDB Python's "pip install
+    # the built wheel, then run the suite". Proves the published shape actually
+    # loads and runs, not just the in-repo source.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - run: sudo apt-get update && sudo apt-get install -y patchelf
+      - run: npm install --ignore-scripts && npm run libchdb && npm run build
+      - name: Pack main + platform subpackage
+        run: |
+          npm run build:platform
+          MAIN_TGZ="$PWD/$(npm pack --silent)"
+          SUB_DIR="$PWD/npm/@chdb/lib-linux-x64-gnu"
+          SUB_TGZ="$SUB_DIR/$(cd "$SUB_DIR" && npm pack --silent)"
+          echo "MAIN_TGZ=$MAIN_TGZ" >> "$GITHUB_ENV"
+          echo "SUB_TGZ=$SUB_TGZ" >> "$GITHUB_ENV"
+      - name: Install into a clean project and run e2e
+        run: |
+          mkdir -p /tmp/cleanroom && cd /tmp/cleanroom
+          npm init -y >/dev/null
+          npm install --no-save "$SUB_TGZ" "$MAIN_TGZ"
+          cp "$GITHUB_WORKSPACE/scripts/smoke-e2e.mjs" ./smoke-e2e.mjs
+          node smoke-e2e.mjs

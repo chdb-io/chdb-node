@@ -18,6 +18,128 @@ export function query(query: string, format?: string): string;
 export function queryBind(query:string, args: object, format?:string): string;
 
 /**
+ * Options for async queries.
+ */
+export interface QueryOptions {
+  /** Output format (default "CSV"). */
+  format?: string;
+  /**
+   * Abort the query. NOTE: single-shot queries cannot be truly interrupted —
+   * aborting rejects early while the underlying computation finishes in the
+   * background.
+   */
+  signal?: AbortSignal;
+  /** Reject after this many milliseconds (same honest single-shot semantics). */
+  timeout?: number;
+}
+
+/**
+ * Result of an async query: raw bytes plus engine metrics, with lazy text/json
+ * views over the same buffer.
+ */
+export interface ChdbResult {
+  readonly elapsed: number;
+  readonly rowsRead: number;
+  readonly bytesRead: number;
+  bytes(): Uint8Array;
+  text(): string;
+  json<T = unknown>(): T;
+  /**
+   * Parse the result as an Arrow Table (use with `{ format: 'arrow' }`).
+   * Requires the optional `apache-arrow` peer dependency. Returns an
+   * apache-arrow `Table` (typed as `unknown` to avoid a hard dependency).
+   */
+  toArrow(): unknown;
+}
+
+/**
+ * Executes a query asynchronously (non-blocking; runs off the event loop).
+ */
+export function queryAsync(query: string, opts?: QueryOptions): Promise<ChdbResult>;
+
+/**
+ * Executes a parameterized query asynchronously (server-side binding).
+ */
+export function queryBindAsync(query: string, params: object, opts?: QueryOptions): Promise<ChdbResult>;
+
+/**
+ * Parameters for {@link insert} / {@link Session.insert}.
+ */
+export interface InsertParams {
+  /** Target table (optionally db-qualified). */
+  table: string;
+  /** Rows: array of objects, or array of positional value arrays. */
+  values: ReadonlyArray<Record<string, unknown> | ReadonlyArray<unknown>>;
+  /** Explicit column list, or `{ except }` to exclude columns (positional rows). */
+  columns?: ReadonlyArray<string> | { except: ReadonlyArray<string> };
+}
+
+/**
+ * Summary returned by an insert.
+ */
+export interface InsertSummary {
+  rowsWritten: number;
+  bytesRead: number;
+  elapsed: number;
+}
+
+/**
+ * Inserts rows via an inline multi-row INSERT (default connection). Async; never
+ * reads stdin.
+ */
+export function insert(params: InsertParams): Promise<InsertSummary>;
+
+/**
+ * Options for {@link Session.queryStream}.
+ */
+export interface StreamOptions {
+  /** Output format (default "JSONEachRow"). rows() needs a JSON row format. */
+  format?: string;
+  /** Abort between chunks (real cancellation for streaming). */
+  signal?: AbortSignal;
+}
+
+/**
+ * One materialized chunk of a streaming result.
+ */
+export interface StreamChunk {
+  readonly numRows: number;
+  readonly numBytes: number;
+  /** Raw chunk bytes in the chosen format. */
+  raw(): Uint8Array;
+  /** UTF-8 text of the chunk. */
+  text(): string;
+  /** Parsed rows (requires a JSON row format). */
+  rows<T = unknown>(): T[];
+}
+
+/**
+ * AsyncIterable over streaming result chunks. Cancelled/freed automatically on
+ * completion, early break, throw, or an explicit cancel().
+ */
+export interface ChdbQueryStream extends AsyncIterable<StreamChunk> {
+  readonly closed: boolean;
+  /** Row-level async iterator (flattens chunk.rows()). */
+  rows<T = unknown>(): AsyncIterableIterator<T>;
+  /** Node Readable (object mode) over rows. */
+  toReadable(): import('stream').Readable;
+  /** Cancel the stream and release resources. */
+  cancel(): void;
+}
+
+/**
+ * Options for constructing a {@link Session}.
+ */
+export interface SessionOptions {
+  /**
+   * Opt-in: install SIGINT/SIGTERM handlers that close this session. Default
+   * is `false` (a library must not steal the user's signals). These handlers
+   * never call `process.exit`; the app decides how to terminate.
+   */
+  installSignalHandlers?: boolean;
+}
+
+/**
  * Session class for managing queries and temporary paths.
  */
 export class Session {
@@ -32,11 +154,22 @@ export class Session {
   isTemp: boolean;
 
   /**
-   * Creates a new session. If no path is provided, a temporary directory is created.
-   * 
-   * @param path Optional path for the session. If not provided, a temporary directory is used.
+   * The opaque native connection handle, or null after cleanup().
    */
-  constructor(path?: string);
+  connection: unknown;
+
+  /**
+   * Creates a new session. If no path is provided, a temporary directory is created.
+   *
+   * @param path Optional path for the session. If not provided, a temporary directory is used.
+   * @param opts Optional session options.
+   */
+  constructor(path?: string, opts?: SessionOptions);
+
+  /**
+   * True while the native connection is live (i.e. not yet closed).
+   */
+  get open(): boolean;
 
   /**
    * Executes a session-bound query.
@@ -59,7 +192,50 @@ export class Session {
   queryBind(query:string, args: object, format?: string): string;
 
   /**
-   * Cleans up the session, deleting the temporary directory if one was created.
+   * Executes a session-bound query asynchronously (non-blocking).
+   */
+  queryAsync(query: string, opts?: QueryOptions): Promise<ChdbResult>;
+
+  /**
+   * Executes a session-bound parameterized query asynchronously.
+   */
+  queryBindAsync(query: string, params: object, opts?: QueryOptions): Promise<ChdbResult>;
+
+  /**
+   * Inserts rows via an inline multi-row INSERT. Async; never reads stdin.
+   */
+  insert(params: InsertParams): Promise<InsertSummary>;
+
+  /**
+   * Streams a query result chunk-by-chunk (only one active stream per session).
+   */
+  queryStream(query: string, opts?: StreamOptions): ChdbQueryStream;
+
+  /**
+   * Closes the session: releases the native connection and, for a temporary
+   * session, removes the temporary directory. Idempotent and never throws.
+   */
+  close(): void;
+
+  /**
+   * Alias for {@link Session.close} (v2 compatibility).
    */
   cleanup(): void;
+
+  /**
+   * `using` support: closes the session on scope exit.
+   */
+  [Symbol.dispose](): void;
 }
+
+/**
+ * Diagnostic version information for the package, the loaded libchdb, and the
+ * current runtime.
+ */
+export function version(): {
+  chdb: string;
+  libchdb: string;
+  platform: string;
+  arch: string;
+  napi?: number;
+};

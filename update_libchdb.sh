@@ -8,7 +8,10 @@
 # Change directory to the script's directory
 cd "$(dirname "$0")"
 
-LATEST_RELEASE=v26.3.0
+# Fail fast so a bad download never silently leaves a stale/partial libchdb.
+set -e
+
+LATEST_RELEASE=v26.5.0
 
 # Download the correct version based on the platform
 case "$(uname -s)" in
@@ -36,8 +39,19 @@ DOWNLOAD_URL="https://github.com/chdb-io/chdb-core/releases/download/$LATEST_REL
 
 echo "Downloading $PLATFORM from $DOWNLOAD_URL"
 
-# Download the file
-curl -L -o libchdb.tar.gz $DOWNLOAD_URL
+# Download with retries + fail on HTTP errors. The tarball is 100-156 MB and,
+# fetched across many parallel CI jobs, a bare curl occasionally returns a
+# truncated body -> tar then fails with a confusing "chdb.h: No such file" at
+# build time. Retry transient failures and stop early on a hard HTTP error.
+curl --fail --location --retry 5 --retry-delay 3 --retry-all-errors \
+     --connect-timeout 30 -o libchdb.tar.gz "$DOWNLOAD_URL"
+
+# Verify the archive is intact before extracting, so a truncated download is
+# caught here with a clear message instead of downstream as a missing header.
+if ! tar -tzf libchdb.tar.gz >/dev/null 2>&1; then
+  echo "Downloaded libchdb.tar.gz is corrupt or truncated; aborting." >&2
+  exit 1
+fi
 
 # Untar the file
 tar -xzf libchdb.tar.gz

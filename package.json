@@ -3,16 +3,31 @@
   "version": "2.0.0",
   "description": "chDB bindings for nodejs",
   "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/chdb-io/chdb-node.git"
   },
   "scripts": {
-    "install": "npm run libchdb && npm run build",
     "test": "mocha test_basic.js test_connection.js --timeout 15000",
+    "test:v3": "vitest run",
+    "test:all": "npm run test && npm run test:v3",
+    "typecheck": "tsc -p tsconfig.json",
     "libchdb": "bash ./update_libchdb.sh",
     "fixloaderpath": "bash ./fix_loader_path.sh",
-    "build": "node-gyp configure build --verbose && npm run fixloaderpath"
+    "build:platform": "bash ./scripts/build-platform-pkg.sh",
+    "bench": "node bench/bench.js",
+    "build": "node-gyp configure build --verbose && npm run fixloaderpath && npm run build:ts",
+    "build:ts": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build:ts"
   },
   "author": {
     "name": "chdb",
@@ -24,22 +39,37 @@
   },
   "files": [
     "index.js",
+    "index.mjs",
     "index.d.ts",
-    "binding.gyp",
-    "lib/chdb_node.cpp",
-    "lib/chdb_node.h",
-    "update_libchdb.sh",
-    "fix_loader_path.sh",
+    "dist",
     "example.js"
   ],
   "devDependencies": {
+    "@types/node": "^20.14.0",
+    "apache-arrow": "^21.1.0",
     "chai": "^4.5.0",
     "mocha": "^10.7.3",
-    "node-gyp": "^9.3.1"
+    "node-gyp": "^9.3.1",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
   },
   "dependencies": {
     "node-addon-api": "^6.1.0",
     "node-gyp-build": "^4.6.0"
+  },
+  "optionalDependencies": {
+    "@chdb/lib-linux-x64-gnu": ">=26.5.0",
+    "@chdb/lib-linux-arm64-gnu": ">=26.5.0",
+    "@chdb/lib-darwin-x64": ">=26.5.0",
+    "@chdb/lib-darwin-arm64": ">=26.5.0"
+  },
+  "peerDependencies": {
+    "apache-arrow": ">=14"
+  },
+  "peerDependenciesMeta": {
+    "apache-arrow": {
+      "optional": true
+    }
   },
   "keywords": [
     "chdb",

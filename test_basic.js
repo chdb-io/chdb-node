@@ -100,10 +100,13 @@ describe('chDB Queries', function () {
             }).to.throw(Error, /Unknown table expression identifier/);
         });
 
-        it('should throw an error when using queryBind with session', () => {
-          expect(() => {
-            session.queryBind("SELECT * from testdb.testtable where id > {id: UInt32}", { id: 2}, "CSV");
-          }).to.throw(Error, /QueryBind is not supported with connection-based sessions. Please use the standalone queryBind function instead./);
+        it('binds parameters in a session (Item 5: server-side binding)', () => {
+          const out = session.queryBind(
+            "SELECT * from testdb.testtable where id > {id: UInt32}",
+            { id: 2 },
+            "CSV"
+          ).trim();
+          expect(out).to.equal('3');
         })
     });
 

@@ -1,0 +1,42 @@
+name: sanitizer
+
+# EXPERIMENTAL scaffold (design §3.5/§12). Builds the addon with AddressSanitizer
+# and runs the suite. Marked continue-on-error: getting ASan clean against a Node
+# addon needs tuning that must be done on CI (LD_PRELOAD of libasan,
+# ASAN_OPTIONS leak handling for chDB's intentional process-lifetime allocations,
+# and a libchdb built with matching instrumentation for full coverage). Treat
+# failures here as findings to triage, not as a release gate yet.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 3 * * 1" # weekly
+
+jobs:
+  asan:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - run: npm install --ignore-scripts
+      - run: npm run libchdb
+      - name: Build addon with ASan/UBSan
+        env:
+          CXXFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          LDFLAGS: "-fsanitize=address,undefined"
+        run: npm run build
+      - name: Run v3 suite under ASan
+        env:
+          # chDB makes intentional process-lifetime allocations; start with
+          # leak detection off and tighten with suppressions as we triage.
+          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1:halt_on_error=0"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=0"
+        run: |
+          LIBASAN=$(gcc -print-file-name=libasan.so)
+          LD_PRELOAD="$LIBASAN" npm run test:v3
