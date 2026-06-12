@@ -35,13 +35,22 @@ function prepArrow(query, opts, defaultFormat) {
 const { formatParamValue } = require('./dist/serialize.js');
 const { ChdbResult } = require('./dist/result.js');
 const { buildInsertSQL } = require('./dist/insert.js');
+const { buildRawInsertPrefix, isRawValues, isStreamValues } = require('./dist/rawInsert.js');
+const { streamInsert } = require('./dist/streamInsert.js');
 
 // Map a native/query error into a typed ChdbInsertError (preserving message,
-// clickhouseCode and cause).
+// clickhouseCode and cause). The engine's "(at row N)" marker is parsed into
+// failedAtRow (1-based; chunk-local for streamed chunks — streamInsert
+// rebases it to an absolute row number).
 function asInsertError(e) {
   if (e instanceof ChdbInsertError) return e;
   const q = asQueryError(e);
-  return new ChdbInsertError(q.message, { cause: q, clickhouseCode: q.clickhouseCode });
+  const m = /\(at row (\d+)\)/.exec(q.message);
+  return new ChdbInsertError(q.message, {
+    cause: q,
+    clickhouseCode: q.clickhouseCode,
+    failedAtRow: m ? Number(m[1]) : undefined,
+  });
 }
 
 // Shared insert impl: build the inline INSERT...VALUES and run it through the
@@ -60,6 +69,120 @@ function runInsert(nativeAsyncCall, params) {
     (raw) => ({ rowsWritten: built.rowsWritten, bytesRead: raw.bytesRead, elapsed: raw.elapsed }),
     (e) => { throw asInsertError(e); },
   );
+}
+
+// Normalize a raw payload to a Buffer. Uint8Array views are wrapped zero-copy;
+// strings are encoded once on the main thread (documented as a small-payload
+// convenience — large payloads should be born as Buffers).
+function toPayloadBuffer(v) {
+  if (typeof v === 'string') return Buffer.from(v, 'utf8');
+  if (Buffer.isBuffer(v)) return v;
+  return Buffer.from(v.buffer, v.byteOffset, v.byteLength);
+}
+
+// Abort/timeout wrapper for raw inserts. Same honest single-shot semantics as
+// withAbortTimeout: JS settles early, the native write runs to completion and
+// the payload Buffer stays pinned until it does.
+function wrapRawNative(nativePromise, opts, mapOk) {
+  const signal = opts && opts.signal;
+  const timeout = opts && opts.timeout;
+  const base = nativePromise.then(mapOk, (e) => { throw asInsertError(e); });
+  if (!signal && !timeout) return base;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+    };
+    const finish = (fn, v) => { if (!settled) { settled = true; cleanup(); fn(v); } };
+    function onAbort() {
+      finish(reject, new ChdbAbortError(
+        'Insert aborted (the underlying write may still complete in the background)'));
+    }
+    if (signal) {
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    if (timeout) {
+      timer = setTimeout(() => finish(reject, new ChdbTimeoutError(
+        `Insert timed out after ${timeout}ms (the underlying write may still complete in the background)`)), timeout);
+    }
+    base.then((v) => finish(resolve, v), (e) => finish(reject, e));
+  });
+}
+
+// Raw passthrough: the payload Buffer is handed to the native side
+// zero-copy; prefix assembly and execution happen on the libuv thread.
+function runRawInsert(nativeRawCall, params) {
+  let built;
+  try { built = buildRawInsertPrefix(params); } catch (e) { return Promise.reject(asInsertError(e)); }
+  const buf = toPayloadBuffer(params.values);
+  if (buf.length === 0) {
+    return Promise.resolve({
+      rowsWritten: 0, bytesWritten: 0,
+      rowsSent: built.fmt.lineDelimited ? 0 : undefined,
+      bytesSent: 0, elapsed: 0,
+    });
+  }
+  return wrapRawNative(nativeRawCall(built.prefix, buf, built.fmt.lineDelimited), params, (raw) => ({
+    // Engine-side ledger (chdb-io/chdb-core#88): includes MV-cascade writes.
+    rowsWritten: raw.rowsWritten,
+    bytesWritten: raw.bytesWritten,
+    // Payload-side ledger: non-empty lines minus a WithNames header line.
+    rowsSent: raw.rowsSent === undefined ? undefined : Math.max(0, raw.rowsSent - built.fmt.headerLines),
+    bytesSent: buf.length,
+    elapsed: raw.elapsed,
+  }));
+}
+
+// Streaming input over the raw entry (backpressure contract; see src/streamInsert.ts).
+function runStreamInsert(nativeRawCall, params) {
+  let built;
+  try { built = buildRawInsertPrefix(params); } catch (e) { return Promise.reject(asInsertError(e)); }
+  if (!built.fmt.lineDelimited || built.fmt.headerLines !== 0) {
+    return Promise.reject(new ChdbInsertError(
+      `Format '${params.format}' cannot be safely re-chunked for stream input ` +
+      '(CSV may hold raw newlines inside quoted fields; WithNames headers cannot repeat per chunk). ' +
+      'Use JSONEachRow/JSONCompactEachRow/TabSeparated for streams, or a single-shot Buffer insert.'));
+  }
+  // NOTE: objectMode streams are NOT pre-rejected — Readable.from() is
+  // objectMode even when it yields Buffers/strings (a perfectly good byte
+  // source). Object rows are rejected at the first non-byte chunk instead
+  // (streamInsert's toChunkBuffer, with the NDJSON-mapping recipe).
+  const insertChunk = (data) =>
+    wrapRawNative(nativeRawCall(built.prefix, data, true),
+                  { signal: params.signal, timeout: params.timeout }, (raw) => raw);
+  return streamInsert(insertChunk, params);
+}
+
+// insert() dispatch (never guesses on a conflicting signature; every rejected
+// branch's message carries its workaround).
+function dispatchInsert(nativeSqlCall, nativeRawCall, params) {
+  const v = params.values;
+  if (isRawValues(v)) {
+    if (params.format === undefined) {
+      return Promise.reject(new ChdbInsertError(
+        "Raw insert requires an explicit 'format': insert({ table, values: buffer, format: 'JSONEachRow' })"));
+    }
+    return runRawInsert(nativeRawCall, params);
+  }
+  if (Array.isArray(v)) {
+    if (params.format !== undefined) {
+      return Promise.reject(new ChdbInsertError(
+        "'format' is not supported with row arrays (reserved for chunked object inserts); " +
+        "drop 'format' for the VALUES path, or pre-serialize: values = Buffer.from(rows.map(r => JSON.stringify(r)).join('\\n') + '\\n')"));
+    }
+    return runInsert(nativeSqlCall, params);
+  }
+  if (isStreamValues(v)) {
+    if (params.format === undefined) {
+      return Promise.reject(new ChdbInsertError(
+        "Stream insert requires an explicit 'format' (e.g. 'JSONEachRow')"));
+    }
+    return runStreamInsert(nativeRawCall, params);
+  }
+  return runInsert(nativeSqlCall, params);
 }
 
 function emptyResult() {
@@ -262,9 +385,14 @@ function queryBindAsync(query, params = {}, opts = {}) {
   return runExclusiveParam(defaultParamChain, () => chdbNode.QueryAsync(sql, format, bound), opts);
 }
 
-// v3 insert (default connection). opts: { table, values, columns? }
+// v3 insert (default connection). Dispatches on the shape of `values`:
+// row arrays -> inline VALUES; Buffer/Uint8Array/string + format -> raw
+// passthrough; Readable/AsyncIterable + format -> backpressured stream insert.
 function insert(opts) {
-  return runInsert((sql) => chdbNode.QueryAsync(sql, "CSV"), opts || {});
+  return dispatchInsert(
+    (sql) => chdbNode.QueryAsync(sql, "CSV"),
+    (prefix, buf, countLines) => chdbNode.InsertRawAsync(prefix, buf, countLines),
+    opts || {});
 }
 
 // Track open sessions so a normal process exit can release native connections
@@ -385,11 +513,15 @@ class Session {
     return runExclusiveParam(this.#paramChain, () => chdbNode.QueryAsyncConnection(this.connection, sql, format, bound), opts);
   }
 
-  // v3 insert. opts: { table, values, columns? }. Inline INSERT ... VALUES,
-  // executed async; never reads stdin (closes #26).
+  // v3 insert. Same dispatch as the standalone insert(): row arrays -> inline
+  // VALUES; raw bytes + format -> passthrough; stream + format -> backpressured
+  // stream insert. Executed async; never reads stdin (closes #26).
   insert(opts) {
     if (!this.connection) return Promise.reject(new ChdbClosedError("No active connection available"));
-    return runInsert((sql) => chdbNode.QueryAsyncConnection(this.connection, sql, "CSV"), opts || {});
+    return dispatchInsert(
+      (sql) => chdbNode.QueryAsyncConnection(this.connection, sql, "CSV"),
+      (prefix, buf, countLines) => chdbNode.InsertRawAsyncConnection(this.connection, prefix, buf, countLines),
+      opts || {});
   }
 
   // v3 streaming. opts: { format?='JSONEachRow', signal? }. Returns a

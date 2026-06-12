@@ -77,23 +77,81 @@ export class ChdbBindError extends ChdbError {
   readonly code = 'CHDB_BIND'
 }
 
+/** Progress snapshot carried by streaming-insert callbacks and errors (payload-side ledger). */
+export interface InsertProgress {
+  /** Rows flushed to the engine so far (non-empty payload lines; exact for line-delimited formats). */
+  rowsSent: number
+  /** Payload bytes flushed so far. */
+  bytesSent: number
+  /** Chunks flushed so far. */
+  chunks: number
+}
+
+/**
+ * Streaming-insert failure discriminator (streaming-insert backpressure model):
+ *  - 'source-error'          the source stream errored or closed prematurely
+ *  - 'backpressure-overflow' an un-pausable source overran the bounded buffer
+ *  - 'write-failure'         a chunk's INSERT failed in the engine
+ *  - 'row-too-large'         a single row exceeded maxRowBytes (no row boundary found)
+ * (A stalled producer surfaces as ChdbTimeoutError with reason 'stall'.)
+ */
+export type InsertFailureReason =
+  | 'source-error'
+  | 'backpressure-overflow'
+  | 'write-failure'
+  | 'row-too-large'
+
+export interface ChdbInsertErrorOptions extends ChdbErrorOptions {
+  reason?: InsertFailureReason
+  /** 1-based row number the engine failed at (absolute across a streamed insert). */
+  failedAtRow?: number
+  progress?: InsertProgress
+}
+
 /** Insert serialization / execution / timeout. Subdivision of query error. */
 export class ChdbInsertError extends ChdbQueryError {
   override readonly code = 'CHDB_INSERT'
+  readonly reason?: InsertFailureReason
+  readonly failedAtRow?: number
+  readonly progress?: InsertProgress
+
+  constructor(message: string, options?: ChdbInsertErrorOptions) {
+    super(message, options)
+    if (options?.reason !== undefined) this.reason = options.reason
+    if (options?.failedAtRow !== undefined) this.failedAtRow = options.failedAtRow
+    if (options?.progress !== undefined) this.progress = options.progress
+  }
 }
 
 /** AbortSignal fired. `.name` is `'AbortError'` to match the web platform. */
 export class ChdbAbortError extends ChdbError {
   readonly code = 'CHDB_ABORT'
-  constructor(message = 'The operation was aborted', options?: ChdbErrorOptions) {
+  readonly progress?: InsertProgress
+  constructor(
+    message = 'The operation was aborted',
+    options?: ChdbErrorOptions & { progress?: InsertProgress },
+  ) {
     super(message, options)
     this.name = 'AbortError'
+    if (options?.progress !== undefined) this.progress = options.progress
   }
 }
 
-/** Query exceeded its deadline (watchdog). */
+/** Query exceeded its deadline (watchdog), or a streamed-insert source stalled. */
 export class ChdbTimeoutError extends ChdbError {
   readonly code = 'CHDB_TIMEOUT'
+  /** 'stall' when a streaming-insert producer went idle past stallTimeout. */
+  readonly reason?: 'stall'
+  readonly progress?: InsertProgress
+
+  constructor(
+    message: string,
+    options?: ChdbErrorOptions & { reason?: 'stall'; progress?: InsertProgress },
+  ) {
+    super(message, options)
+    if (options?.reason !== undefined) this.reason = options.reason
+    if (options?.progress !== undefined) this.progress = options.progress
+  }
 }
 
 /** Loader could not find a native subpackage for this platform/arch/libc. */

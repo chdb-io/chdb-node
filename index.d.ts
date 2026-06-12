@@ -84,10 +84,123 @@ export interface InsertSummary {
 }
 
 /**
+ * Raw insert formats (v1: text formats; the format name is whitelisted, never
+ * passed through). TSV/TSVWithNames are aliases of TabSeparated*.
+ */
+export type RawInsertFormat =
+  | 'JSONEachRow' | 'JSONCompactEachRow'
+  | 'CSV' | 'CSVWithNames'
+  | 'TSV' | 'TabSeparated' | 'TSVWithNames' | 'TabSeparatedWithNames';
+
+/**
+ * Stream-insert formats: line-delimited only. These formats escape raw
+ * newlines inside values, so a raw '\n' is always a row boundary and every
+ * re-chunked INSERT payload stays independently valid. CSV (raw newlines legal
+ * inside quoted fields) and WithNames variants (header cannot repeat per
+ * chunk) are excluded — use a single-shot Buffer insert for those.
+ */
+export type StreamInsertFormat = 'JSONEachRow' | 'JSONCompactEachRow' | 'TSV' | 'TabSeparated';
+
+/**
+ * Parameters for the raw passthrough insert: the payload stays bytes
+ * (off the V8 heap for Buffer/Uint8Array), is handed to the native side
+ * zero-copy, and the engine's multithreaded parser does all the parsing — JS
+ * never builds an object tree from the payload.
+ *
+ * Contract: do NOT mutate the Buffer until the returned promise settles (same
+ * contract as fs.write). A string payload is accepted as a small-payload
+ * convenience only — it is already a V8 string, so prefer Buffers end to end.
+ */
+export interface RawInsertParams {
+  /** Target table (optionally db-qualified). */
+  table: string;
+  /** Raw payload bytes in the declared format. */
+  values: Buffer | Uint8Array | string;
+  /** Payload format (required; whitelisted). */
+  format: RawInsertFormat;
+  /** Explicit column list: INSERT INTO t (a, b) FORMAT ... */
+  columns?: ReadonlyArray<string>;
+  /** Per-insert settings (e.g. input_format_skip_unknown_fields: 1). */
+  settings?: Record<string, string | number | boolean>;
+  /** Early-settle abort (the underlying write still completes; the payload stays pinned until it does). */
+  signal?: AbortSignal;
+  /** Early-settle timeout in ms (same honest single-shot semantics). */
+  timeout?: number;
+}
+
+/**
+ * Summary of a raw insert. Two ledgers by design:
+ * - rowsWritten/bytesWritten — engine-side write progress (includes cascaded
+ *   materialized-view writes, same semantics as HTTP X-ClickHouse-Summary).
+ * - rowsSent/bytesSent — payload-side: non-empty payload lines (exact for
+ *   line-delimited formats; undefined for the CSV family) and payload bytes.
+ */
+export interface RawInsertSummary {
+  rowsWritten: number;
+  bytesWritten: number;
+  rowsSent?: number;
+  bytesSent: number;
+  elapsed: number;
+}
+
+/** Progress snapshot for streaming inserts (payload-side ledger). */
+export interface InsertProgress {
+  rowsSent: number;
+  bytesSent: number;
+  chunks: number;
+}
+
+/**
+ * Parameters for the backpressured streaming insert. The source is consumed
+ * pull-based: at most one bounded chunk is buffered and each chunk's INSERT is
+ * awaited before the next pull, so a fast producer is throttled to the chDB
+ * write rate (backpressure is flow-control, never an error). Failures surface
+ * as typed errors that always settle the promise: source-error / stall /
+ * backpressure-overflow / write-failure / row-too-large / abort — each
+ * carrying a progress snapshot. Semantics are at-least-once: already-flushed
+ * chunks are not rolled back.
+ */
+export interface StreamInsertParams {
+  table: string;
+  /** Byte stream: Node Readable or any AsyncIterable of Buffer/Uint8Array/string chunks. */
+  values: NodeJS.ReadableStream | AsyncIterable<Buffer | Uint8Array | string>;
+  format: StreamInsertFormat;
+  columns?: ReadonlyArray<string>;
+  settings?: Record<string, string | number | boolean>;
+  /** Target chunk size (default 8 MiB). */
+  maxChunkBytes?: number;
+  /** Single-row ceiling; exceeded without a row boundary => row-too-large (default 64 MiB). */
+  maxRowBytes?: number;
+  /** Bounded-buffer ceiling for un-pausable Readables => backpressure-overflow (default 64 MiB). */
+  maxBufferedBytes?: number;
+  /** Producer idle deadline => ChdbTimeoutError{reason:'stall'}. Off by default. */
+  stallTimeout?: number;
+  /** Called after each flushed chunk. */
+  onProgress?: (p: InsertProgress) => void;
+  signal?: AbortSignal;
+  /** Per-chunk timeout in ms. */
+  timeout?: number;
+}
+
+/** Summary of a streaming insert (both ledgers accumulated across chunks). */
+export interface StreamInsertSummary {
+  rowsWritten: number;
+  bytesWritten: number;
+  rowsSent: number;
+  bytesSent: number;
+  chunks: number;
+  elapsed: number;
+}
+
+/**
  * Inserts rows via an inline multi-row INSERT (default connection). Async; never
  * reads stdin.
  */
 export function insert(params: InsertParams): Promise<InsertSummary>;
+/** raw passthrough insert (default connection). */
+export function insert(params: RawInsertParams): Promise<RawInsertSummary>;
+/** Backpressured streaming insert (default connection). */
+export function insert(params: StreamInsertParams): Promise<StreamInsertSummary>;
 
 /**
  * Options for {@link Session.queryStream}.
@@ -205,6 +318,10 @@ export class Session {
    * Inserts rows via an inline multi-row INSERT. Async; never reads stdin.
    */
   insert(params: InsertParams): Promise<InsertSummary>;
+  /** raw passthrough insert on this session's connection. */
+  insert(params: RawInsertParams): Promise<RawInsertSummary>;
+  /** Backpressured streaming insert on this session's connection. */
+  insert(params: StreamInsertParams): Promise<StreamInsertSummary>;
 
   /**
    * Streams a query result chunk-by-chunk (only one active stream per session).

@@ -502,6 +502,145 @@ Napi::Value QueryAsyncConnectionWrapper(const Napi::CallbackInfo &info) {
 }
 
 //===--------------------------------------------------------------------===//
+// Raw-format passthrough insert. The payload stays a JS Buffer (V8
+// off-heap); this worker pins it with a Persistent reference, assembles
+// "INSERT INTO ... FORMAT <fmt>\n<data>" on the libuv thread (the main thread
+// never copies or scans the payload), and executes via the length-aware
+// chdb_query_n (binary-safe: embedded NUL bytes survive).
+//
+// Ownership ledger:
+//   - payload Buffer: pinned by bufRef_ (constructed on the main thread);
+//     released when the worker is destroyed on the main thread after
+//     OnOK/OnError. The caller must not mutate the Buffer until the returned
+//     promise settles (same contract as fs.write).
+//   - assembled sql std::string: Execute()-local, freed on return. Peak memory
+//     during the call is ~2x payload until an upstream two-buffer entry lands.
+//   - chdb_result: destroyed inside Execute().
+//
+// rowsSent (payload-side ledger): for line-delimited formats the worker counts
+// non-empty lines off-thread — exact, because those formats escape raw '\n'
+// inside values. rowsWritten/bytesWritten (engine-side ledger) come from
+// chdb_result_rows_written/bytes_written (chdb-io/chdb-core#88) and include cascaded
+// materialized-view writes.
+//===--------------------------------------------------------------------===//
+class InsertRawWorker : public Napi::AsyncWorker {
+public:
+  InsertRawWorker(Napi::Env env, chdb_connection conn, std::string prefix,
+                  Napi::Buffer<char> data, bool countLines)
+      : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)),
+        conn_(conn), prefix_(std::move(prefix)),
+        dataPtr_(data.Data()), dataLen_(data.Length()), countLines_(countLines) {
+    bufRef_ = Napi::Persistent(data.As<Napi::Object>());
+  }
+
+  Napi::Promise GetPromise() { return deferred_.Promise(); }
+
+  void Execute() override {
+    std::string sql;
+    sql.reserve(prefix_.size() + 1 + dataLen_);
+    sql.append(prefix_);
+    sql.push_back('\n');
+    sql.append(dataPtr_, dataLen_);
+
+    if (countLines_) {
+      // Count non-empty lines (a line holding only whitespace is skipped by
+      // the engine's row parsers, so it is not a row).
+      bool content = false;
+      for (size_t i = 0; i < dataLen_; i++) {
+        char c = dataPtr_[i];
+        if (c == '\n') {
+          if (content) linesSent_++;
+          content = false;
+        } else if (c != '\r' && c != ' ' && c != '\t') {
+          content = true;
+        }
+      }
+      if (content) linesSent_++; // final line without a trailing newline
+    }
+
+    chdb_result *result = chdb_query_n(conn_, sql.data(), sql.size(), "CSV", 3);
+    if (!result) { SetError("chdb query returned a null result"); return; }
+    const char *error = chdb_result_error(result);
+    if (error) {
+      std::string msg = error;
+      chdb_destroy_query_result(result);
+      SetError(msg);
+      return;
+    }
+    elapsed_ = chdb_result_elapsed(result);
+    rowsWritten_ = chdb_result_rows_written(result);
+    bytesWritten_ = chdb_result_bytes_written(result);
+    chdb_destroy_query_result(result);
+  }
+
+  void OnOK() override {
+    Napi::Env env = Env();
+    Napi::HandleScope scope(env);
+    Napi::Object res = Napi::Object::New(env);
+    res.Set("elapsed", Napi::Number::New(env, elapsed_));
+    res.Set("rowsWritten", Napi::Number::New(env, static_cast<double>(rowsWritten_)));
+    res.Set("bytesWritten", Napi::Number::New(env, static_cast<double>(bytesWritten_)));
+    if (countLines_)
+      res.Set("rowsSent", Napi::Number::New(env, static_cast<double>(linesSent_)));
+    deferred_.Resolve(res);
+  }
+
+  void OnError(const Napi::Error &e) override { deferred_.Reject(e.Value()); }
+
+private:
+  Napi::Promise::Deferred deferred_;
+  chdb_connection conn_;
+  std::string prefix_;
+  const char *dataPtr_;
+  size_t dataLen_;
+  bool countLines_;
+  Napi::ObjectReference bufRef_; // released on the main thread in the worker dtor
+  double elapsed_ = 0.0;
+  uint64_t rowsWritten_ = 0, bytesWritten_ = 0, linesSent_ = 0;
+};
+
+// Standalone raw insert (default connection). Args: (prefix, dataBuffer, countLines)
+Napi::Value InsertRawAsyncWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[0].IsString() || !info[1].IsBuffer() || !info[2].IsBoolean()) {
+    Napi::TypeError::New(env, "Usage: prefix, dataBuffer, countLines").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  std::string prefix = info[0].As<Napi::String>();
+
+  char *err = nullptr;
+  chdb_connection *conn_ptr = get_default_conn(&err); // registry: main thread only
+  if (!conn_ptr) {
+    Napi::Value p = rejectedPromise(env, err ? err : "Failed to acquire default connection");
+    if (err) free(err);
+    return p;
+  }
+  auto *worker = new InsertRawWorker(env, *conn_ptr, std::move(prefix),
+                                     info[1].As<Napi::Buffer<char>>(),
+                                     info[2].As<Napi::Boolean>().Value());
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+// Session raw insert. Args: (connection, prefix, dataBuffer, countLines)
+Napi::Value InsertRawAsyncConnectionWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 4 || !info[0].IsExternal() || !info[1].IsString() || !info[2].IsBuffer()
+      || !info[3].IsBoolean()) {
+    Napi::TypeError::New(env, "Usage: connection, prefix, dataBuffer, countLines").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection *inner = static_cast<chdb_connection *>(info[0].As<Napi::External<void>>().Data());
+  if (!inner) return rejectedPromise(env, "No active connection available");
+  std::string prefix = info[1].As<Napi::String>();
+  auto *worker = new InsertRawWorker(env, *inner, std::move(prefix),
+                                     info[2].As<Napi::Buffer<char>>(),
+                                     info[3].As<Napi::Boolean>().Value());
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+//===--------------------------------------------------------------------===//
 // Streaming query (chdb_stream_query / _fetch_result / _cancel_query). Each
 // fetch runs on the libuv thread pool so it does not block the event loop. It
 // copies each chunk into a JS Buffer and destroys the native chunk immediately
@@ -706,6 +845,10 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   // Async query (AsyncWorker -> Promise)
   exports.Set("QueryAsync", Napi::Function::New(env, QueryAsyncWrapper));
   exports.Set("QueryAsyncConnection", Napi::Function::New(env, QueryAsyncConnectionWrapper));
+
+  // Raw-format passthrough insert
+  exports.Set("InsertRawAsync", Napi::Function::New(env, InsertRawAsyncWrapper));
+  exports.Set("InsertRawAsyncConnection", Napi::Function::New(env, InsertRawAsyncConnectionWrapper));
 
   // Streaming query
   exports.Set("StreamQuery", Napi::Function::New(env, StreamQueryWrapper));
