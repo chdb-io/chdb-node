@@ -88,6 +88,7 @@ function wrapRawNative(nativePromise, opts, mapOk) {
   const timeout = opts && opts.timeout;
   const base = nativePromise.then(mapOk, (e) => { throw asInsertError(e); });
   if (!signal && !timeout) return base;
+  trackNative(nativePromise); // abort/timeout settles JS early; native runs on after
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer = null;
@@ -199,6 +200,7 @@ function withAbortTimeout(nativePromise, opts) {
   if (!signal && !timeout) {
     return nativePromise.then((raw) => new ChdbResult(raw), (e) => { throw asQueryError(e); });
   }
+  trackNative(nativePromise); // abort/timeout settles JS early; native runs on after
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer = null;
@@ -400,6 +402,32 @@ function insert(opts) {
 // complements the native env cleanup hook + std::atexit backstop.
 const openSessions = new Set();
 
+// Track in-flight native operations (async query/insert) that were settled
+// EARLY by abort/timeout. There is no interrupt in the C ABI, so the native
+// computation keeps running on the libuv thread after the JS promise has
+// already rejected. libchdb permits only ONE active operation per process, so
+// an orphaned background op from one test races the next test's first query and
+// crashes the in-process engine ("server is shutting down due to a fatal
+// error", ABORTED), cascading into every later test (this is why x64 CI runners
+// went all-red while the timing on arm runners usually won the race). Each
+// tracked promise settles on NATIVE completion and never rejects — the caller
+// already received the mapped early-settle error; here we only need the timing.
+const pendingNativeOps = new Set();
+function trackNative(nativePromise) {
+  const done = nativePromise.then(() => {}, () => {});
+  pendingNativeOps.add(done);
+  done.then(() => pendingNativeOps.delete(done));
+  return nativePromise;
+}
+
+// Wait for every native op started before now to fully settle. Internal helper
+// for test teardown: drained in the global afterEach before sessions are closed
+// so an early-settled (aborted/timed-out) op stays local to the test that
+// started it instead of poisoning the shared single-connection engine.
+function _drainPendingOps() {
+  return Promise.allSettled([...pendingNativeOps]);
+}
+
 // Force-close every session still open in this process. Internal helper for
 // test teardown: libchdb allows one active data directory per process, so a
 // single test that creates a Session and never closes it (e.g. it threw before
@@ -558,11 +586,26 @@ class Session {
       for (const sig of SESSION_SIGNALS) process.removeListener(sig, this.#signalHandler);
       this.#signalHandler = null;
     }
-    if (this.connection) {
-      try { chdbNode.CloseConnection(this.connection); } catch (_) { /* best effort */ }
-      this.connection = null;
+    const conn = this.connection;
+    this.connection = null;
+    const teardown = () => {
+      if (conn) { try { chdbNode.CloseConnection(conn); } catch (_) { /* best effort */ } }
+      if (this.isTemp) { try { this.#removeTempDir(); } catch (_) { /* best effort */ } }
+    };
+    // Destroying the native connection while an op is still running on it aborts
+    // the engine for the rest of the process. abort/timeout settle the JS promise
+    // early but leave the native computation running (no interrupt in the C ABI),
+    // so close() may land mid-flight. When ops are still pending, defer teardown
+    // until they drain rather than racing them. _drainPendingOps() awaits these
+    // deferred closes too, so a new session is never created before the prior
+    // connection is fully released.
+    if (conn && pendingNativeOps.size > 0) {
+      const deferred = Promise.allSettled([...pendingNativeOps]).then(teardown);
+      pendingNativeOps.add(deferred);
+      deferred.finally(() => pendingNativeOps.delete(deferred));
+    } else {
+      teardown();
     }
-    if (this.isTemp) this.#removeTempDir();
   }
 
   // v2 alias for close().
@@ -631,4 +674,4 @@ function version() {
   };
 }
 
-module.exports = { query, queryBind, queryAsync, queryBindAsync, insert, Session, version, _closeAllSessions };
+module.exports = { query, queryBind, queryAsync, queryBindAsync, insert, Session, version, _closeAllSessions, _drainPendingOps };
