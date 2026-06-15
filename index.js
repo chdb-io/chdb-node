@@ -271,6 +271,19 @@ function insert(opts) {
 // and remove temp dirs even when the user forgot to close. This
 // complements the native env cleanup hook + std::atexit backstop.
 const openSessions = new Set();
+
+// Force-close every session still open in this process. Internal helper for
+// test teardown: libchdb allows one active data directory per process, so a
+// single test that creates a Session and never closes it (e.g. it threw before
+// its own close) blocks every later `new Session()` with a different path. A
+// global afterEach calling this guarantees no session leaks across test
+// boundaries, instead of relying on every test to clean up perfectly.
+function _closeAllSessions() {
+  for (const s of [...openSessions]) {
+    try { s.close(); } catch (_) { /* best effort */ }
+  }
+}
+
 let exitHookInstalled = false;
 function ensureExitHook() {
   if (exitHookInstalled) return;
@@ -486,4 +499,4 @@ function version() {
   };
 }
 
-module.exports = { query, queryBind, queryAsync, queryBindAsync, insert, Session, version };
+module.exports = { query, queryBind, queryAsync, queryBindAsync, insert, Session, version, _closeAllSessions };

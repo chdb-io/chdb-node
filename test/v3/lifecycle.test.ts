@@ -13,10 +13,13 @@ describe('temp dir + close()/open/cleanup (D4, §10)', () => {
   it('uses the chdb-node- temp prefix (D4) and removes it on close', () => {
     const s = new Session()
     const p = s.path
-    expect(basename(p).startsWith('chdb-node-')).toBe(true)
-    expect(existsSync(p)).toBe(true)
-    expect(s.open).toBe(true)
-    s.close()
+    try {
+      expect(basename(p).startsWith('chdb-node-')).toBe(true)
+      expect(existsSync(p)).toBe(true)
+      expect(s.open).toBe(true)
+    } finally {
+      s.close() // release the connection even if an assertion above throws
+    }
     expect(s.open).toBe(false)
     expect(existsSync(p)).toBe(false)
   })
@@ -134,8 +137,11 @@ describe('repeated start/stop stability (#17)', () => {
   it('survives 1000 create/query/close cycles without crashing', () => {
     for (let i = 0; i < 1000; i++) {
       const s = new Session()
-      expect(s.query('SELECT 1', 'CSV').trim()).toBe('1')
-      s.close()
+      try {
+        expect(s.query('SELECT 1', 'CSV').trim()).toBe('1')
+      } finally {
+        s.close() // a single un-closed session here would block all later opens
+      }
     }
     // standalone query still works afterwards
     const { query } = require('../../index.js')

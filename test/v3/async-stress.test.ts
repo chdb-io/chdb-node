@@ -113,9 +113,12 @@ describe('lifecycle race: close / registry mutation during an in-flight query', 
       const p = queryAsync(HEAVY(60_000_000), { format: 'CSV' }).then((r) => r.text().trim(), () => 'err')
       await sleep(i % 4)
       const s = new Session()
-      const r = await p
-      expect(r === '60000000' || r === 'err').toBe(true)
-      s.close()
+      try {
+        const r = await p
+        expect(r === '60000000' || r === 'err').toBe(true)
+      } finally {
+        s.close() // close even if the assertion throws, or the session leaks into the next test
+      }
     }
   })
 })
