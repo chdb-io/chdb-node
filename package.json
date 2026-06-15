@@ -1,6 +1,6 @@
 {
   "name": "chdb",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "chDB bindings for nodejs",
   "main": "index.js",
   "types": "index.d.ts",
@@ -27,7 +27,8 @@
     "bench": "node bench/bench.js",
     "build": "node-gyp configure build --verbose && npm run fixloaderpath && npm run build:ts",
     "build:ts": "tsc -p tsconfig.build.json",
-    "prepack": "npm run build:ts"
+    "prepack": "npm run build:ts",
+    "install": "node -e \"\""
   },
   "author": {
     "name": "chdb",
@@ -58,10 +59,10 @@
     "node-gyp-build": "^4.6.0"
   },
   "optionalDependencies": {
-    "@chdb/lib-linux-x64-gnu": "26.5.0",
-    "@chdb/lib-linux-arm64-gnu": "26.5.0",
+    "@chdb/lib-darwin-arm64": "26.5.0",
     "@chdb/lib-darwin-x64": "26.5.0",
-    "@chdb/lib-darwin-arm64": "26.5.0"
+    "@chdb/lib-linux-arm64-gnu": "26.5.0",
+    "@chdb/lib-linux-x64-gnu": "26.5.0"
   },
   "peerDependencies": {
     "apache-arrow": ">=14"
