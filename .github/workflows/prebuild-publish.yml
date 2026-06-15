@@ -45,9 +45,16 @@ jobs:
           echo "CHDB_LIB_VERSION=${REL#v}" >> "$GITHUB_ENV"
       - name: Build subpackage
         run: npm run build:platform
-      - name: Publish subpackage
-        run: npm publish --access public
+      - name: Publish subpackage (skip if this version already exists)
         working-directory: npm/@chdb/lib-${{ matrix.plat }}
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VER" version >/dev/null 2>&1; then
+            echo "$NAME@$VER already published; skipping (lets a re-run finish a partially-published release)."
+          else
+            npm publish --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -70,7 +77,13 @@ jobs:
           else
             echo "NPM_DIST_TAG=latest" >> "$GITHUB_ENV"
           fi
-      - name: Publish main (prepack builds dist)
-        run: npm publish --provenance --access public --tag "$NPM_DIST_TAG"
+      - name: Publish main (prepack builds dist; skip if this version already exists)
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          if npm view "chdb@$VER" version >/dev/null 2>&1; then
+            echo "chdb@$VER already published; skipping."
+          else
+            npm publish --provenance --access public --tag "$NPM_DIST_TAG"
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
