@@ -1,6 +1,6 @@
 import { afterEach } from 'vitest'
-// @ts-expect-error — internal test helper, not in the type surface
-import { _closeAllSessions } from '../../index.js'
+// @ts-expect-error — internal test helpers, not in the type surface
+import { _closeAllSessions, _drainPendingOps } from '../../index.js'
 
 // Global safety net for the single-connection-per-process constraint.
 //
@@ -13,6 +13,14 @@ import { _closeAllSessions } from '../../index.js'
 // unrelated files (it surfaced as an intermittent stream.test.ts failure on the
 // slowest runner). Force-closing any lingering session after every test makes a
 // leak local to the test that caused it instead of poisoning the rest.
-afterEach(() => {
+afterEach(async () => {
+  // Wait for any native op a test settled early (abort/timeout) to actually
+  // finish before tearing down. The C ABI has no interrupt, so the native write
+  // keeps running on the libuv thread after the JS promise rejected; closing the
+  // session or starting the next test while it is still in flight means two
+  // operations hit libchdb's single in-process engine at once, which aborts the
+  // engine for the rest of the process. Draining first keeps an early-settled op
+  // local to the test that started it.
+  await _drainPendingOps()
   _closeAllSessions()
 })

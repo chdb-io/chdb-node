@@ -11,7 +11,9 @@ cd "$(dirname "$0")"
 # Fail fast so a bad download never silently leaves a stale/partial libchdb.
 set -e
 
-LATEST_RELEASE=v26.5.0
+# Pre-release engine for the 3.1.0-rc.1 test line (carries the written-rows
+# accessors the raw/streaming insert needs; absent in the v26.5.0 stable line).
+LATEST_RELEASE=v26.5.1-rc.1
 
 # Download the correct version based on the platform
 case "$(uname -s)" in
