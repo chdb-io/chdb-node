@@ -6,6 +6,9 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     include: ['test/v3/**/*.test.ts'],
+    // Global afterEach force-closes any session a test left open, so a single
+    // leak can't cascade into unrelated files (single-connection constraint).
+    setupFiles: ['./test/v3/setup.ts'],
     environment: 'node',
     testTimeout: 30_000,
     hookTimeout: 30_000,
