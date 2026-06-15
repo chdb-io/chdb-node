@@ -45,15 +45,24 @@ jobs:
           echo "CHDB_LIB_VERSION=${REL#v}" >> "$GITHUB_ENV"
       - name: Build subpackage
         run: npm run build:platform
-      - name: Publish subpackage (skip if this version already exists)
+      - name: Publish subpackage (idempotent — skip or tolerate already-published)
         working-directory: npm/@chdb/lib-${{ matrix.plat }}
         run: |
           NAME=$(node -p "require('./package.json').name")
           VER=$(node -p "require('./package.json').version")
           if npm view "$NAME@$VER" version >/dev/null 2>&1; then
             echo "$NAME@$VER already published; skipping (lets a re-run finish a partially-published release)."
+            exit 0
+          fi
+          # Publish; tolerate the race where the version exists but the registry
+          # read above lagged — key off the publish error, not a (lagging) read.
+          if out=$(npm publish --access public 2>&1); then
+            echo "$out"
           else
-            npm publish --access public
+            echo "$out"
+            echo "$out" | grep -qiE "cannot publish over|previously published|EPUBLISHCONFLICT|403" \
+              && echo "$NAME@$VER already on the registry (publish conflict); treating as success." \
+              || exit 1
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -61,6 +70,9 @@ jobs:
   main:
     needs: subpackages
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for npm publish --provenance (OIDC attestation)
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -77,13 +89,20 @@ jobs:
           else
             echo "NPM_DIST_TAG=latest" >> "$GITHUB_ENV"
           fi
-      - name: Publish main (prepack builds dist; skip if this version already exists)
+      - name: Publish main (prepack builds dist; idempotent)
         run: |
           VER=$(node -p "require('./package.json').version")
           if npm view "chdb@$VER" version >/dev/null 2>&1; then
             echo "chdb@$VER already published; skipping."
+            exit 0
+          fi
+          if out=$(npm publish --provenance --access public --tag "$NPM_DIST_TAG" 2>&1); then
+            echo "$out"
           else
-            npm publish --provenance --access public --tag "$NPM_DIST_TAG"
+            echo "$out"
+            echo "$out" | grep -qiE "cannot publish over|previously published|EPUBLISHCONFLICT|403" \
+              && echo "chdb@$VER already on the registry (publish conflict); treating as success." \
+              || exit 1
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
