@@ -1,0 +1,27 @@
+{
+  "comment": "Spec files (by basename substring) from clickhouse-js's integration suite that are NOT run against embedded chDB, because each maps to a capability embedded chDB has no concept of (HTTP transport, RBAC, server runtime) or to a feature deferred to Layer 2 Stage B. Files NOT listed here are run and GATED: their pass set is the byte-compat guarantee; per-case embedded-vs-server divergences within a run file are marked in expectations.patch. The independent verified gate is test/v3/layer2/upstream/conformance.test.ts.",
+  "skip": [
+    { "match": "auth", "why": "embedded has no auth layer (username/password/access_token ignored)" },
+    { "match": "role", "why": "no RBAC" },
+    { "match": "read_only_user", "why": "no RBAC / users in embedded" },
+    { "match": "compression", "why": "no HTTP transport to compress" },
+    { "match": "query_log", "why": "no server runtime / system.query_log" },
+    { "match": "system_logs", "why": "no server runtime logs" },
+    { "match": "trace", "why": "no HTTP/distributed tracing surface" },
+    { "match": "keep_alive", "why": "no HTTP socket pool" },
+    { "match": "socket", "why": "no HTTP socket layer (slow-server / dropped-connection / eager-socket-destroy scenarios are transport-level)" },
+    { "match": "custom_http_agent", "why": "no HTTP transport / agent" },
+    { "match": "max_open_connections", "why": "no HTTP connection pool" },
+    { "match": "multiple_clients", "why": "one active data directory per process" },
+    { "match": "cluster", "why": "no cluster topology (system.clusters)" },
+    { "match": "tls", "why": "no transport security layer (embedded, in-process)" },
+    { "match": "jwt", "why": "no auth layer" },
+    { "match": "ping", "why": "embedded ping is SELECT 1, not HTTP /ping — covered by conformance.test.ts" },
+    { "match": "abort", "why": "single-shot abort rejects early (different semantics) — covered by Layer 2 tests" },
+    { "match": "session", "why": "session_id maps to the persistent connection — covered by Layer 2 tests" },
+    { "match": "logger", "why": "no HTTP-request logging surface" },
+    { "match": "config", "why": "config arbitration differs (embedded) — covered by config.test.ts" },
+    { "match": "each_row_with_progress", "why": "JSONEachRowWithProgress + custom JSON parse/stringify streaming — Layer 2 Stage B" },
+    { "match": "client-web", "why": "Layer 2 mirrors the Node client; the web (fetch) transport is out of scope" }
+  ]
+}

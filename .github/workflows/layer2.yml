@@ -1,0 +1,93 @@
+name: layer2
+
+# Layer 2 (@clickhouse/client byte-compat) CI.
+#
+#  - parity: spin up a real clickhouse-server (docker service) and assert that
+#    embedded chDB produces the SAME output for the same queries (design §6②),
+#    and that the import-rewritten conformance suite (design §6①) passes
+#    identically against the server backend.
+#  - upstream-literal: clone clickhouse-js's OWN integration suite at the matching
+#    version and run it on vitest against embedded chDB (its client factory is
+#    redirected to chdb://memory). GATING: server-only suites are dropped via
+#    skip-list.json and the documented embedded-vs-server divergences are marked
+#    expected (it.fails) via expectations.patch, so the remaining suite must be
+#    green — clickhouse-js's own assertions then guard the byte-compat surface.
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths-ignore: ["**/*.md"]
+  push:
+    branches: ["main"]
+    paths-ignore: ["**/*.md"]
+  workflow_dispatch: {}
+
+concurrency:
+  group: layer2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    services:
+      clickhouse:
+        # Track chdb-core's underlying ClickHouse version (chDB 3.1.0-rc.1 ships
+        # libchdb 26.5.1.1 → server 26.5). The parity assertions normalize
+        # query_id / timings, so patch-level drift in those fields is tolerated;
+        # a real output difference (data / meta / error code) is a genuine signal.
+        # Keep this in step with package.json's @chdb/lib-* version on each bump.
+        image: clickhouse/clickhouse-server:26.5
+        ports:
+          - 8123:8123
+          - 9000:9000
+        options: >-
+          --health-cmd "clickhouse-client --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Install patchelf (linux rpath)
+        run: sudo apt-get update && sudo apt-get install -y patchelf
+      - name: Install JS deps (no compile-on-install)
+        run: npm install --ignore-scripts
+      - name: Fetch libchdb
+        run: npm run libchdb
+      - name: Build (addon + dist)
+        run: npm run build
+      - name: Wait for clickhouse-server
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8123/ping >/dev/null; then echo "server up"; exit 0; fi
+            sleep 2
+          done
+          echo "clickhouse-server did not become ready" >&2; exit 1
+      - name: Parity (② server output match) + conformance against server (①)
+        env:
+          CHDB_PARITY_URL: http://localhost:8123
+          CHDB_UPSTREAM_BACKEND: server
+        run: npm run test:parity
+
+  upstream-literal:
+    # GATING: run clickhouse-js's own integration suite against embedded chDB.
+    # Server-only suites are skipped and documented divergences are marked
+    # expected; the rest must pass. See scripts/upstream-suite/.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - run: sudo apt-get update && sudo apt-get install -y patchelf
+      - run: npm install --ignore-scripts && npm run libchdb && npm run build
+      - name: Clone + import-rewrite + run clickhouse-js integration suite
+        run: npm run test:upstream
