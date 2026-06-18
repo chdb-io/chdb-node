@@ -20,6 +20,8 @@
     "test": "mocha test_basic.js test_connection.js --timeout 15000",
     "test:v3": "vitest run",
     "test:all": "npm run test && npm run test:v3",
+    "test:parity": "vitest run test/v3/layer2/parity.test.ts test/v3/layer2/upstream",
+    "test:upstream": "node scripts/upstream-suite/rewrite-and-run.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "libchdb": "bash ./update_libchdb.sh",
     "fixloaderpath": "bash ./fix_loader_path.sh",
@@ -43,9 +45,12 @@
     "index.mjs",
     "index.d.ts",
     "dist",
+    "docs",
     "example.js"
   ],
   "devDependencies": {
+    "@clickhouse/client": "^1.20.0",
+    "@clickhouse/client-common": "^1.20.0",
     "@types/node": "^20.14.0",
     "apache-arrow": "^21.1.0",
     "chai": "^4.5.0",
@@ -65,10 +70,14 @@
     "@chdb/lib-linux-x64-gnu": "26.5.1-rc.1"
   },
   "peerDependencies": {
-    "apache-arrow": ">=14"
+    "apache-arrow": ">=14",
+    "@clickhouse/client": ">=1.0.0 <2"
   },
   "peerDependenciesMeta": {
     "apache-arrow": {
+      "optional": true
+    },
+    "@clickhouse/client": {
       "optional": true
     }
   },

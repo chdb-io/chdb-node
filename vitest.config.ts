@@ -1,4 +1,10 @@
+import { fileURLToPath } from 'url'
 import { defineConfig } from 'vitest/config'
+
+// Absolute path to the package entrypoint (plain CJS). It is externalized below
+// so vitest loads it through Node's require — the SAME instance the compiled
+// Layer 2 code reaches via `require('../../index.js')`.
+const rootIndex = fileURLToPath(new URL('./index.js', import.meta.url))
 
 // v3 (Layer 1) test harness. The legacy v2 byte-compat tests stay on mocha
 // (test_basic.js / test_connection.js) as the untouched regression anchor;
@@ -17,5 +23,18 @@ export default defineConfig({
     fileParallelism: false,
     pool: 'forks',
     poolOptions: { forks: { singleFork: true } },
+    server: {
+      deps: {
+        // The CJS entrypoint owns the process-wide session / pending-op registry.
+        // Test files and setup.ts import it (`../../index.js`), while the compiled
+        // Layer 2 code reaches it through Node's `require('../../index.js')`. If
+        // vitest transforms the import copy, the entrypoint is evaluated TWICE and
+        // the global afterEach safety net (setup.ts) drains a DIFFERENT instance
+        // than the one Layer 2 creates sessions on — leaking sessions across files
+        // ("only one active data directory per process"). Externalizing it routes
+        // every importer through Node's require cache → one shared instance.
+        external: [/\/index\.js$/],
+      },
+    },
   },
 })

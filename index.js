@@ -537,7 +537,9 @@ class Session {
     if (!query) return Promise.resolve(emptyResult());
     const { sql, format } = prepArrow(query, opts, "CSV");
     let bound;
-    try { bound = formatParams(params); } catch (e) { return Promise.reject(e); }
+    // opts.preformatted: params are already the engine's {name: literal} bound
+    // map (Layer 2 formats query parameters itself); otherwise serialize here.
+    try { bound = (opts && opts.preformatted) ? params : formatParams(params); } catch (e) { return Promise.reject(e); }
     return runExclusiveParam(this.#paramChain, () => chdbNode.QueryAsyncConnection(this.connection, sql, format, bound), opts);
   }
 
@@ -675,3 +677,30 @@ function version() {
 }
 
 module.exports = { query, queryBind, queryAsync, queryBindAsync, insert, Session, version, _closeAllSessions, _drainPendingOps };
+
+// Layer 2: @clickhouse/client byte-compat surface (embedded-only). Required at
+// the BOTTOM, after module.exports is populated, so the lazy Layer 1 accessor in
+// dist/layer2 sees a fully-formed export object when it later requires this file.
+const layer2 = require('./dist/layer2/index.js');
+module.exports.createClient = layer2.createClient;
+module.exports.ChdbClickHouseClient = layer2.ChdbClickHouseClient;
+module.exports.ChdbResultSet = layer2.ChdbResultSet;
+module.exports.TupleParam = layer2.TupleParam;
+module.exports.ClickHouseError = layer2.ClickHouseError;
+module.exports.ChdbEmbeddedOnlyError = layer2.ChdbEmbeddedOnlyError;
+module.exports.ChdbEmbeddedNotSupportedError = layer2.ChdbEmbeddedNotSupportedError;
+
+// Typed error hierarchy (shared by Layer 1 + Layer 2). Re-exported here so
+// callers can catch them by class — part of Layer 2's honest-error contract
+// (e.g. `catch (e) { if (e instanceof ChdbConnectionError) ... }`). Exported
+// from the SAME module instance the runtime throws, so `instanceof` holds.
+const errs = require('./dist/errors.js');
+for (const name of [
+  'ChdbError', 'ChdbQueryError', 'ChdbSyntaxError', 'ChdbConnectionError',
+  'ChdbClosedError', 'ChdbStreamError', 'ChdbArrowError', 'ChdbBindError',
+  'ChdbInsertError', 'ChdbAbortError', 'ChdbTimeoutError',
+  'ChdbPlatformUnsupportedError', 'ChdbBinaryVersionMismatchError',
+  'ChdbInternalError', 'isChdbError',
+]) {
+  module.exports[name] = errs[name];
+}

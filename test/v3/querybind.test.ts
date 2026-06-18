@@ -37,7 +37,8 @@ describe('queryBind path A (server-side chdb_query_with_params)', () => {
     }
   })
 
-  it('rejects unsafe-integer / null params with a typed ChdbBindError', () => {
+  it('rejects unsafe-integer and undefined params with a typed ChdbBindError; null binds as NULL', () => {
+    // An unsafe integer cannot round-trip losslessly → bind error.
     try {
       queryBind('SELECT {n:Int64}', { n: 1e21 }, 'CSV')
       expect.unreachable('expected ChdbBindError')
@@ -45,12 +46,18 @@ describe('queryBind path A (server-side chdb_query_with_params)', () => {
       expect(e.name).toBe('ChdbBindError')
       expect(e.code).toBe('CHDB_BIND')
     }
+    // `undefined` is the one JS footgun still guarded (an accidentally-missing
+    // value), distinct from an explicit `null`.
     try {
-      queryBind('SELECT {n:Int64}', { n: null }, 'CSV')
+      queryBind('SELECT {n:Int64}', { n: undefined }, 'CSV')
       expect.unreachable('expected ChdbBindError')
     } catch (e: any) {
       expect(e.name).toBe('ChdbBindError')
     }
+    // `null` is honored: it binds the TSV NULL token, so a Nullable placeholder
+    // yields SQL NULL — byte-identical to clickhouse-js.
+    const out = queryBind('SELECT {n:Nullable(Int64)} AS n', { n: null }, 'JSONEachRow')
+    expect(JSON.parse(out.trim())).toEqual({ n: null })
   })
 
   it('surfaces engine errors as typed query errors', () => {

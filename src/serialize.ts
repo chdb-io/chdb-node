@@ -222,10 +222,16 @@ function serializeArray(arr: ReadonlyArray<unknown>): string {
  *   non-finite or unsafe-integer numbers, invalid Dates, or unsupported types.
  */
 export function formatParamValue(value: unknown): string {
-  if (value === null || value === undefined) {
+  if (value === undefined) {
     throw new ChdbBindError(
-      'null/undefined parameter values are not supported; omit the parameter or use a typed NULL in SQL',
+      'undefined parameter value; omit the parameter or pass null for an explicit NULL',
     )
+  }
+  if (value === null) {
+    // The TSV/Escaped NULL token. The engine binds it per the declared type:
+    // `{x:Nullable(T)}` → SQL NULL, `{x:String}` → empty string — byte-identical
+    // to clickhouse-js, which sends the same token for a null query parameter.
+    return '\\N'
   }
   if (typeof value === 'string') return tsvEscape(value) // TSV/Escaped — engine binds as declared type
   if (value instanceof Date) return formatDateTimeUTC(value) // 'YYYY-MM-DD HH:MM:SS' (no TSV-special chars)

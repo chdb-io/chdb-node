@@ -356,3 +356,28 @@ export function version(): {
   arch: string;
   napi?: number;
 };
+
+// Layer 2: @clickhouse/client byte-compat surface (embedded-only).
+// `createClient`, `ChdbClickHouseClient`, `ChdbResultSet`, `ClickHouseError`,
+// `ChdbEmbeddedOnlyError`, `ChdbEmbeddedNotSupportedError`, and the full
+// param/result/config type surface. Generated declarations live in dist/layer2.
+export * from './dist/layer2';
+
+// Typed error hierarchy (shared by Layer 1 + Layer 2), catchable by class.
+export {
+  ChdbError,
+  ChdbQueryError,
+  ChdbSyntaxError,
+  ChdbConnectionError,
+  ChdbClosedError,
+  ChdbStreamError,
+  ChdbArrowError,
+  ChdbBindError,
+  ChdbInsertError,
+  ChdbAbortError,
+  ChdbTimeoutError,
+  ChdbPlatformUnsupportedError,
+  ChdbBinaryVersionMismatchError,
+  ChdbInternalError,
+  isChdbError,
+} from './dist/errors';

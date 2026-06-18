@@ -63,6 +63,31 @@ Errors are typed (`ChdbSyntaxError`, `ChdbQueryError`, `ChdbConnectionError`,
 `ChdbAbortError`, `ChdbTimeoutError`, …), each carrying `.code`, the ClickHouse
 `.clickhouseCode`, and `.cause`.
 
+### `@clickhouse/client` drop-in (Layer 2)
+
+Already using [`@clickhouse/client`](https://github.com/ClickHouse/clickhouse-js)?
+chDB ships a **byte-compatible, embedded-only** façade — change the import and the
+URL, and your existing code runs in-process with no server:
+
+```javascript
+// import { createClient } from '@clickhouse/client'
+import { createClient } from 'chdb'
+
+const client = createClient({ url: 'chdb://memory' }) // or 'chdb:///abs/path'
+const rs = await client.query({ query: 'SELECT 1 AS n', format: 'JSONEachRow' })
+console.log(await rs.json())                            // [{ n: 1 }]
+await client.close()
+```
+
+`createClient`, the six methods (`query`/`insert`/`command`/`exec`/`ping`/`close`),
+`ResultSet`/`Row`, and `ClickHouseError` match clickhouse-js field-for-field.
+Embedded-only: only `chdb://` URLs are accepted, and there is no bundled HTTP
+transport (`@clickhouse/client` stays an optional peer dependency for remote use).
+
+See **[docs/layer2-clickhouse-js-compat.md](docs/layer2-clickhouse-js-compat.md)**
+for the full migration guide, capability matrix, config arbitration, type mapping,
+and the honest list of embedded-vs-server differences.
+
 ### Feature matrix
 
 | Capability | Status |
