@@ -24,24 +24,6 @@ diff --git a/packages/client-common/__tests__/integration/data_types.test.ts b/p
 index c8d409b..0830915 100644
 --- a/packages/client-common/__tests__/integration/data_types.test.ts
 +++ b/packages/client-common/__tests__/integration/data_types.test.ts
-@@ -55,7 +55,7 @@ describe('data types', () => {
-     await insertAndAssert(table, values)
-   })
- 
--  it('should work with floating point types', async () => {
-+  it.fails('should work with floating point types', async () => {
-     const values = [
-       { f1: 1.234, f2: 3.35245141223232 },
-       { f1: -0.7968956, f2: -0.113259394344324 },
-@@ -174,7 +174,7 @@ describe('data types', () => {
-     })
- 
-     // NB: JS Date objects work only with DateTime* fields
--    it('should work with JS Date objects', async () => {
-+    it.fails('should work with JS Date objects', async () => {
-       const values = [
-         {
-           dt1: new Date('2106-02-07T06:28:15Z'),
 @@ -217,7 +217,7 @@ describe('data types', () => {
      })
    })
@@ -60,28 +42,6 @@ index c8d409b..0830915 100644
        const values = [
          {
            id: 1,
-diff --git a/packages/client-common/__tests__/integration/date_time.test.ts b/packages/client-common/__tests__/integration/date_time.test.ts
-index 7e6ee1e..c57d1cb 100644
---- a/packages/client-common/__tests__/integration/date_time.test.ts
-+++ b/packages/client-common/__tests__/integration/date_time.test.ts
-@@ -57,7 +57,7 @@ describe('DateTime', () => {
-   })
- 
-   describe('DateTime', () => {
--    it('should insert DateTime and get it back', async () => {
-+    it.fails('should insert DateTime and get it back', async () => {
-       const table = await createTableWithFields(client, 'd DateTime')
-       await client.insert({
-         table,
-@@ -132,7 +132,7 @@ describe('DateTime', () => {
-   })
- 
-   describe('DateTime64(3)', () => {
--    it('should insert DateTime64(3) and get it back', async () => {
-+    it.fails('should insert DateTime64(3) and get it back', async () => {
-       const table = await createTableWithFields(client, 'd DateTime64(3)')
-       await client.insert({
-         table,
 diff --git a/packages/client-common/__tests__/integration/exec_and_command.test.ts b/packages/client-common/__tests__/integration/exec_and_command.test.ts
 index 33fc002..910e235 100644
 --- a/packages/client-common/__tests__/integration/exec_and_command.test.ts
@@ -179,28 +139,6 @@ index 722f5c1..66333f0 100644
      const rs = await client.query({
        query: 'SELECT * FROM system.numbers LIMIT 1',
        format: 'JSONEachRow',
-diff --git a/packages/client-common/__tests__/integration/select_query_binding.test.ts b/packages/client-common/__tests__/integration/select_query_binding.test.ts
-index 9cba3c7..c745af5 100644
---- a/packages/client-common/__tests__/integration/select_query_binding.test.ts
-+++ b/packages/client-common/__tests__/integration/select_query_binding.test.ts
-@@ -217,7 +217,7 @@ describe('select with query binding', () => {
-       expect(response).toBe('"2022-05-02"\n')
-     })
- 
--    it('handles DateTime in a parameterized query', async () => {
-+    it.fails('handles DateTime in a parameterized query', async () => {
-       const rs = await client.query({
-         query: 'SELECT toDateTime({min_time: DateTime})',
-         format: 'CSV',
-@@ -230,7 +230,7 @@ describe('select with query binding', () => {
-       expect(response).toBe('"2022-05-02 13:25:55"\n')
-     })
- 
--    it('handles DateTime64(3) in a parameterized query', async () => {
-+    it.fails('handles DateTime64(3) in a parameterized query', async () => {
-       const rs = await client.query({
-         query: 'SELECT toDateTime64({min_time: DateTime64(3)}, 3)',
-         format: 'CSV',
 diff --git a/packages/client-node/__tests__/integration/node_command.test.ts b/packages/client-node/__tests__/integration/node_command.test.ts
 index f8acd7c..69b3f9c 100644
 --- a/packages/client-node/__tests__/integration/node_command.test.ts

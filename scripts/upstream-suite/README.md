@@ -9,6 +9,10 @@ byte-compat surface (Layer 2) is checked by the upstream client's own assertions
 factory (`globalThis.environmentSpecificCreateClient`) to `chdb://memory`. It runs
 serially (libchdb allows one active connection per process).
 
+The CI step pins `TZ=UTC` — embedded chDB renders DateTime in the process's
+local timezone, so the DateTime/Date assertions in clickhouse-js's suite are
+byte-compat under UTC. Set `TZ=UTC` when running locally to reproduce CI.
+
 ```
 npm run test:upstream            # gating run
 npm run test:upstream -- --list  # list selected vs skipped spec files
@@ -36,9 +40,9 @@ the baseline specs stay pristine. Current categories:
 | 1 | No HTTP `response_headers` (embedded has no HTTP layer) | select / insert / exec_and_command "… response headers" |
 | 2 | HTTP compression / `ignore_error_response` / decompression | node_exec, node_command (ignore error response) |
 | 3 | Insert formats not yet serialized (`JSON`, `JSONObjectEachRow`, `CustomSeparated`) | insert, node_stream_raw_formats |
-| 4 | `Date` insert/format & DateTime session timezone | date_time, data_types "JS Date objects", select_query_binding "DateTime…" |
+| 4 | `Date` insert/format edge cases (remaining once `TZ=UTC`) | data_types "Dates" subcases beyond JS Date, raw Date string inserts |
 | 5 | Custom JSON parse/stringify hooks (Stage B) | data_types "custom JSON handling (BigInt and Date)" |
-| 6 | Engine specifics (Parquet streamed input, float formatting, nested-json input, some settings) | node_streaming_e2e Parquet, data_types floats/nested, clickhouse_settings |
+| 6 | Engine specifics (Parquet streamed input, nested-json input, some settings) | node_streaming_e2e Parquet, data_types nested, clickhouse_settings |
 | 7 | Error-message wording (code/type still match — see conformance.test.ts) | select "returns an error details…" |
 | 8 | Misc edge cases (empty column list, stream-error propagation, exec parametrized) | insert_specific_columns, node_stream_error_handling, node_exec |
 

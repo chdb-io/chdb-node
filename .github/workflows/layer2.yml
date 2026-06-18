@@ -37,6 +37,8 @@ jobs:
         # a real output difference (data / meta / error code) is a genuine signal.
         # Keep this in step with package.json's @chdb/lib-* version on each bump.
         image: clickhouse/clickhouse-server:26.5
+        env:
+          CLICKHOUSE_SKIP_USER_SETUP: 1
         ports:
           - 8123:8123
           - 9000:9000
@@ -90,4 +92,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y patchelf
       - run: npm install --ignore-scripts && npm run libchdb && npm run build
       - name: Clone + import-rewrite + run clickhouse-js integration suite
+        env:
+          TZ: UTC
         run: npm run test:upstream
