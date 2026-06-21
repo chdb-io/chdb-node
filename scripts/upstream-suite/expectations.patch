@@ -1,5 +1,5 @@
 diff --git a/packages/client-common/__tests__/integration/clickhouse_settings.test.ts b/packages/client-common/__tests__/integration/clickhouse_settings.test.ts
-index 1bd1c90..644ad3f 100644
+index 1bd1c90..0e3a139 100644
 --- a/packages/client-common/__tests__/integration/clickhouse_settings.test.ts
 +++ b/packages/client-common/__tests__/integration/clickhouse_settings.test.ts
 @@ -14,7 +14,7 @@ describe('ClickHouse settings', () => {
@@ -11,17 +11,8 @@ index 1bd1c90..644ad3f 100644
      const result = await client
        .query({
          query: 'SELECT * FROM system.numbers LIMIT 5',
-@@ -33,7 +33,7 @@ describe('ClickHouse settings', () => {
-   // `insert_deduplication_token` will not work without
-   // `non_replicated_deduplication_window` merge tree table setting
-   // on a single node ClickHouse (but will work on cluster)
--  it('should work with insert_deduplication_token', async () => {
-+  it.fails('should work with insert_deduplication_token', async () => {
-     const tableName = `clickhouse_settings_insert__${guid()}`
-     await createSimpleTable(client, tableName, {
-       non_replicated_deduplication_window: '5',
 diff --git a/packages/client-common/__tests__/integration/data_types.test.ts b/packages/client-common/__tests__/integration/data_types.test.ts
-index c8d409b..0830915 100644
+index c8d409b..c666985 100644
 --- a/packages/client-common/__tests__/integration/data_types.test.ts
 +++ b/packages/client-common/__tests__/integration/data_types.test.ts
 @@ -217,7 +217,7 @@ describe('data types', () => {
@@ -33,15 +24,6 @@ index c8d409b..0830915 100644
      const TEST_BIGINT = BigInt(25000000000000000)
      const TEST_DATE = new Date('2023-12-06T10:54:48.123Z')
      const values = [
-@@ -665,7 +665,7 @@ describe('data types', () => {
-       await insertAndAssertNestedValues(values, { flatten_nested: 0 }, {})
-     })
- 
--    it('should work with nested (input_format_import_nested_json = 1)', async () => {
-+    it.fails('should work with nested (input_format_import_nested_json = 1)', async () => {
-       const values = [
-         {
-           id: 1,
 diff --git a/packages/client-common/__tests__/integration/exec_and_command.test.ts b/packages/client-common/__tests__/integration/exec_and_command.test.ts
 index 33fc002..910e235 100644
 --- a/packages/client-common/__tests__/integration/exec_and_command.test.ts
@@ -65,7 +47,7 @@ index 33fc002..910e235 100644
        query: 'SELECT 42 FORMAT CSV',
      })
 diff --git a/packages/client-common/__tests__/integration/insert.test.ts b/packages/client-common/__tests__/integration/insert.test.ts
-index c94cfc9..dbc40fe 100644
+index c94cfc9..db03aa3 100644
 --- a/packages/client-common/__tests__/integration/insert.test.ts
 +++ b/packages/client-common/__tests__/integration/insert.test.ts
 @@ -17,7 +17,7 @@ describe('insert', () => {
@@ -86,15 +68,6 @@ index c94cfc9..dbc40fe 100644
      await client.insert({
        table: tableName,
        values: {
-@@ -128,7 +128,7 @@ describe('insert', () => {
-     await assertJsonValues(client, tableName)
-   })
- 
--  it('should provide error details when sending a request with an unknown clickhouse settings', async () => {
-+  it.fails('should provide error details when sending a request with an unknown clickhouse settings', async () => {
-     await expect(
-       client.insert({
-         table: tableName,
 diff --git a/packages/client-common/__tests__/integration/insert_specific_columns.test.ts b/packages/client-common/__tests__/integration/insert_specific_columns.test.ts
 index ba2f5ee..d620a77 100644
 --- a/packages/client-common/__tests__/integration/insert_specific_columns.test.ts
@@ -281,46 +254,6 @@ index 50b0590..99a224c 100644
      if (!(await isClickHouseVersionAtLeast(client, 25, 11))) {
        skip()
      }
-diff --git a/packages/client-node/__tests__/integration/node_stream_raw_formats.test.ts b/packages/client-node/__tests__/integration/node_stream_raw_formats.test.ts
-index d1763a3..7e64b4d 100644
---- a/packages/client-node/__tests__/integration/node_stream_raw_formats.test.ts
-+++ b/packages/client-node/__tests__/integration/node_stream_raw_formats.test.ts
-@@ -257,7 +257,7 @@ describe('[Node.js] stream raw formats', () => {
-       format_custom_field_delimiter: '^',
-     }
- 
--    it('should insert a custom separated stream without names or types', async () => {
-+    it.fails('should insert a custom separated stream without names or types', async () => {
-       const values = `42^"foo"^"[1,2]"\n43^"bar"^"[3,4]"\n`
-       const stream = Stream.Readable.from(values, {
-         objectMode: false,
-@@ -271,7 +271,7 @@ describe('[Node.js] stream raw formats', () => {
-       await assertInsertedValues('CustomSeparated', values, clickhouse_settings)
-     })
- 
--    it('should insert a custom separated stream with names', async () => {
-+    it.fails('should insert a custom separated stream with names', async () => {
-       const values = `"id"^"name"^"sku"\n42^"foo"^"[1,2]"\n43^"bar"^"[3,4]"\n`
-       const stream = Stream.Readable.from(values, {
-         objectMode: false,
-@@ -289,7 +289,7 @@ describe('[Node.js] stream raw formats', () => {
-       )
-     })
- 
--    it('should insert a custom separated stream with names and types', async () => {
-+    it.fails('should insert a custom separated stream with names and types', async () => {
-       const values = `"id"^"name"^"sku"\n"UInt64"^"String"^"Array(UInt8)"\n42^"foo"^"[1,2]"\n43^"bar"^"[3,4]"\n`
-       const stream = Stream.Readable.from(values, {
-         objectMode: false,
-@@ -323,7 +323,7 @@ describe('[Node.js] stream raw formats', () => {
-       })
-     })
- 
--    it('can insert multiple custom-separated streams at once', async () => {
-+    it.fails('can insert multiple custom-separated streams at once', async () => {
-       const streams: Stream.Readable[] = Array(jsonValues.length)
-       const insertStreamPromises = Promise.all(
-         jsonValues.map(({ id, name, sku }, i) => {
 diff --git a/packages/client-node/__tests__/integration/node_streaming_e2e.test.ts b/packages/client-node/__tests__/integration/node_streaming_e2e.test.ts
 index 233681f..38f033a 100644
 --- a/packages/client-node/__tests__/integration/node_streaming_e2e.test.ts

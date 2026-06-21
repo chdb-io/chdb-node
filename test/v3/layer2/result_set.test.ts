@@ -36,6 +36,13 @@ describe('makeRowTransform — half-row carry-over across chunk boundaries', () 
     const rows = await runTransform([...bytes].map((b) => Buffer.from([b])))
     expect(rows.map((r) => r.text)).toEqual(['aa', 'bbb', 'c'])
   })
+
+  it('emits a final row that is not newline-terminated', async () => {
+    // No trailing '\n' after the last row — the flush handler must still emit it.
+    const rows = await runTransform([Buffer.from('{"n":0}\n{"n":1}')])
+    expect(rows.map((r) => r.text)).toEqual(['{"n":0}', '{"n":1}'])
+    expect(rows.map((r) => r.json())).toEqual([{ n: 0 }, { n: 1 }])
+  })
 })
 
 describe('ChdbResultSet — byte-compat json() dispatch + Row asymmetry', () => {

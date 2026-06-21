@@ -136,7 +136,14 @@ export class ChdbClickHouseClient {
           this.#dbApplied = true
         })
       }
-      await this.#dbPromise
+      try {
+        await this.#dbPromise
+      } catch (e) {
+        // A failed USE must not poison the client: clear the memoized (rejected)
+        // promise so the next operation retries instead of replaying the error.
+        this.#dbPromise = undefined
+        throw e
+      }
     }
     return session
   }
@@ -293,8 +300,10 @@ export class ChdbClickHouseClient {
         format = (params.format ?? 'JSONCompactEachRow') as string
         data = norm.data
       }
-      const sql = `INSERT INTO ${table}${columnsClause(params.columns)} FORMAT ${format}\n${data}`
-      const raw = await session.queryAsync(sql, { format: 'CSV' })
+      const sql =
+        buildSettingsPrefix(this.#cfg.clientSettings, params.clickhouse_settings) +
+        `INSERT INTO ${table}${columnsClause(params.columns)} FORMAT ${format}\n${data}`
+      const raw = await session.queryAsync(sql, { ...this.#queryOpts(params), format: 'CSV' })
       return {
         executed: true,
         query_id,

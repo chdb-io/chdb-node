@@ -83,6 +83,25 @@ export function makeRowTransform(): Transform {
       }
       callback()
     },
+    // The final row may not be newline-terminated; emit any buffered remainder
+    // at stream end so a last unterminated row is never silently dropped.
+    flush(callback) {
+      if (incompleteChunks.length > 0) {
+        const text = Buffer.concat(incompleteChunks).toString('utf8')
+        incompleteChunks.length = 0
+        if (text.length > 0) {
+          this.push([
+            {
+              text,
+              json<T = unknown>(): T {
+                return JSON.parse(text) as T
+              },
+            },
+          ])
+        }
+      }
+      callback()
+    },
   })
 }
 

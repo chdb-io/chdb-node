@@ -96,8 +96,8 @@ interface TopologyMarker {
 const MARKERS: ReadonlyArray<TopologyMarker> = [
   { re: /\bON\s+CLUSTER\b/i, feature: 'ON CLUSTER' },
   { re: /\bclusterAllReplicas\s*\(/i, feature: 'clusterAllReplicas()' },
-  // `cluster(` but not `clusterAllReplicas(` (handled above; the negative
-  // lookahead keeps this from double-reporting and from matching the longer fn).
+  // `cluster(` — the required `(` immediately after `cluster` keeps this from
+  // matching the longer `clusterAllReplicas(` (already reported by the rule above).
   { re: /\bcluster\s*\(/i, feature: 'cluster()' },
   // Distributed table engine: `ENGINE = Distributed(...)` or a bare
   // `Distributed(` engine spec.

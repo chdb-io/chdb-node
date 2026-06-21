@@ -218,8 +218,9 @@ function serializeArray(arr: ReadonlyArray<unknown>): string {
  * Because the engine binds the value (never interpolates it into SQL), there is
  * no escaping/injection surface here at all.
  *
- * @throws ChdbBindError on null/undefined (use a typed NULL in SQL instead),
- *   non-finite or unsafe-integer numbers, invalid Dates, or unsupported types.
+ * @throws ChdbBindError on `undefined` (a likely missing value — pass `null` for
+ *   an explicit NULL, which binds as the TSV NULL token), non-finite or
+ *   unsafe-integer numbers, invalid Dates, or unsupported types.
  */
 export function formatParamValue(value: unknown): string {
   if (value === undefined) {

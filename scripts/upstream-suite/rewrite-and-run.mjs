@@ -21,7 +21,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, existsSync, readdirSync, rmSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..', '..')
@@ -76,7 +76,11 @@ function findSpecs(dir, acc = []) {
 const allSpecs = findSpecs(workDir)
 const skipped = []
 const selected = allSpecs.filter((p) => {
-  const hit = skip.find((s) => p.toLowerCase().includes(s.match.toLowerCase()))
+  // Match the spec's basename (not the full path) — skip-list entries are
+  // documented as basename substrings, so a match value must not accidentally
+  // hit an intermediate directory name.
+  const name = basename(p).toLowerCase()
+  const hit = skip.find((s) => name.includes(s.match.toLowerCase()))
   if (hit) {
     skipped.push({ p, why: hit.why })
     return false

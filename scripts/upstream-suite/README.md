@@ -38,13 +38,12 @@ the baseline specs stay pristine. Current categories:
 | # | Divergence | Example cases |
 |---|------------|---------------|
 | 1 | No HTTP `response_headers` (embedded has no HTTP layer) | select / insert / exec_and_command "… response headers" |
-| 2 | HTTP compression / `ignore_error_response` / decompression | node_exec, node_command (ignore error response) |
-| 3 | Insert formats not yet serialized (`JSON`, `JSONObjectEachRow`, `CustomSeparated`) | insert, node_stream_raw_formats |
-| 4 | `Date` insert/format edge cases (remaining once `TZ=UTC`) | data_types "Dates" subcases beyond JS Date, raw Date string inserts |
-| 5 | Custom JSON parse/stringify hooks (Stage B) | data_types "custom JSON handling (BigInt and Date)" |
-| 6 | Engine specifics (Parquet streamed input, nested-json input, some settings) | node_streaming_e2e Parquet, data_types nested, clickhouse_settings |
-| 7 | Error-message wording (code/type still match — see conformance.test.ts) | select "returns an error details…" |
-| 8 | Misc edge cases (empty column list, stream-error propagation, exec parametrized) | insert_specific_columns, node_stream_error_handling, node_exec |
+| 2 | HTTP compression / `ignore_error_response` / decompression | node_exec, node_command (ignore error response), node_insert (request compression) |
+| 3 | Insert formats not yet serialized (`JSON`, `JSONObjectEachRow`) | insert |
+| 4 | Custom JSON parse/stringify hooks (Stage B) | data_types "custom JSON handling (BigInt and Date)" |
+| 5 | Parquet streamed input | node_streaming_e2e "should stream a Parquet file" |
+| 6 | Error-message wording (code/type still match — see conformance.test.ts) | select "returns an error details…" |
+| 7 | Misc edge cases (empty column list, stream-error propagation, exec parametrized / default_format / empty stream, `additional_table_filters`) | insert_specific_columns, node_stream_error_handling, node_exec, clickhouse_settings |
 
 ### Regenerating `expectations.patch` (after a clickhouse-js version bump)
 
