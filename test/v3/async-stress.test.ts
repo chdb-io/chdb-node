@@ -9,6 +9,14 @@ import { queryAsync, queryBindAsync, Session } from '../../index.js'
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const HEAVY = (n: number) => `SELECT count() FROM numbers(${n})`
 
+// The storm/race cases below run dozens of heavy queries in sequence and take
+// ~15-30s on a fast runner. Give them a generous timeout so a slow/loaded CI
+// runner never hits the 30s default and kills a test mid-flight — an abandoned
+// in-flight native op (plain queryAsync is not tracked for drain) would collide
+// with the next test on the single in-process engine and abort it (code 236),
+// cascading failures into every later file.
+const STRESS_TIMEOUT_MS = 120_000
+
 describe('async concurrency — correctness & no deadlock', () => {
   it('runs 64 concurrent default-connection queries with no cross-contamination', async () => {
     const N = 64
@@ -80,7 +88,7 @@ describe('async cancellation storms (no crash / no hang)', () => {
     expect(codes.every((c) => c === 'CHDB_ABORT')).toBe(true)
     // recovers after the storm
     expect((await queryAsync('SELECT 7', { format: 'CSV' })).text().trim()).toBe('7')
-  })
+  }, STRESS_TIMEOUT_MS)
 
   it('survives a timeout storm and recovers', async () => {
     const codes = await Promise.all(
@@ -90,7 +98,7 @@ describe('async cancellation storms (no crash / no hang)', () => {
     )
     expect(codes.every((c) => c === 'CHDB_TIMEOUT')).toBe(true)
     expect((await queryAsync('SELECT 8', { format: 'CSV' })).text().trim()).toBe('8')
-  })
+  }, STRESS_TIMEOUT_MS)
 })
 
 describe('lifecycle race: close / registry mutation during an in-flight query', () => {
@@ -106,7 +114,7 @@ describe('lifecycle race: close / registry mutation during an in-flight query', 
       const r = await p
       expect(typeof r).toBe('string') // resolved 'ok' or a typed error code — never a crash
     }
-  })
+  }, STRESS_TIMEOUT_MS)
 
   it('opening a new session while a default-conn query is in flight is safe (60x)', async () => {
     for (let i = 0; i < 60; i++) {
@@ -120,7 +128,7 @@ describe('lifecycle race: close / registry mutation during an in-flight query', 
         s.close() // close even if the assertion throws, or the session leaks into the next test
       }
     }
-  })
+  }, STRESS_TIMEOUT_MS)
 })
 
 describe('async path memory (no leak on the query path)', () => {
