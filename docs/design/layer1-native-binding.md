@@ -821,12 +821,60 @@ Low priority:
 
 High priority:
 
-- Thread-safety hardening: single-process connection plus async-worker / registry model needs TSan and a clear policy.
+- Thread-safety hardening: the multi-connection registry plus async-worker model needs TSan and a clear policy.
 
 Low priority:
 
 - True query interrupt, depending on upstream C ABI.
 - Symlink-level path canonicalization.
+
+#### 9.6.1 Multi-connection model (same-path parallelism foundation)
+
+The native registry was changed from a single active slot to a model that mirrors
+chdb-core's actual constraint: one process-wide `EmbeddedServer` bound to a single
+data directory, with N independent `chdb_connection` handles attached to it.
+
+- Same path → multiple `Session`s now each own a DISTINCT connection and coexist
+  (previously they refcount-collapsed onto one shared connection, which was a
+  latent clobber: separate JS param chains over one underlying connection).
+- Different data directory while one is live → still rejected (engine
+  `BAD_ARGUMENTS`), surfaced as `ChdbConnectionError`.
+- Last connection out unbinds the server, so a different path may then bind.
+- Data is shared across same-path connections (same `EmbeddedServer`), so Layer 2
+  `chdb://memory` clients share one refcounted temp dir and keep cross-client
+  table visibility while each holds its own connection.
+
+**Why this is the actual fix for the node-vs-python parallelism gap.** chdb-core
+itself is not the bottleneck: the same `libchdb.so` (both `v26.5.1-rc.1` and a
+build from current source), called from Python `ctypes` threads, runs concurrent
+`chdb_query_n` calls in parallel (~3.7x on 4 cores) with per-connection parameter
+isolation (N connections × concurrent parameterized queries → zero clobber). The
+reason chdb-python parallelized while chdb-node did not was purely the binding:
+chdb-python creates one independent `ChdbClient` per `Connection`, whereas the
+old node registry refcount-collapsed every same-path `Session` onto ONE shared
+`ChdbClient`, so `ChdbClient::executeMaterializedQuery`'s per-instance
+`client_mutex` serialized them. Giving each `Session` its own connection removes
+that shared mutex.
+
+Verified with this change (build/Release binding, libchdb `v26.5.1-rc.1`):
+four `max_threads=1` heavy queries on four same-path Sessions enter on four
+threads simultaneously and complete in ~1x the single-query time (≈3.7x speedup).
+
+Parameterized queries, however, are serialized PROCESS-WIDE (a single
+`globalParamChain` shared by the default connection and every Session). The
+bundled libchdb's parameter set/reset (`CApiQueryParameterGuard`) is NOT isolated
+per connection under true parallelism: concurrent parameterized queries on
+different connections clobber each other (`456 Substitution not set`) and the race
+can fatally abort the engine (`236`). Thread-based bindings (chdb-python) rarely
+surface this because the GIL serializes the short set/clear/execute window;
+node's libuv pool runs them with real parallelism and hits it under CI. Non-param
+queries are never chained and keep full parallelism. If a future libchdb isolates
+parameter state per connection, this can relax to a per-connection chain.
+
+Distribution note: the parallelism only reaches users once the per-platform
+`@chdb/lib-*` packages are REBUILT from this source — the loader prefers an
+installed `@chdb/lib-<platform>` over `build/Release`, so a stale prebuilt addon
+would mask the fix.
 
 ### 9.7 Distribution / CI / docs
 
