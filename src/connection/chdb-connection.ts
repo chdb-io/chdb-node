@@ -286,7 +286,11 @@ function applySettings(
     }
     if (typeof v === "number") stmts.push(`SET ${k} = ${v}`);
     else if (typeof v === "boolean") stmts.push(`SET ${k} = ${v ? 1 : 0}`);
-    else stmts.push(`SET ${k} = '${String(v).replace(/'/g, "\\'")}'`);
+    // ClickHouse SQL string literals escape `'` by DOUBLING it (`''`), not
+    // with a backslash (`\'`). Using backslash here would either silently
+    // truncate the value or produce malformed SQL on engines that don't
+    // accept backslash escapes — drift between adapter and engine.
+    else stmts.push(`SET ${k} = '${String(v).replace(/'/g, "''")}'`);
   }
   return {
     sql: stmts.length === 0 ? sql : `${stmts.join("; ")}; ${sql}`,
@@ -508,7 +512,7 @@ export class ChdbConnection implements Connection<Readable> {
       await withClickHouseError(this.#session.queryAsync("SELECT 1", { format: "CSV" }));
       return { success: true };
     } catch (e) {
-      return { success: false, error: this.#mapErrorLike(e) };
+      return { success: false, error: this.mapError(e) };
     }
   }
 
@@ -538,7 +542,13 @@ export class ChdbConnection implements Connection<Readable> {
 
   // -------------------------------------------------------------------------
 
-  #mapErrorLike(err: unknown): Error {
+  /**
+   * Coerce any thrown value into an `Error` instance. Mirrors
+   * `NodeBaseConnection.mapError` from clickhouse-js — useful for callers
+   * that catch from this connection and want a uniform Error shape.
+   * Not part of the cross-backend `Connection` interface.
+   */
+  mapError(err: unknown): Error {
     if (err instanceof Error) return err;
     return new Error(String(err));
   }

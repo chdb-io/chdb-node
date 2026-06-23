@@ -103,8 +103,8 @@ conn.chdb.session.path                                 // bound on-disk path
 
 See [docs/design/pluggable-connection.md](docs/design/pluggable-connection.md)
 for the full design, the `Connection` interface, the `.chdb` extension
-namespace, the `test_profile.json` skip manifest, and the migration path
-from the previous byte-compat `createClient` façade.
+namespace, the `tests/clickhouse-js/skip_list.json` parity blacklist,
+and the sync policy with `@clickhouse/client`.
 
 ### Design docs
 

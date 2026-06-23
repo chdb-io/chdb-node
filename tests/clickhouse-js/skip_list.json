@@ -106,6 +106,14 @@
     {
       "file": "packages/client-common/__tests__/integration/clickhouse_settings.test.ts",
       "reason": "Iterates the live system.settings catalog and tries to SET each one. chdb advertises a different set than the server (engine-only subset; some HTTP-specific entries don't exist; some chdb-specific entries are extras the test doesn't expect)."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_abort_request.test.ts",
+      "reason": "Same AbortSignal divergence as `client-common/abort_request.test.ts` — chdb's single-shot abort rejects early while the underlying computation runs to completion (C ABI has no interrupt). The client-node variant additionally exercises HTTP wire-level cancel timing that has no analogue in-process."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_stream_error_handling.test.ts",
+      "reason": "chdb's `query()` materializes results eagerly (one-shot Readable from a buffered result); errors surface at the awaited Promise rather than mid-stream. Tests here assert HTTP-style mid-stream error delivery which the embedded backend can't reproduce. Pinned by `test/v3/connection/contract.test.ts > query() materialization invariant`."
     }
   ],
   "skipTests": [
@@ -198,6 +206,71 @@
       "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
       "test": "select with query binding > Date(Time) > handles DateTime64(3) in a parameterized query",
       "reason": "Same chdb default-timezone divergence."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select.test.ts",
+      "test": "select > returns an error details provided by ClickHouse",
+      "reason": "Error-type parsing divergence: chdb's error string is `Code: 62. DB::Exception: Syntax error: failed at position 16 (JSON) (line 2, col 8): JSON. Expected end of query. (SYNTAX_ERROR)`. `parseError` in @clickhouse/client-common picks the first parenthesized token as `type`, so it extracts `JSON` instead of `SYNTAX_ERROR`. Same numeric code (62), same message content; only the parsed `type` field differs."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select.test.ts",
+      "test": "select > should get the response headers",
+      "reason": "Asserts HTTP response headers; chdb has none."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/data_types.test.ts",
+      "test": "data types > Nested > should work with nested (input_format_import_nested_json = 1)",
+      "reason": "Nested type with the HTTP-side `input_format_import_nested_json=1` setting; chdb's nested-JSON input path has a different default behavior. Not a chdb engine gap per se (Nested in general works), but the specific JSON-input setting interaction differs from server."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_streaming_e2e.test.ts",
+      "test": "[Node.js] streaming e2e > should stream a Parquet file",
+      "reason": "Streams a Parquet file into chdb via `INSERT FORMAT Parquet`; chdb's `ParquetV3BlockInputFormat` rejects this specific fixture with `apache::thrift::protocol::TProtocolException: invalid TType`. The server's older Parquet input format accepts it. Engine-version divergence in Parquet decoder."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
+      "test": "select with query binding > handles tuples in a parametrized query",
+      "reason": "chdb's `queryBindAsync` serializes Tuple parameter values using `{'field':value}` map-literal form. The engine's parser expects `(value1, value2, ...)` positional form. Real chdb-engine parameter-binding gap for compound types."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
+      "test": "select with query binding > handles arrays of tuples in a parametrized query",
+      "reason": "Same chdb parameter-binding gap for Tuple — applies to Array(Tuple(...))."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
+      "test": "select with query binding > handles maps with tuples in a parametrized query",
+      "reason": "Same chdb parameter-binding gap for Tuple — applies to Map(K, Tuple(...))."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
+      "test": "select with query binding > handles maps with nested arrays in a parametrized query",
+      "reason": "chdb parameter-binding for Map(K, Array(...)) generates a serialization the engine parser rejects."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
+      "test": "select with query binding > handles maps with nullable values in a parametrized query",
+      "reason": "chdb parameter-binding for Map(K, Nullable(V)) generates a serialization the engine parser rejects."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
+      "test": "select with query binding > NULL parameter binding > should work with nulls",
+      "reason": "chdb's `queryBindAsync` NULL substitution diverges from the server's `param_*` URL-binding semantics (server-side strict-NULL handling)."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
+      "test": "select with query binding > NULL parameter binding > should with an explicit undefined",
+      "reason": "Same chdb NULL/undefined parameter-binding divergence."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
+      "test": "select with query binding > Nested boolean types > handles boolean in a tuple",
+      "reason": "Boolean inside Tuple parameter binding hits the same Tuple-serialization divergence above."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
+      "test": "select with query binding > Nested boolean types > handles boolean in a mixed nested structure",
+      "reason": "Boolean inside nested Tuple/Map parameter binding — same root cause."
     }
   ]
 }

@@ -12,8 +12,7 @@ zero chdb CI dependency — the only upstream change is the
 | File | Purpose |
 |---|---|
 | `skip_list.json` | The AUTHORITATIVE blacklist of upstream tests chdb does not support. Maintained by the chdb team. |
-| `inject_setup.ts` | Vitest setup that replaces `globalThis.environmentSpecificCreateClient` with one wrapping every `createClient` call in `connection: createChdbConnection(...)`. (Compiled inline by the runner.) |
-| `runner.mjs` | Clones `@clickhouse/client` at the configured ref, links this chdb-node checkout into it, injects the setup, and runs the integration suite with `skip_list.json` applied as `--exclude` patterns. |
+| `runner.mjs` | Clones `@clickhouse/client` at the configured ref, links this chdb-node checkout into it, **patches the upstream `vitest.node.setup.ts` in-place** to wrap `globalThis.environmentSpecificCreateClient` with `createChdbConnection`, runs the integration suite with `skip_list.json` applied as `--exclude` patterns, then restores the patch in a `try/finally` block. |
 
 ## Sync policy
 
@@ -91,7 +90,8 @@ categories are:
 - **Float64 output precision** (per-test): chdb prints 17 significant
   digits for IEEE 754 round-trip; clickhouse-server prints 15.
 
-The `underInvestigation` list in `skip_list.json` carries files where the
-chdb failure looks like a fixable `ChdbConnection` bug rather than a
-capability gap; those are addressed in `src/connection/` rather than by
-adding to `skipFiles`.
+Each entry has a `reason`. When `@clickhouse/client` cuts a new release
+and a previously-passing test starts failing under the runner, the
+triage rule is: fixable in `ChdbConnection` → patch
+`src/connection/chdb-connection.ts`, real capability gap → add to
+`skipFiles` / `skipTests` with a one-line reason.

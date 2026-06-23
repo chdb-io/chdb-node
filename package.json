@@ -51,7 +51,6 @@
     "example.js"
   ],
   "devDependencies": {
-    "@clickhouse/client-common": "^1.22.0",
     "@types/node": "^20.14.0",
     "apache-arrow": "^21.1.0",
     "chai": "^4.5.0",
@@ -61,6 +60,7 @@
     "vitest": "^2.0.0"
   },
   "dependencies": {
+    "@clickhouse/client-common": "^1.22.0",
     "node-addon-api": "^6.1.0",
     "node-gyp-build": "^4.6.0"
   },

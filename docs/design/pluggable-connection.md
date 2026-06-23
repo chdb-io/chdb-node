@@ -155,8 +155,12 @@ grouped as:
   the underlying computation runs to completion (C ABI has no
   interrupt); documented divergence.
 
-The `underInvestigation` array carries files where the failure looks
-fixable in `ChdbConnection` rather than a capability gap.
+Each entry has a `reason` so reviewers can tell at a glance whether a
+skip is a real chdb capability gap or an HTTP-only-feature mismatch.
+When `@clickhouse/client` cuts a new release and a previously-passing
+test starts failing under the runner, the triage rule is: fixable in
+`ChdbConnection` → patch the adapter, real capability gap → add to
+`skipFiles` / `skipTests` with a one-line reason.
 
 ## Implementation notes
 
