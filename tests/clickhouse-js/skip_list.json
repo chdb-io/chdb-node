@@ -1,0 +1,203 @@
+{
+  "$schema_comment": "chdb-node skip list for @clickhouse/client's integration suite. AUTHORITATIVE blacklist applied by tests/clickhouse-js/runner.mjs when running @clickhouse/client's tests with ChdbConnection injected. Format: skipFiles is per-file (entire suite of tests in the file is excluded — for files where chdb does not implement the capability the file exercises); skipTests is per-case for cases inside an otherwise-runnable file (the runner patches the file in place to convert it(...) → it.skip(...) before vitest collects, and restores after). reasons documents WHY each entry is here. Maintained per @clickhouse/client release; chdb-node refreshes the list when upstream cuts a new version.",
+  "syncedAgainst": {
+    "ref": "ShawnChen-Sirius/clickhouse-js feat/pluggable-connection",
+    "policy": "While the createClient({ connection }) injection PR is open: ShawnChen-Sirius fork branch. After merge: ClickHouse/clickhouse-js main. After next release: latest released tag.",
+    "lastSyncedSha": "be9045d",
+    "lastSyncedAt": "2026-06-23"
+  },
+  "skipFiles": [
+    {
+      "file": "packages/client-node/__tests__/integration/node_socket_handling.test.ts",
+      "reason": "HTTP transport plumbing: slow-server / dropped-connection / eager-socket-destroy scenarios exist only on the wire."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_eager_socket_destroy.test.ts",
+      "reason": "HTTP socket-pool behavior; no analogue in-process."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_keep_alive.test.ts",
+      "reason": "HTTP keep-alive; no socket pool in-process."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_keep_alive_header.test.ts",
+      "reason": "HTTP keep-alive header inspection; no HTTP transport."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_max_open_connections.test.ts",
+      "reason": "HTTP connection pool sizing; no socket pool in-process."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_custom_http_agent.test.ts",
+      "reason": "HTTP agent injection; no HTTP transport in-process."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_ping.test.ts",
+      "reason": "Tests the HTTP /ping endpoint; chdb's ping is SELECT 1 (already covered by the Connection contract suite in test/v3/connection/)."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_compression.test.ts",
+      "reason": "HTTP request/response body compression; no wire to compress in-process."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_logger_support.test.ts",
+      "reason": "HTTP-request logger surface; in-process backend has no HTTP request to log."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_summary.test.ts",
+      "reason": "Asserts X-ClickHouse-Summary HTTP response header; chdb synthesizes summary fields but has no HTTP headers."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_jwt_auth.test.ts",
+      "reason": "JWT auth; chdb has no auth layer."
+    },
+    {
+      "file": "packages/client-node/__tests__/tls/tls.test.ts",
+      "reason": "TLS transport; no transport security layer in-process."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/auth.test.ts",
+      "reason": "Username/password authentication; chdb has no auth layer."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/role.test.ts",
+      "reason": "RBAC roles; chdb has no users/roles."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/read_only_user.test.ts",
+      "reason": "RBAC read-only user enforcement; chdb has no users."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/query_log.test.ts",
+      "reason": "Reads from system.query_log; chdb has no server runtime / query_log table."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/multipart_params.test.ts",
+      "reason": "HTTP multipart body for parameter binding; no HTTP transport."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/multiple_clients.test.ts",
+      "reason": "Multiple parallel clients against shared cluster topology; chdb is one in-process engine, not a cluster."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/session.test.ts",
+      "reason": "HTTP session_id semantics; chdb has no HTTP session concept (persistence is the chdb Session.path)."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/request_compression.test.ts",
+      "reason": "HTTP request-body compression; no wire to compress."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/response_compression.test.ts",
+      "reason": "HTTP response-body compression; no wire to compress."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/exception_header.test.ts",
+      "reason": "X-ClickHouse-Exception HTTP response header; chdb maps errors via JS exceptions, not HTTP headers."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/abort_request.test.ts",
+      "reason": "AbortSignal cancellation semantics differ: chdb single-shot abort rejects early while the underlying computation runs to completion (the C ABI has no interrupt). Documented divergence."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_stream_json_each_row_with_progress.test.ts",
+      "reason": "JSONEachRowWithProgress emits HTTP X-ClickHouse-Progress events interleaved with rows — chdb returns plain JSONEachRow output without the progress envelope."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/clickhouse_settings.test.ts",
+      "reason": "Iterates the live system.settings catalog and tries to SET each one. chdb advertises a different set than the server (engine-only subset; some HTTP-specific entries don't exist; some chdb-specific entries are extras the test doesn't expect)."
+    }
+  ],
+  "skipTests": [
+    {
+      "file": "packages/client-common/__tests__/integration/insert.test.ts",
+      "test": "insert > inserts values using JSON format and get the response headers",
+      "reason": "Asserts response_headers['Content-Type']; chdb has no HTTP response headers (synthesized as {})."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/exec_and_command.test.ts",
+      "test": "exec and command > should get the response headers with command",
+      "reason": "Asserts HTTP response headers; chdb has none."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/exec_and_command.test.ts",
+      "test": "exec and command > should get the response headers with exec",
+      "reason": "Asserts HTTP response headers; chdb has none."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_command.test.ts",
+      "test": "[Node.js] command > ignore error response > should not throw an error when ignore_error_response is true",
+      "reason": "ignore_error_response gates HTTP non-200 responses; chdb errors are typed JS throws, not HTTP responses."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_command.test.ts",
+      "test": "[Node.js] command > ignore error response > should throw an error by default when ignore_error_response is not set",
+      "reason": "Same; HTTP-specific."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_command.test.ts",
+      "test": "[Node.js] command > ignore error response > should throw an error when ignore_error_response is false",
+      "reason": "Same; HTTP-specific."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_exec.test.ts",
+      "test": "[Node.js] exec > disabled stream decompression > should force decompress in case of an error",
+      "reason": "HTTP wire-level stream decompression; chdb has no compressed wire."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_exec.test.ts",
+      "test": "[Node.js] exec > disabled stream decompression > should get a compressed response stream without decompressing it",
+      "reason": "HTTP wire-level stream decompression."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_exec.test.ts",
+      "test": "[Node.js] exec > ignore error response > should get a compressed response stream if ignore_error_response is true and decompression is disabled",
+      "reason": "HTTP wire-level stream decompression + non-200 handling."
+    },
+    {
+      "file": "packages/client-node/__tests__/integration/node_exec.test.ts",
+      "test": "[Node.js] exec > ignore error response > should get a decompressed response stream if ignore_error_response is true and default decompression config is passed",
+      "reason": "HTTP wire-level stream decompression + non-200 handling."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/config.test.ts",
+      "test": "config > should set request timeout with \"request_timeout\" setting",
+      "reason": "HTTP socket-level request_timeout; no HTTP socket in-process."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/config.test.ts",
+      "test": "config > should specify the default database name on creation",
+      "reason": "Uses `SELECT * FROM numbers LIMIT 2` (no parens) which only works against the server's `numbers` table-function shorthand; chdb requires `numbers(N)` argument form. Test isn't asserting chdb-supported behavior."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/data_types.test.ts",
+      "test": "data types > should work with floating point types",
+      "reason": "Float64 output precision divergence: chdb emits 17 significant digits for full IEEE 754 round-trip safety (e.g. -0.11325939434432401), clickhouse-server emits 15 (-0.113259394344324). Same numeric value, different string representation. Round-trip through chdb is lossless; the test asserts string-equality of the original fixture."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/data_types.test.ts",
+      "test": "data types > Dates > should work with JS Date objects",
+      "reason": "chdb resolves DateTime[64] without an explicit TZ argument against the system timezone (libchdb captures ICU at load time and `SET session_timezone='UTC'` does not influence the output formatter); clickhouse-server defaults to UTC in CI. Round-trip is lossless at the instant level — display string differs by the host's UTC offset. Same divergence underlies the other 4 datetime skipTests below."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/date_time.test.ts",
+      "test": "DateTime > DateTime > should insert DateTime and get it back",
+      "reason": "Same chdb default-timezone divergence (DateTime values display in the host's local TZ, not UTC)."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/date_time.test.ts",
+      "test": "DateTime > DateTime64(3) > should insert DateTime64(3) and get it back",
+      "reason": "Same chdb default-timezone divergence."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
+      "test": "select with query binding > Date(Time) > handles DateTime in a parameterized query",
+      "reason": "Same chdb default-timezone divergence."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
+      "test": "select with query binding > Date(Time) > handles DateTime64(3) in a parameterized query",
+      "reason": "Same chdb default-timezone divergence."
+    }
+  ]
+}
