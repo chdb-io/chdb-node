@@ -37,14 +37,22 @@ char * QueryWithConnection(ChdbConnection conn, const char * query, const char *
 // This registry mirrors that model. Unlike the previous single-slot design (which
 // refcount-collapsed every same-path Session onto ONE shared connection), it now
 // keeps each connection as a DISTINCT chdb_connection handle, so:
-//   - N connections to the same path coexist and run queries in parallel (each
-//     chdb-core client carries its own query/parameter state, so concurrent
-//     parameterized queries on different connections never clobber each other —
-//     the JS per-connection serialization only has to guard a single connection);
+//   - N connections to the same path coexist and run NON-PARAMETERIZED queries
+//     in parallel (each chdb-core client has its own per-instance
+//     ChdbClient::client_mutex, so distinct connections never serialize against
+//     each other);
 //   - a different data directory is still rejected while one is bound;
 //   - same-path Sessions no longer silently share one native connection (which
 //     was a latent clobber: two Sessions had separate JS param chains but one
 //     underlying connection).
+//
+// PARAMETERIZED queries are NOT parallelized today: the bundled libchdb does not
+// isolate parameter set/reset per connection under true parallelism (concurrent
+// param queries on different connections clobber each other, surfacing as
+// `456 Substitution not set` and can fatally abort the engine `236`). The JS
+// layer serializes ALL parameterized async queries through one process-wide
+// chain (see `globalParamChain` in index.js); non-parameterized queries are
+// unaffected and keep full parallelism.
 //
 // The path key is normalized to an absolute path by the JS layer (path.resolve)
 // so "./data" and the absolute form bind the same server. The lazily-created

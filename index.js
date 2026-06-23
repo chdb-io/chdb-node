@@ -245,7 +245,27 @@ function withAbortTimeout(nativePromise, opts) {
 const globalParamChain = { tail: Promise.resolve() };
 
 function runExclusiveParam(chain, startNative, opts) {
-  const nativeP = chain.tail.then(() => startNative());
+  // Pre-check the caller's cancellation BEFORE the chain head fires startNative.
+  // Otherwise a query that was queued behind earlier param queries and whose
+  // caller already observed CHDB_ABORT/CHDB_TIMEOUT (settled early by
+  // withAbortTimeout) would still dispatch the native call when its turn came up,
+  // leaking unintended side effects (e.g. queued DDL/DML). The chain still
+  // advances on the guarded promise so the next queued query is not stalled.
+  const signal = opts && opts.signal;
+  const timeout = opts && opts.timeout;
+  const deadline = timeout ? Date.now() + timeout : 0;
+  const guardedStart = () => {
+    if (signal && signal.aborted) {
+      return Promise.reject(new ChdbAbortError(
+        'Query aborted before execution (queued behind earlier parameterized queries)'));
+    }
+    if (deadline && Date.now() >= deadline) {
+      return Promise.reject(new ChdbTimeoutError(
+        `Query timed out (${timeout}ms) before execution (queued behind earlier parameterized queries)`));
+    }
+    return startNative();
+  };
+  const nativeP = chain.tail.then(guardedStart);
   chain.tail = nativeP.then(() => {}, () => {});
   return withAbortTimeout(nativeP, opts);
 }
