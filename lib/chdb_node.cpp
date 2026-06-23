@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <iostream>
+#include <mutex>
+#include <set>
 #include <napi.h>
 
 typedef void * ChdbConnection;
@@ -25,28 +27,54 @@ char * QueryWithConnection(ChdbConnection conn, const char * query, const char *
 // param state between calls (unlike the old session-wide "SET param_x=" path,
 // which could race when different callers set different values).
 
-// Connection registry. chDB / libchdb allow only ONE active connection per
-// process; this registry is the single owner of that constraint. It tracks the
-// one live connection by its path key, reference-counts session handles for the
-// same path (so reopening the same path returns the same connection while it is
-// live), and REJECTS a second concurrent data directory rather than silently
-// switching (silent switching caused the malloc crash on repeated start/stop).
+// Connection registry. chdb-core runs ONE process-wide EmbeddedServer bound to a
+// single data directory (path): the first connect() binds it, a later connect()
+// to the SAME path attaches another independent client to that server, and a
+// connect() to a DIFFERENT path while one is live is rejected by the engine
+// (BAD_ARGUMENTS: "EmbeddedServer already initialized with path ..."). The server
+// unbinds when its last connection closes, after which a different path may bind.
+//
+// This registry mirrors that model. Unlike the previous single-slot design (which
+// refcount-collapsed every same-path Session onto ONE shared connection), it now
+// keeps each connection as a DISTINCT chdb_connection handle, so:
+//   - N connections to the same path coexist and run NON-PARAMETERIZED queries
+//     in parallel (each chdb-core client has its own per-instance
+//     ChdbClient::client_mutex, so distinct connections never serialize against
+//     each other);
+//   - a different data directory is still rejected while one is bound;
+//   - same-path Sessions no longer silently share one native connection (which
+//     was a latent clobber: two Sessions had separate JS param chains but one
+//     underlying connection).
+//
+// PARAMETERIZED queries are NOT parallelized today: the bundled libchdb does not
+// isolate parameter set/reset per connection under true parallelism (concurrent
+// param queries on different connections clobber each other, surfacing as
+// `456 Substitution not set` and can fatally abort the engine `236`). The JS
+// layer serializes ALL parameterized async queries through one process-wide
+// chain (see `globalParamChain` in index.js); non-parameterized queries are
+// unaffected and keep full parallelism.
+//
 // The path key is normalized to an absolute path by the JS layer (path.resolve)
-// so "./data" and the absolute form map to the same connection; symlink-level
-// canonicalization is a possible future refinement. The lazily-created default
-// in-memory connection serves standalone query()/queryBind() and yields
-// to a session when one opens (matching v2's release_default_conn behaviour).
+// so "./data" and the absolute form bind the same server. The lazily-created
+// default in-memory connection (key "") serves standalone query()/queryBind()
+// and yields to a session when one opens (matching v2 behaviour).
 //
 // The canonical handle passed around is the `chdb_connection*` returned by
 // chdb_connect (dereferenced for chdb_query, passed as-is to chdb_close_conn),
 // matching the External handle layout v2 exposed to JS.
-struct ActiveConn {
-  chdb_connection *conn = nullptr;  // chdb_connect() result, or nullptr
-  std::string key;                  // "" = default in-memory; otherwise the path
-  int refcount = 0;                 // open Session handles (default is transient)
-  bool isDefault = false;
+//
+// Thread-safety: registry mutations happen on the Node main thread (the N-API
+// wrappers below), so they are already serialized by the event loop; queries run
+// on libuv worker threads but only touch a connection handle, never this registry.
+// g_reg_mu is a defensive guard so the invariants hold even if a future caller
+// mutates the registry off the main thread.
+struct Registry {
+  std::string boundKey;                  // path the EmbeddedServer is bound to (valid while !conns.empty())
+  std::set<chdb_connection *> conns;     // every live connection (sessions + the default)
+  chdb_connection *defaultConn = nullptr; // the lazy in-memory default (key ""), if up
 };
-static ActiveConn g_active;
+static Registry g_reg;
+static std::mutex g_reg_mu;
 
 static chdb_connection *open_raw(const std::string &path) {
   char prog[] = "clickhouse";
@@ -62,31 +90,37 @@ static chdb_connection *open_raw(const std::string &path) {
   return (conn_ptr && *conn_ptr) ? conn_ptr : nullptr;
 }
 
-static void hard_close_active() {
-  if (g_active.conn) {
-    chdb_close_conn(g_active.conn);
+// Close every live connection. atexit backstop (the JS layer closes sessions on
+// 'exit' too); also used so a leaked connection never outlives the process.
+static void hard_close_all() {
+  std::lock_guard<std::mutex> lk(g_reg_mu);
+  for (chdb_connection *c : g_reg.conns) {
+    if (c) chdb_close_conn(c);
   }
-  g_active.conn = nullptr;
-  g_active.key.clear();
-  g_active.refcount = 0;
-  g_active.isDefault = false;
+  g_reg.conns.clear();
+  g_reg.defaultConn = nullptr;
+  g_reg.boundKey.clear();
 }
 
 static void ensure_atexit() {
   static bool done = false;
   if (!done) {
-    std::atexit(hard_close_active);
+    std::atexit(hard_close_all);
     done = true;
   }
 }
 
-// Default connection for standalone query()/queryBind() (lazy, in-memory).
+// Default connection for standalone query()/queryBind() (lazy, in-memory). A
+// single shared default per process; reused across standalone calls.
 static chdb_connection *get_default_conn(char **error_message) {
   ensure_atexit();
-  if (g_active.conn) {
-    if (g_active.isDefault) return g_active.conn;
+  std::lock_guard<std::mutex> lk(g_reg_mu);
+  if (g_reg.defaultConn) return g_reg.defaultConn;
+  // No default up. If a session holds a real data directory, "" cannot bind a
+  // second one (one EmbeddedServer path per process) — reject, as v2 did.
+  if (!g_reg.conns.empty()) {
     if (error_message && !*error_message)
-      *error_message = strdup((std::string("chdb: a session (path='") + g_active.key +
+      *error_message = strdup((std::string("chdb: a session (path='") + g_reg.boundKey +
                                "') is active; close it before using standalone query()").c_str());
     return nullptr;
   }
@@ -96,31 +130,35 @@ static chdb_connection *get_default_conn(char **error_message) {
       *error_message = strdup("Failed to acquire default connection");
     return nullptr;
   }
-  g_active.conn = c;
-  g_active.key = "";
-  g_active.refcount = 0;
-  g_active.isDefault = true;
+  g_reg.defaultConn = c;
+  g_reg.boundKey = "";
+  g_reg.conns.insert(c);
   return c;
 }
 
-// Session connection: same path reuses (refcount++); a live default yields; a
-// different active data directory is rejected (not silently switched).
+// Session connection: same bound path opens ANOTHER independent connection; a
+// live in-memory default yields; a different data directory is rejected.
 static chdb_connection *acquire_session_conn(const std::string &path, char **error_message) {
   ensure_atexit();
-  if (g_active.conn) {
-    if (!g_active.isDefault && g_active.key == path) {
-      g_active.refcount++;
-      return g_active.conn;
-    }
-    if (g_active.isDefault) {
-      hard_close_active();
-    } else {
+  std::lock_guard<std::mutex> lk(g_reg_mu);
+  if (!g_reg.conns.empty()) {
+    if (g_reg.boundKey.empty()) {
+      // Only the in-memory default is up (boundKey ""). It is transient and must
+      // yield so this session can bind a real data directory.
+      if (g_reg.defaultConn) {
+        chdb_close_conn(g_reg.defaultConn);
+        g_reg.conns.erase(g_reg.defaultConn);
+        g_reg.defaultConn = nullptr;
+      }
+      // conns is now empty; fall through to bind `path`.
+    } else if (g_reg.boundKey != path) {
       if (error_message && !*error_message)
         *error_message = strdup((std::string("chdb: only one active data directory per "
-                                 "process; close the current session (path='") + g_active.key +
+                                 "process; close the current session (path='") + g_reg.boundKey +
                                  "') before opening '" + path + "'").c_str());
       return nullptr;
     }
+    // else boundKey == path: an independent connection to the same server.
   }
   chdb_connection *c = open_raw(path);
   if (!c) {
@@ -128,18 +166,21 @@ static chdb_connection *acquire_session_conn(const std::string &path, char **err
       *error_message = strdup((std::string("Failed to create connection for path '") + path + "'").c_str());
     return nullptr;
   }
-  g_active.conn = c;
-  g_active.key = path;
-  g_active.refcount = 1;
-  g_active.isDefault = false;
+  g_reg.boundKey = path;
+  g_reg.conns.insert(c);
   return c;
 }
 
 static void release_session_conn(chdb_connection *conn) {
   if (!conn) return;
-  if (g_active.conn == conn && !g_active.isDefault) {
-    if (--g_active.refcount <= 0) hard_close_active();
-  }
+  std::lock_guard<std::mutex> lk(g_reg_mu);
+  auto it = g_reg.conns.find(conn);
+  if (it == g_reg.conns.end()) return; // already released / unknown handle
+  chdb_close_conn(conn);
+  g_reg.conns.erase(it);
+  if (conn == g_reg.defaultConn) g_reg.defaultConn = nullptr;
+  // Last connection out unbinds the EmbeddedServer so a different path may bind.
+  if (g_reg.conns.empty()) g_reg.boundKey.clear();
 }
 
 static char *exec_query(chdb_connection conn, const char *query,
@@ -860,10 +901,10 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("CloseConnection", Napi::Function::New(env, CloseConnectionWrapper));
   exports.Set("QueryWithConnection", Napi::Function::New(env, QueryWithConnectionWrapper));
 
-  // Most-reliable exit cleanup: close the active connection on env
-  // teardown, ahead of (and complementary to) the std::atexit backstop. Both
-  // call the idempotent hard_close_active, so running twice is harmless.
-  env.AddCleanupHook([] { hard_close_active(); });
+  // Most-reliable exit cleanup: close every live connection on env teardown,
+  // ahead of (and complementary to) the std::atexit backstop. Both call the
+  // idempotent hard_close_all, so running twice is harmless.
+  env.AddCleanupHook([] { hard_close_all(); });
 
   return exports;
 }

@@ -228,17 +228,44 @@ function withAbortTimeout(nativePromise, opts) {
   });
 }
 
-// Parameterized queries set+reset parameter state ON THE CONNECTION, so two
-// param queries overlapping on the same connection corrupt each other (wrong
-// values / "Substitution not set"). We therefore serialize the parameterized
-// async path PER CONNECTION via a promise chain (the default connection and
-// each Session get their own). Non-parameterized queries are unaffected and stay
-// concurrent. The chain advances on NATIVE completion (not on early abort/
-// timeout), so an aborted param query still fully drains before the next starts.
-const defaultParamChain = { tail: Promise.resolve() };
+// Parameterized queries set+reset parameter state around each call
+// (chdb-core's CApiQueryParameterGuard). With the bundled libchdb this set/reset
+// is NOT isolated per connection under real concurrency: two parameterized
+// queries running at the same time on DIFFERENT connections clobber each other
+// (wrong values / "Substitution not set", code 456) — and the resulting race can
+// fatally abort the in-process engine (code 236). (Thread-based bindings like
+// chdb-python rarely surface this because the GIL serializes the short
+// set/clear/execute window; node's libuv worker pool runs them with true
+// parallelism and reliably hits it under CI scheduling.) We therefore serialize
+// the parameterized async path through a SINGLE process-wide chain shared by the
+// default connection and every Session. Non-parameterized queries are never
+// chained and run in parallel (the multi-connection win). The chain advances on
+// NATIVE completion (not on early abort/timeout), so an aborted param query still
+// fully drains before the next starts.
+const globalParamChain = { tail: Promise.resolve() };
 
 function runExclusiveParam(chain, startNative, opts) {
-  const nativeP = chain.tail.then(() => startNative());
+  // Pre-check the caller's cancellation BEFORE the chain head fires startNative.
+  // Otherwise a query that was queued behind earlier param queries and whose
+  // caller already observed CHDB_ABORT/CHDB_TIMEOUT (settled early by
+  // withAbortTimeout) would still dispatch the native call when its turn came up,
+  // leaking unintended side effects (e.g. queued DDL/DML). The chain still
+  // advances on the guarded promise so the next queued query is not stalled.
+  const signal = opts && opts.signal;
+  const timeout = opts && opts.timeout;
+  const deadline = timeout ? Date.now() + timeout : 0;
+  const guardedStart = () => {
+    if (signal && signal.aborted) {
+      return Promise.reject(new ChdbAbortError(
+        'Query aborted before execution (queued behind earlier parameterized queries)'));
+    }
+    if (deadline && Date.now() >= deadline) {
+      return Promise.reject(new ChdbTimeoutError(
+        `Query timed out (${timeout}ms) before execution (queued behind earlier parameterized queries)`));
+    }
+    return startNative();
+  };
+  const nativeP = chain.tail.then(guardedStart);
   chain.tail = nativeP.then(() => {}, () => {});
   return withAbortTimeout(nativeP, opts);
 }
@@ -384,7 +411,7 @@ function queryBindAsync(query, params = {}, opts = {}) {
   const { sql, format } = prepArrow(query, opts, "CSV");
   let bound;
   try { bound = formatParams(params); } catch (e) { return Promise.reject(e); }
-  return runExclusiveParam(defaultParamChain, () => chdbNode.QueryAsync(sql, format, bound), opts);
+  return runExclusiveParam(globalParamChain, () => chdbNode.QueryAsync(sql, format, bound), opts);
 }
 
 // v3 insert (default connection). Dispatches on the shape of `values`:
@@ -405,13 +432,14 @@ const openSessions = new Set();
 // Track in-flight native operations (async query/insert) that were settled
 // EARLY by abort/timeout. There is no interrupt in the C ABI, so the native
 // computation keeps running on the libuv thread after the JS promise has
-// already rejected. libchdb permits only ONE active operation per process, so
-// an orphaned background op from one test races the next test's first query and
-// crashes the in-process engine ("server is shutting down due to a fatal
-// error", ABORTED), cascading into every later test (this is why x64 CI runners
-// went all-red while the timing on arm runners usually won the race). Each
-// tracked promise settles on NATIVE completion and never rejects — the caller
-// already received the mapped early-settle error; here we only need the timing.
+// already rejected. An orphaned background op that is still running when its
+// connection is closed is a use-after-free on that connection, and a connection
+// torn down mid-op can abort the shared in-process engine ("server is shutting
+// down due to a fatal error", ABORTED), cascading into later work. We therefore
+// drain pending ops before closing a connection (close() below) and in test
+// teardown. Each tracked promise settles on NATIVE completion and never rejects
+// — the caller already received the mapped early-settle error; here we only need
+// the timing.
 const pendingNativeOps = new Set();
 function trackNative(nativePromise) {
   const done = nativePromise.then(() => {}, () => {});
@@ -429,11 +457,12 @@ function _drainPendingOps() {
 }
 
 // Force-close every session still open in this process. Internal helper for
-// test teardown: libchdb allows one active data directory per process, so a
-// single test that creates a Session and never closes it (e.g. it threw before
-// its own close) blocks every later `new Session()` with a different path. A
-// global afterEach calling this guarantees no session leaks across test
-// boundaries, instead of relying on every test to clean up perfectly.
+// test teardown: chdb-core binds one data directory per process, so a single
+// test that creates a Session and never closes it (e.g. it threw before its own
+// close) blocks every later `new Session()` with a DIFFERENT path (same-path
+// sessions would coexist). A global afterEach calling this guarantees no session
+// leaks across test boundaries, instead of relying on every test to clean up
+// perfectly.
 function _closeAllSessions() {
   for (const s of [...openSessions]) {
     try { s.close(); } catch (_) { /* best effort */ }
@@ -456,7 +485,6 @@ const SESSION_SIGNALS = ['SIGINT', 'SIGTERM'];
 
 class Session {
   #closed = false;
-  #paramChain = { tail: Promise.resolve() }; // per-connection serialization for parameterized queries
   #signalHandler = null; // opt-in signal handler, deregistered on close()
 
   constructor(path = "", opts = {}) {
@@ -469,10 +497,14 @@ class Session {
       this.isTemp = false;
     }
 
-    // Create a connection for this session (the native registry enforces a
-    // single active connection per process). The registry key is normalized to
-    // an absolute path so e.g. "./data" and its absolute form map to the same
-    // connection; this.path is left as the caller passed it (public surface).
+    // Create a connection for this session. Each Session owns its OWN native
+    // connection: the native registry allows N independent connections to the
+    // same bound path (they share the one process-wide EmbeddedServer and its
+    // data, but each carries its own query/parameter state, so same-path
+    // sessions run in parallel without clobbering). A *different* data directory
+    // while one is live is still rejected. The registry key is normalized to an
+    // absolute path so e.g. "./data" and its absolute form bind the same server;
+    // this.path is left as the caller passed it (public surface).
     try {
       const key = this.path ? resolvePath(this.path) : this.path;
       this.connection = chdbNode.CreateConnection(key);
@@ -538,7 +570,7 @@ class Session {
     const { sql, format } = prepArrow(query, opts, "CSV");
     let bound;
     try { bound = formatParams(params); } catch (e) { return Promise.reject(e); }
-    return runExclusiveParam(this.#paramChain, () => chdbNode.QueryAsyncConnection(this.connection, sql, format, bound), opts);
+    return runExclusiveParam(globalParamChain, () => chdbNode.QueryAsyncConnection(this.connection, sql, format, bound), opts);
   }
 
   // v3 insert. Same dispatch as the standalone insert(): row arrays -> inline
@@ -554,7 +586,8 @@ class Session {
 
   // v3 streaming. opts: { format?='JSONEachRow', signal? }. Returns a
   // ChdbQueryStream (AsyncIterable). Only one stream may be active per session
-  // at a time (single active connection).
+  // at a time (one streaming cursor per connection); other sessions stream in
+  // parallel on their own connections.
   queryStream(sql, opts = {}) {
     if (!this.connection) throw new ChdbClosedError("No active connection available");
     if (!sql) throw new ChdbStreamError("queryStream requires a non-empty query");
@@ -655,7 +688,8 @@ class Session {
 }
 
 // Diagnostic version info. libchdb is probed via SELECT version();
-// falls back to 'unknown' if a session is holding the single active connection.
+// falls back to 'unknown' if a session is holding a different data directory
+// than the standalone default would bind.
 function version() {
   let libchdb = 'unknown';
   try {
