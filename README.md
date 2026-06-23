@@ -76,11 +76,41 @@ Errors are typed (`ChdbSyntaxError`, `ChdbQueryError`, `ChdbConnectionError`,
 | AbortSignal / timeout | ✅ (single-shot is honest: rejects early; native runs to completion) |
 | Arrow **scan** (`registerArrowTable`, Arrow input) | ⏳ follow-up |
 | Arrow zero-copy (M2, `{ zeroCopy: true }`) | ⏳ follow-up |
+| Pluggable Connection (`chdb/connection`) | ✅ |
+
+### Pluggable Connection (`chdb/connection`)
+
+For users coming from `@clickhouse/client`, chdb-node also ships a pluggable
+**Connection** implementation under the `chdb/connection` subpath — the
+public surface that will plug into `@clickhouse/client`'s `createClient`
+once its `connection` injection point lands (see
+[clickhouse-js#865](https://github.com/ClickHouse/clickhouse-js/issues/865)).
+
+```ts
+import { createChdbConnection } from 'chdb/connection'
+
+const conn = createChdbConnection({ path: ':memory:' })
+const r = await conn.query({ query: 'SELECT * FROM numbers(5)', format: 'JSONEachRow' })
+let body = ''
+for await (const chunk of r.stream) body += Buffer.from(chunk).toString('utf8')
+console.log(JSON.parse(`[${body.trim().split('\n').join(',')}]`))
+await conn.close()
+
+// chDB-specific escape hatches (raw ChdbResult, raw insert, session info)
+conn.chdb.queryAsync('SELECT 1', { format: 'arrow' })  // bytes/text/json/toArrow
+conn.chdb.session.path                                 // bound on-disk path
+```
+
+See [docs/design/pluggable-connection.md](docs/design/pluggable-connection.md)
+for the full design, the `Connection` interface, the `.chdb` extension
+namespace, the `test_profile.json` skip manifest, and the migration path
+from the previous byte-compat `createClient` façade.
 
 ### Design docs
 
 - [Layered API design](docs/design/architecture.md): the Layer 1 / Layer 2 / Layer 3 architecture, package shape, and intended user-facing surfaces.
 - [Layer 1 native binding reviewer guide](docs/design/layer1-native-binding.md): the PR #43 design and implementation map, organized by commit and review feedback.
+- [Pluggable Connection](docs/design/pluggable-connection.md): the `chdb/connection` surface, the cross-backend `Connection` interface, the `.chdb` extension namespace, and the integration roadmap with `@clickhouse/client`.
 
 ### Runtimes
 
