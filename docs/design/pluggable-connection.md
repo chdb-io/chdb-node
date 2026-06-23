@@ -1,14 +1,26 @@
-# Pluggable Connection — design
+# chDB ↔ `@clickhouse/client` integration (experimental)
 
 > **Status**: implemented in this branch (`feat/layer2-pluggable-backend`).
-> Upstream tracking issue: [ClickHouse/clickhouse-js#865](https://github.com/ClickHouse/clickhouse-js/issues/865).
-> Parallel Python proposal: [ClickHouse/clickhouse-connect#809](https://github.com/ClickHouse/clickhouse-connect/issues/809).
+> Upstream tracking issue:
+> [ClickHouse/clickhouse-js#865](https://github.com/ClickHouse/clickhouse-js/issues/865).
+> Upstream injection point:
+> [ClickHouse/clickhouse-js#879](https://github.com/ClickHouse/clickhouse-js/pull/879)
+> (merged 2026-06-23 as `c2e28b9`); upstream framing:
+> [ClickHouse/clickhouse-js#880](https://github.com/ClickHouse/clickhouse-js/pull/880)
+> (merged 2026-06-23 as `274844f`).
+> Parallel Python proposal:
+> [ClickHouse/clickhouse-connect#809](https://github.com/ClickHouse/clickhouse-connect/issues/809).
+>
+> Upstream treats `createClient({ connection })` as a **deliberately
+> narrow, internal experiment to unblock the chDB integration** — not
+> the start of a public plugin system. The hook's shape may change.
+> This document describes the chdb-side implementation that uses it
+> today; it does NOT promise a stable third-party plugin contract.
 
 ## What this delivers
 
-A public `chdb/connection` subpath export that lets users plug
-in-process chDB into `@clickhouse/client` with a one-line change at
-construction:
+A `chdb/connection` subpath export that lets users plug in-process
+chDB into `@clickhouse/client` with a one-line change at construction:
 
 ```ts
 import { createClient }         from "@clickhouse/client";
@@ -23,18 +35,16 @@ All downstream code (`client.query` / `client.insert` / `client.exec` /
 `client.command` / `client.ping` / `client.close`) runs unchanged
 against the in-process backend.
 
-## Design principle: chdb-owned, upstream-clean
-
-The pluggable design is asymmetric **by construction**:
+## Ownership split
 
 ```
 ┌──────────────────────────────────────┐        ┌──────────────────────────────────────┐
 │  @clickhouse/client (upstream)        │        │   chdb-node (this repo)              │
 │                                       │        │                                      │
 │  • Connection<Stream> interface       │        │  • ChdbConnection implements          │
-│    (already public, unchanged)        │        │    Connection<Readable> verbatim     │
+│    (internal, experimental)           │        │    Connection<Readable> verbatim     │
 │  • createClient({ connection })       │   ◄──  │  • chdb/connection subpath export     │
-│    one new public option              │        │  • tests/clickhouse-js/skip_list.json │
+│    one experimental option            │        │  • tests/clickhouse-js/skip_list.json │
 │                                       │        │    (chdb-owned blacklist)             │
 │  ❌ zero chdb code                    │        │  • tests/clickhouse-js/runner.mjs     │
 │  ❌ zero chdb tests                   │        │    clones upstream, injects chdb,     │
@@ -43,11 +53,10 @@ The pluggable design is asymmetric **by construction**:
 ```
 
 The only upstream change is the `createClient({ connection })`
-injection point (≈3 lines wrapping `NodeConfigImpl`). Everything else
-— the chdb-side adapter, the test sync policy, the skip list of
-unsupported tests, the CI matrix that exercises both — lives in
-chdb-node. **Adding a future backend repeats this pattern in that
-backend's own repo, with no PR to `@clickhouse/client` needed.**
+injection point (≈3 lines wrapping `NodeConfigImpl`). All chdb-side
+logic (the adapter, the parity sync policy, the skip list, the CI
+matrix) lives in chdb-node so the upstream codebase stays
+backend-agnostic.
 
 ## Public surface (this repo)
 
@@ -114,10 +123,10 @@ runner. Everything lives here.
 `tests/clickhouse-js/skip_list.json#syncedAgainst.ref` records the
 `@clickhouse/client` ref this skip list is calibrated against:
 
-| `@clickhouse/client` PR state | Runner targets |
+| `@clickhouse/client` state | Runner targets |
 |---|---|
-| `createClient({ connection })` open on personal fork | `ShawnChen-Sirius/clickhouse-js feat/pluggable-connection` |
-| PR merged to upstream | `ClickHouse/clickhouse-js main` |
+| `createClient({ connection })` PR open on personal fork | `ShawnChen-Sirius/clickhouse-js feat/pluggable-connection` |
+| **PR merged to upstream (current state — #879)** | **`ClickHouse/clickhouse-js main`** |
 | Released | the latest released tag |
 
 ### When chdb-node re-runs parity
@@ -140,9 +149,8 @@ release boundaries.
 
 ### Initial categories on the skip list
 
-The first `skip_list.json` (calibrated against
-`ShawnChen-Sirius/feat/pluggable-connection`) carries 23 files
-grouped as:
+The first `skip_list.json` (calibrated against `ClickHouse/clickhouse-js main`
+post-#879) carries 25 file-level skips grouped as:
 
 - **HTTP transport** — no socket, no keep-alive, no agents, no
   HTTP-level compression / headers / `/ping`.

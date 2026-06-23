@@ -13,15 +13,16 @@
  *
  *   stage of the upstream injection PR     →  ref this runner uses
  *   ----------------------------------------+-----------------------
- *   open on the personal fork (today)       →  ShawnChen-Sirius/clickhouse-js
+ *   open on the personal fork               →  ShawnChen-Sirius/clickhouse-js
  *                                              feat/pluggable-connection
  *   merged to ClickHouse/clickhouse-js     →  ClickHouse/clickhouse-js main
+ *   (current state — #879 is merged)
  *   released                                →  the latest released tag
  *
  * Override at runtime:
  *
  *   CHDB_CLICKHOUSE_JS_REPO=https://github.com/.../clickhouse-js.git
- *   CHDB_CLICKHOUSE_JS_REF=feat/pluggable-connection
+ *   CHDB_CLICKHOUSE_JS_REF=main
  *
  * Usage:
  *

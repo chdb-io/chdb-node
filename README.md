@@ -76,14 +76,24 @@ Errors are typed (`ChdbSyntaxError`, `ChdbQueryError`, `ChdbConnectionError`,
 | AbortSignal / timeout | ✅ (single-shot is honest: rejects early; native runs to completion) |
 | Arrow **scan** (`registerArrowTable`, Arrow input) | ⏳ follow-up |
 | Arrow zero-copy (M2, `{ zeroCopy: true }`) | ⏳ follow-up |
-| Pluggable Connection (`chdb/connection`) | ✅ |
+| chDB ↔ `@clickhouse/client` integration (`chdb/connection`, **experimental**) | ✅ |
 
-### Pluggable Connection (`chdb/connection`)
+### chDB ↔ `@clickhouse/client` integration (`chdb/connection`, experimental)
 
-For users coming from `@clickhouse/client`, chdb-node also ships a pluggable
-**Connection** implementation under the `chdb/connection` subpath — the
-public surface that will plug into `@clickhouse/client`'s `createClient`
-once its `connection` injection point lands (see
+> **Status**: this integration uses the experimental
+> `createClient({ connection })` hook in `@clickhouse/client`
+> ([clickhouse-js#879](https://github.com/ClickHouse/clickhouse-js/pull/879)
+> merged; framing follow-up
+> [#880](https://github.com/ClickHouse/clickhouse-js/pull/880) merged).
+> Upstream considers this a deliberately narrow chDB-only hook — not a
+> public plugin system — and the shape may change. We'll keep
+> `chdb/connection` working against whatever the upstream hook evolves
+> into.
+
+For users coming from `@clickhouse/client`, chdb-node ships a
+**Connection** implementation under the `chdb/connection` subpath that
+plugs into `@clickhouse/client`'s `createClient({ connection })`
+injection point (tracking issue:
 [clickhouse-js#865](https://github.com/ClickHouse/clickhouse-js/issues/865)).
 
 ```ts
@@ -110,7 +120,7 @@ and the sync policy with `@clickhouse/client`.
 
 - [Layered API design](docs/design/architecture.md): the Layer 1 / Layer 2 / Layer 3 architecture, package shape, and intended user-facing surfaces.
 - [Layer 1 native binding reviewer guide](docs/design/layer1-native-binding.md): the PR #43 design and implementation map, organized by commit and review feedback.
-- [Pluggable Connection](docs/design/pluggable-connection.md): the `chdb/connection` surface, the cross-backend `Connection` interface, the `.chdb` extension namespace, and the integration roadmap with `@clickhouse/client`.
+- [chDB ↔ `@clickhouse/client` integration (experimental)](docs/design/pluggable-connection.md): the `chdb/connection` surface, the `Connection` interface chdb-node implements, the `.chdb` extension namespace, and the parity-test sync policy.
 
 ### Runtimes
 

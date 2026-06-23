@@ -22,7 +22,7 @@ version chdb-node currently asserts parity against. The policy:
 | `@clickhouse/client` state | Runner targets |
 |---|---|
 | `createClient({ connection })` PR open on the personal fork | `ShawnChen-Sirius/clickhouse-js feat/pluggable-connection` |
-| PR merged to upstream | `ClickHouse/clickhouse-js main` |
+| **PR merged to upstream (current state — [#879](https://github.com/ClickHouse/clickhouse-js/pull/879))** | **`ClickHouse/clickhouse-js main`** |
 | Released | the latest released tag (e.g. `v1.24.0`) |
 
 **chdb-node only re-runs parity (and updates `skip_list.json`) when
@@ -64,8 +64,8 @@ passes, remove the entry from `skipFiles`.
 ## Categories already in the skip list
 
 The initial `skip_list.json` was populated from a representative run
-against `feat/pluggable-connection` on the personal fork. The
-categories are:
+against `ClickHouse/clickhouse-js main` (post-[#879](https://github.com/ClickHouse/clickhouse-js/pull/879)).
+The categories are:
 
 - **HTTP transport** (no socket, no headers, no compression, no
   keep-alive, no agents): `node_socket_handling`, `node_keep_alive*`,

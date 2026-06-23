@@ -1,10 +1,10 @@
 {
   "$schema_comment": "chdb-node skip list for @clickhouse/client's integration suite. AUTHORITATIVE blacklist applied by tests/clickhouse-js/runner.mjs when running @clickhouse/client's tests with ChdbConnection injected. Format: skipFiles is per-file (entire suite of tests in the file is excluded — for files where chdb does not implement the capability the file exercises); skipTests is per-case for cases inside an otherwise-runnable file (the runner patches the file in place to convert it(...) → it.skip(...) before vitest collects, and restores after). reasons documents WHY each entry is here. Maintained per @clickhouse/client release; chdb-node refreshes the list when upstream cuts a new version.",
   "syncedAgainst": {
-    "ref": "ShawnChen-Sirius/clickhouse-js feat/pluggable-connection",
-    "policy": "While the createClient({ connection }) injection PR is open: ShawnChen-Sirius fork branch. After merge: ClickHouse/clickhouse-js main. After next release: latest released tag.",
-    "lastSyncedSha": "be9045d",
-    "lastSyncedAt": "2026-06-23"
+    "ref": "ClickHouse/clickhouse-js main",
+    "policy": "While the createClient({ connection }) injection PR is open: ShawnChen-Sirius fork branch. After merge: ClickHouse/clickhouse-js main (CURRENT — PR #879 was merged 2026-06-23 as commit c2e28b9; PR #880 follow-up was merged 2026-06-23 as commit 274844f). After next release: latest released tag.",
+    "lastSyncedSha": "274844f",
+    "lastSyncedAt": "2026-06-24"
   },
   "skipFiles": [
     {
