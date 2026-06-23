@@ -10,6 +10,11 @@
       "import": "./index.mjs",
       "require": "./index.js"
     },
+    "./connection": {
+      "types": "./dist/connection/index.d.ts",
+      "require": "./dist/connection/index.js",
+      "default": "./dist/connection/index.js"
+    },
     "./package.json": "./package.json"
   },
   "repository": {
@@ -46,6 +51,7 @@
     "example.js"
   ],
   "devDependencies": {
+    "@clickhouse/client-common": "^1.22.0",
     "@types/node": "^20.14.0",
     "apache-arrow": "^21.1.0",
     "chai": "^4.5.0",
