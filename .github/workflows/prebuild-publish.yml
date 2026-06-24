@@ -32,9 +32,9 @@ jobs:
         with:
           node-version: 22.x
           registry-url: "https://registry.npmjs.org"
-      - name: Install patchelf (linux rpath)
+      - name: Install patchelf + binutils (linux rpath fixup + relocatability assert)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y patchelf
+        run: sudo apt-get update && sudo apt-get install -y patchelf binutils
       - run: npm install --ignore-scripts
       - run: npm run libchdb
       - run: npm run build
