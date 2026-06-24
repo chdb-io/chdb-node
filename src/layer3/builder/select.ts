@@ -35,6 +35,11 @@ function combine(existing: Expr | undefined, next: Expr, kind: 'And' | 'Or'): Ex
 type ColumnInput = ExprInput
 
 export class SelectQueryBuilder<O = Record<string, unknown>> {
+  // A phantom type marker so callers can recover the row type with
+  // `RowOf<typeof q>` — TypeScript's ReturnType picks .execute's last overload
+  // (the non-JSON fallback returning `unknown`), which loses the typed row.
+  declare readonly _row: O
+
   constructor(
     private readonly ctx: ExecContext,
     private readonly node: SelectQueryNode,

@@ -20,6 +20,7 @@ import { DeleteQueryBuilder } from './builder/delete'
 import { Connection } from './connect/connect'
 import type { ConnectConfig } from './connect/url-scheme'
 import type { ExecContext } from './execute/terminal'
+import type { AnyDatabase, InferRow } from './types/infer'
 
 /** Anything accepted as a SELECT source: a table name, an expression, or a subquery builder. */
 export type FromInput = ExprInput | SelectQueryBuilder<any>
@@ -31,14 +32,21 @@ function toFrom(source: FromInput): Expr {
   return toExpr(source)
 }
 
-/** A builder root bound to a specific execution context (connection / session). */
-export class Database<DB = Record<string, any>> {
+/**
+ * A builder root bound to an execution context (connection / session). When the
+ * `DB` type argument lists tables and column types (see `gen-types`), passing a
+ * known table name to `selectFrom` infers the row shape at `.execute()`.
+ */
+export class Database<DB = AnyDatabase> {
   constructor(private readonly ctx: ExecContext) {}
 
-  /** Start a SELECT from a table, expression, table function, or subquery. */
-  selectFrom<O = Record<string, unknown>>(source: FromInput): SelectQueryBuilder<O> {
+  /** Typed: `selectFrom('events')` infers the row from `DB['events']`. */
+  selectFrom<T extends Extract<keyof DB, string>>(table: T): SelectQueryBuilder<InferRow<DB[T]>>
+  /** Untyped: any expression / subquery; the row is `Record<string, unknown>` unless `O` is set. */
+  selectFrom<O = Record<string, unknown>>(source: FromInput): SelectQueryBuilder<O>
+  selectFrom(source: FromInput): SelectQueryBuilder<any> {
     const node: SelectQueryNode = { kind: 'SelectQuery', from: toFrom(source) }
-    return new SelectQueryBuilder<O>(this.ctx, node)
+    return new SelectQueryBuilder(this.ctx, node)
   }
 
   /** Start an INSERT into a table (row arrays or `INSERT … SELECT`). */
@@ -100,7 +108,7 @@ export function connect(config: ConnectConfig): Connection {
 }
 
 /** Create a typed builder root. Pass `{ session }` to pin the connection. */
-export function database<DB = Record<string, any>>(opts?: { session?: RuntimeSession }): Database<DB> {
+export function database<DB = AnyDatabase>(opts?: { session?: RuntimeSession }): Database<DB> {
   return new Database<DB>({ session: opts?.session })
 }
 
@@ -109,7 +117,7 @@ export function database<DB = Record<string, any>>(opts?: { session?: RuntimeSes
  * session — call `.close()` to release it (and remove the temp dir for an
  * unnamed session).
  */
-export function session<DB = Record<string, any>>(path?: string): Database<DB> {
+export function session<DB = AnyDatabase>(path?: string): Database<DB> {
   const s = new (runtime().Session)(path) as unknown as RuntimeSession
   return new Database<DB>({ session: s })
 }
