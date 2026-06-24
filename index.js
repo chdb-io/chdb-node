@@ -729,3 +729,13 @@ function version() {
 }
 
 module.exports = { query, queryBind, queryAsync, queryBindAsync, insert, Session, version, _closeAllSessions, _drainPendingOps };
+
+// Layer 3: the fluent, immutable query builder. It sits on Layer 1, a sibling of
+// the pluggable Connection surface (`chdb/connection`). Required at the BOTTOM,
+// after module.exports is populated, so the lazy Layer 1 accessor in dist/layer3
+// sees a fully-formed export object. ChdbCompileError (the only net-new error)
+// rides along via dist/layer3's own re-export.
+const layer3 = require('./dist/layer3/index.js');
+for (const name of Object.keys(layer3)) {
+  if (module.exports[name] === undefined) module.exports[name] = layer3[name];
+}

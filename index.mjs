@@ -16,4 +16,10 @@ export const insert = mod.insert
 export const Session = mod.Session
 export const version = mod.version
 
+// Layer 3: ChdbCompileError is the only net-new error class; export it as a
+// named ESM binding so it is catchable by class. The fluent builder surface
+// (selectFrom / database / insertInto / connect / chFn / chTable / sql / eb) is
+// reached through the default export (`import chdb from 'chdb'`).
+export const ChdbCompileError = mod.ChdbCompileError
+
 export default mod

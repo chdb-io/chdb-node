@@ -77,6 +77,17 @@ export class ChdbBindError extends ChdbError {
   readonly code = 'CHDB_BIND'
 }
 
+/**
+ * The fluent query builder could not turn a chain into SQL — e.g. a SELECT with
+ * no source, an unsupported expression, or an empty IN list. This is the only
+ * net-new error the builder layer introduces: it is raised while building SQL,
+ * before any query runs, so it never carries a ClickHouse code. Runtime failures
+ * (syntax, connection, timeout, …) still surface as the existing classes above.
+ */
+export class ChdbCompileError extends ChdbError {
+  readonly code = 'CHDB_COMPILE'
+}
+
 /** Progress snapshot carried by streaming-insert callbacks and errors (payload-side ledger). */
 export interface InsertProgress {
   /** Rows flushed to the engine so far (non-empty payload lines; exact for line-delimited formats). */
