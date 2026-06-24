@@ -65,7 +65,11 @@ function runInsert(nativeAsyncCall, params) {
   if (built.rowsWritten === 0) {
     return Promise.resolve({ rowsWritten: 0, bytesRead: 0, elapsed: 0 });
   }
-  return nativeAsyncCall(built.sql).then(
+  // Track so Session.close() defers connection teardown until this write
+  // drains (see withAbortTimeout) — releasing mid-flight aborts the engine.
+  const np = nativeAsyncCall(built.sql);
+  trackNative(np);
+  return np.then(
     (raw) => ({ rowsWritten: built.rowsWritten, bytesRead: raw.bytesRead, elapsed: raw.elapsed }),
     (e) => { throw asInsertError(e); },
   );
@@ -87,8 +91,10 @@ function wrapRawNative(nativePromise, opts, mapOk) {
   const signal = opts && opts.signal;
   const timeout = opts && opts.timeout;
   const base = nativePromise.then(mapOk, (e) => { throw asInsertError(e); });
+  // Track every raw insert (see withAbortTimeout): a connection must never be
+  // released while its native write is still running on the libuv worker.
+  trackNative(nativePromise);
   if (!signal && !timeout) return base;
-  trackNative(nativePromise); // abort/timeout settles JS early; native runs on after
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer = null;
@@ -197,10 +203,19 @@ function emptyResult() {
 function withAbortTimeout(nativePromise, opts) {
   const signal = opts && opts.signal;
   const timeout = opts && opts.timeout;
+  // Track EVERY async query, not just the abort/timeout ones. The native op
+  // runs on a libuv worker; if a connection is released (CloseConnection)
+  // while its query is still executing on that worker, the in-process engine
+  // is torn down mid-op — which aborts the engine (code 236) and, on some
+  // platforms, leaves the worker blocked inside chdb_query so its promise
+  // NEVER settles (the caller's `await` hangs until the test timeout). Plain
+  // queryAsync (no signal/timeout) used to skip tracking, so close() saw an
+  // empty pendingNativeOps and tore the connection down mid-flight. Tracking
+  // here makes Session.close() defer teardown until the op drains.
+  trackNative(nativePromise);
   if (!signal && !timeout) {
     return nativePromise.then((raw) => new ChdbResult(raw), (e) => { throw asQueryError(e); });
   }
-  trackNative(nativePromise); // abort/timeout settles JS early; native runs on after
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer = null;
@@ -429,17 +444,22 @@ function insert(opts) {
 // complements the native env cleanup hook + std::atexit backstop.
 const openSessions = new Set();
 
-// Track in-flight native operations (async query/insert) that were settled
-// EARLY by abort/timeout. There is no interrupt in the C ABI, so the native
-// computation keeps running on the libuv thread after the JS promise has
-// already rejected. An orphaned background op that is still running when its
-// connection is closed is a use-after-free on that connection, and a connection
-// torn down mid-op can abort the shared in-process engine ("server is shutting
-// down due to a fatal error", ABORTED), cascading into later work. We therefore
-// drain pending ops before closing a connection (close() below) and in test
-// teardown. Each tracked promise settles on NATIVE completion and never rejects
-// — the caller already received the mapped early-settle error; here we only need
-// the timing.
+// Track EVERY in-flight native async operation (async query/insert), keyed on
+// NATIVE completion. There is no interrupt in the C ABI, so the native
+// computation runs on the libuv thread to completion regardless of when the JS
+// promise settles — whether early (an abort/timeout reject) or normally. A
+// connection torn down while one of its ops is still running is a use-after-free
+// on that connection: it aborts the shared in-process engine ("server is
+// shutting down due to a fatal error", ABORTED), cascading into later work, and
+// on some platforms leaves the worker blocked so its promise never settles (the
+// caller's await hangs). We therefore drain pending ops before closing a
+// connection (close() below) and in test teardown. Each tracked promise settles
+// on NATIVE completion and never rejects — for early-settled ops the caller
+// already received the mapped error; here we only need the timing.
+//
+// NB: plain queryAsync/insert (no signal/timeout) MUST be tracked too, not just
+// the abort/timeout ones — close() landing mid-flight on an untracked op was the
+// macos-14/Node-20 120s hang (chdb-io/chdb-node#53).
 const pendingNativeOps = new Set();
 function trackNative(nativePromise) {
   const done = nativePromise.then(() => {}, () => {});

@@ -10,3 +10,6 @@ chdb.h
 chdb.hpp
 
 *-tmp/
+
+# clickhouse-js parity runner checkout (tests/clickhouse-js/runner.mjs)
+.chdb-runner/

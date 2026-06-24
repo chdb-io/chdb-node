@@ -302,12 +302,26 @@ function readableFromBuffer(buf: Buffer | Uint8Array): Readable {
   const b = Buffer.isBuffer(buf)
     ? buf
     : Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
-  return new Readable({
+  const r = new Readable({
     read() {
       this.push(b);
       this.push(null);
     },
   });
+  // clickhouse-js's `ResultSet.close()` tears the result down by calling
+  // `this._stream.destroy(new Error("ResultSet has been closed"))`. When the
+  // ResultSet was never consumed (e.g. a non-streamable-format query whose
+  // `stream()` threw, closed in a `finally`), nothing has attached an
+  // `'error'` listener to this Readable, so Node escalates that synthetic
+  // teardown error into an `uncaughtException` — failing the whole parity run
+  // even though every assertion passed. This in-memory buffer has no genuine
+  // async error source of its own (`read()` only ever pushes), so the only
+  // `'error'` it can receive is exactly that external teardown signal. A
+  // benign listener absorbs it, making close idempotent/no-op as the upstream
+  // contract expects. Real consumers (`Stream.pipeline` in `ResultSet.stream`)
+  // attach their OWN error handler, which still fires for genuine propagation.
+  r.on("error", () => {});
+  return r;
 }
 
 async function streamToString(
