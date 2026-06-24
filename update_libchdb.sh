@@ -15,6 +15,17 @@ set -e
 # accessors the raw/streaming insert needs; absent in the v26.5.0 stable line).
 LATEST_RELEASE=v26.5.1-rc.1
 
+# Version published for the @chdb/lib-<platform> native subpackages on npm.
+# DECOUPLED from LATEST_RELEASE on purpose: chdb-core has no 26.5.2 release, but
+# the previously published subpackage versions (26.5.0, 26.5.1-rc.1) shipped a
+# non-relocatable Linux binary (chdb-io/chdb-node#50). npm forbids republishing
+# over an existing version, so the relocatability fix needs a NEW version — a
+# formal packaging revision — while the bundled libchdb stays LATEST_RELEASE
+# above (the only build carrying the #73/#15 C-ABI the binding requires). The
+# publish + cleanroom workflows read CHDB_LIB_VERSION from here, and the main
+# package's optionalDependencies pin this exact value.
+LIBCHDB_NPM_VERSION=26.5.2
+
 # Download the correct version based on the platform
 case "$(uname -s)" in
     Linux)

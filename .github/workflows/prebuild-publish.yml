@@ -39,10 +39,11 @@ jobs:
       - run: npm run libchdb
       - run: npm run build
       - run: npm run test:all
-      - name: Derive libchdb version from update_libchdb.sh
+      - name: Derive subpackage version from update_libchdb.sh
         run: |
-          REL=$(grep -E '^LATEST_RELEASE=' update_libchdb.sh | cut -d= -f2)
-          echo "CHDB_LIB_VERSION=${REL#v}" >> "$GITHUB_ENV"
+          # The published @chdb/lib-* version is decoupled from the libchdb
+          # download (LATEST_RELEASE); see LIBCHDB_NPM_VERSION in update_libchdb.sh.
+          echo "CHDB_LIB_VERSION=$(grep -E '^LIBCHDB_NPM_VERSION=' update_libchdb.sh | cut -d= -f2)" >> "$GITHUB_ENV"
       - name: Build subpackage
         run: npm run build:platform
       - name: Publish subpackage (idempotent — skip or tolerate already-published)

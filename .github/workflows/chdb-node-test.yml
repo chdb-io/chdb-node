@@ -93,8 +93,7 @@ jobs:
           # subpackage from the registry — the cleanroom then tests the released
           # binary instead of the one just built, which is how a non-relocatable
           # binary (chdb-io/chdb-node#50) shipped past a green cleanroom.
-          REL=$(grep -E '^LATEST_RELEASE=' update_libchdb.sh | cut -d= -f2)
-          export CHDB_LIB_VERSION="${REL#v}"
+          export CHDB_LIB_VERSION="$(grep -E '^LIBCHDB_NPM_VERSION=' update_libchdb.sh | cut -d= -f2)"
           npm run build:platform
           MAIN_TGZ="$PWD/$(npm pack --silent)"
           SUB_DIR="$PWD/npm/@chdb/lib-linux-x64-gnu"
