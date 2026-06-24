@@ -21,6 +21,7 @@ import { Connection } from './connect/connect'
 import type { ConnectConfig } from './connect/url-scheme'
 import type { ExecContext } from './execute/terminal'
 import type { AnyDatabase, InferRow } from './types/infer'
+import { ChdbIntrospector, type DatabaseIntrospector } from './introspection'
 
 /** Anything accepted as a SELECT source: a table name, an expression, or a subquery builder. */
 export type FromInput = ExprInput | SelectQueryBuilder<any>
@@ -67,6 +68,16 @@ export class Database<DB = AnyDatabase> {
   /** Open a federated connection to an external data source (read through chDB). */
   connect(config: ConnectConfig): Connection {
     return new Connection(this.ctx, config)
+  }
+
+  /**
+   * Kysely-style introspection of the local engine (`getTables` / `getSchemas`
+   * / `getMetadata`), reading `system.*` on the bound Session or the default
+   * connection. Anchors `new Kysely<DB>().introspection`. For external sources
+   * use `connect(...)` (its `databases()` / `tables()` / `describe()`).
+   */
+  get introspection(): DatabaseIntrospector {
+    return new ChdbIntrospector(this.ctx.session)
   }
 
   /** The bound Session, if this root was created with one. */

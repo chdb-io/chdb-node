@@ -30,6 +30,17 @@ export { Connection } from './connect/connect'
 export type { ColumnInfo } from './connect/connect'
 export type { ConnectConfig, SourceKind, SourcePlan } from './connect/url-scheme'
 
+// Kysely-style local-engine introspection (`db.introspection`).
+export { ChdbIntrospector } from './introspection'
+export type {
+  DatabaseIntrospector,
+  DatabaseMetadata,
+  DatabaseMetadataOptions,
+  SchemaMetadata,
+  TableMetadata,
+  ColumnMetadata,
+} from './introspection'
+
 // Builder + expression helpers.
 export { SelectQueryBuilder } from './builder/select'
 export {
