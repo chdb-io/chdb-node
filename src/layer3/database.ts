@@ -17,6 +17,8 @@ import { SelectQueryBuilder } from './builder/select'
 import { InsertQueryBuilder } from './builder/insert'
 import { UpdateQueryBuilder } from './builder/update'
 import { DeleteQueryBuilder } from './builder/delete'
+import { Connection } from './connect/connect'
+import type { ConnectConfig } from './connect/url-scheme'
 import type { ExecContext } from './execute/terminal'
 
 /** Anything accepted as a SELECT source: a table name, an expression, or a subquery builder. */
@@ -54,6 +56,11 @@ export class Database<DB = Record<string, any>> {
     return new DeleteQueryBuilder(this.ctx, { kind: 'DeleteQuery', table })
   }
 
+  /** Open a federated connection to an external data source (read through chDB). */
+  connect(config: ConnectConfig): Connection {
+    return new Connection(this.ctx, config)
+  }
+
   /** The bound Session, if this root was created with one. */
   get session(): RuntimeSession | undefined {
     return this.ctx.session
@@ -85,6 +92,11 @@ export function updateTable(table: string): UpdateQueryBuilder {
 /** Start a DELETE (ClickHouse mutation) on the default connection. */
 export function deleteFrom(table: string): DeleteQueryBuilder {
   return DEFAULT.deleteFrom(table)
+}
+
+/** Open a federated connection to an external data source on the default connection. */
+export function connect(config: ConnectConfig): Connection {
+  return DEFAULT.connect(config)
 }
 
 /** Create a typed builder root. Pass `{ session }` to pin the connection. */

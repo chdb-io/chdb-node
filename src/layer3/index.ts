@@ -18,11 +18,17 @@ export {
   insertInto,
   updateTable,
   deleteFrom,
+  connect,
   database,
   session,
   Database,
 } from './database'
 export type { FromInput } from './database'
+
+// Federated connections (connect).
+export { Connection } from './connect/connect'
+export type { ColumnInfo } from './connect/connect'
+export type { ConnectConfig, SourceKind, SourcePlan } from './connect/url-scheme'
 
 // Builder + expression helpers.
 export { SelectQueryBuilder } from './builder/select'

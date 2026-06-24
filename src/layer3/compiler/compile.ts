@@ -249,6 +249,18 @@ export function compileQuery(node: QueryNode): CompiledQuery {
   return { sql, parameters: c.params.parameters }
 }
 
+/** Render a `SETTINGS` clause body (`k = v, …`) with names validated and values escaped. */
+export function renderSettings(settings: Readonly<Record<string, string | number | boolean>>): string {
+  return formatSettings(settings)
+}
+
+/** Compile a single expression to `{ sql, parameters }` (e.g. a table-function read). */
+export function compileExpr(node: Expr): CompiledQuery {
+  const c = new Compiler()
+  const sql = c.expr(node)
+  return { sql, parameters: c.params.parameters }
+}
+
 function formatNumber(n: number): string {
   if (!Number.isFinite(n)) throw new ChdbCompileError(`Expected a finite number, got ${n}`)
   return String(n)
