@@ -59,11 +59,30 @@ export interface RuntimeSessionCtor {
   new (path?: string, opts?: { installSignalHandlers?: boolean }): RuntimeSession
 }
 
+/** One column passed to `_arrowRegisterColumns` (Arrow C Data Interface layout). */
+export interface RuntimeArrowColumn {
+  name: string
+  /** Arrow format string: 'i' Int32, 'l' Int64, 'g' Float64, 'b' Bool, 'u' Utf8. */
+  format: string
+  length: number
+  nullCount: number
+  /** `[validity bitmap | null, data, offsets?]`. Offsets is Utf8-only. */
+  buffers: ReadonlyArray<Buffer | null>
+}
+
 export interface Runtime {
   Session: RuntimeSessionCtor
   queryAsync(query: string, opts?: RuntimeQueryOptions): Promise<ChdbResult>
   queryBindAsync(query: string, params: object, opts?: RuntimeQueryOptions): Promise<ChdbResult>
   insert(params: RuntimeInsertParams): Promise<RuntimeInsertSummary>
+  /** Register a JS columnar dataset as `arrowstream('<tableName>')`. */
+  _arrowRegisterColumns(
+    connection: unknown,
+    tableName: string,
+    columns: ReadonlyArray<RuntimeArrowColumn>,
+  ): void
+  /** Remove a previously registered arrow table. */
+  _arrowUnregister(connection: unknown, tableName: string): void
 }
 
 let cached: Runtime | undefined

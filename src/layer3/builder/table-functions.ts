@@ -169,6 +169,15 @@ export const chTable = {
     return tableFn('iceberg', compact([str(opts.url), ...creds]))
   },
 
+  /**
+   * `arrowstream('<name>')` — read a JS dataset registered via
+   * `registerArrowTable(name, columns)`. The argument is the table name; the
+   * engine reads it from the in-process Arrow registry with no IPC copy.
+   */
+  arrowstream(name: string): ChExpression {
+    return tableFn('arrowstream', [{ value: name, type: 'String' }])
+  },
+
   /** `deltaLake(url[, access_key, secret])`. */
   deltaLake(opts: LakeOptions): ChExpression {
     const creds =

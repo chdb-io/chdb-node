@@ -728,7 +728,23 @@ function version() {
   };
 }
 
-module.exports = { query, queryBind, queryAsync, queryBindAsync, insert, Session, version, _closeAllSessions, _drainPendingOps };
+// Arrow C Data Interface — low-level binding. The high-level helper lives in
+// Layer 3 (`src/layer3/execute/arrow-input.ts`); this module just routes the
+// call to the native addon. The connection arg is a `Session._handle` (the
+// External returned by CreateConnection) or null for the process-wide default.
+function _arrowRegisterColumns(connection, tableName, columns) {
+  return chdbNode.ArrowRegisterColumns(connection ?? null, tableName, columns);
+}
+function _arrowUnregister(connection, tableName) {
+  return chdbNode.ArrowUnregister(connection ?? null, tableName);
+}
+
+module.exports = {
+  query, queryBind, queryAsync, queryBindAsync, insert,
+  Session, version,
+  _closeAllSessions, _drainPendingOps,
+  _arrowRegisterColumns, _arrowUnregister,
+};
 
 // Layer 3: the fluent, immutable query builder. It sits on Layer 1, a sibling of
 // the pluggable Connection surface (`chdb/connection`). Required at the BOTTOM,

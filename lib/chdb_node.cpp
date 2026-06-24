@@ -4,8 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <set>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 #include <napi.h>
 
 typedef void * ChdbConnection;
@@ -877,6 +881,389 @@ Napi::String QueryWithConnectionWrapper(const Napi::CallbackInfo & info) {
     return output;
 }
 
+//===---------------------------------------------------------------------===//
+// Arrow C Data Interface — caller-built struct layout.
+//
+// The standard Arrow ABI structs are reproduced here so the addon doesn't have
+// to depend on `arrow/c/abi.h` (chdb ships with Arrow linked inside libchdb but
+// does not re-expose the header). Layout matches the spec at
+// https://arrow.apache.org/docs/format/CDataInterface.html so a chdb-side
+// `reinterpret_cast<ArrowArrayStream *>` matches our pointers byte-for-byte.
+//===---------------------------------------------------------------------===//
+
+struct AbiSchema {
+  const char * format;
+  const char * name;
+  const char * metadata;
+  int64_t flags;
+  int64_t n_children;
+  AbiSchema ** children;
+  AbiSchema * dictionary;
+  void (*release)(AbiSchema *);
+  void * private_data;
+};
+
+struct AbiArray {
+  int64_t length;
+  int64_t null_count;
+  int64_t offset;
+  int64_t n_buffers;
+  int64_t n_children;
+  const void ** buffers;
+  AbiArray ** children;
+  AbiArray * dictionary;
+  void (*release)(AbiArray *);
+  void * private_data;
+};
+
+// No-op release callbacks. chdb-arrow.cpp saves each child's release into a
+// vector before scanning, then restores it; passing NULL would segfault there.
+static void AbiSchemaNoopRelease(AbiSchema * s) { s->release = nullptr; }
+static void AbiArrayNoopRelease(AbiArray * a) { a->release = nullptr; }
+
+//===---------------------------------------------------------------------===//
+// Arrow C Data Interface bindings.
+//
+// chdb_arrow_scan / chdb_arrow_array_scan let the engine read a caller-built
+// Arrow buffer as if it were a regular table (the table function is registered
+// under a chosen name; SELECT * FROM <name> reads it). The wire types declared
+// in chdb.h are opaque, but chdb-arrow.cpp inside libchdb just reinterprets
+// them as the standard ArrowSchema * / ArrowArray * / ArrowArrayStream * from
+// the Arrow C Data Interface — so JS hands the addon a pointer (BigInt) to a
+// caller-owned, correctly-laid-out struct, and the addon forwards it.
+//
+// Memory: the caller owns the struct and its referenced buffers until the
+// matching Unregister. chdb keeps a stable reference to the data in its own
+// ArrowStreamRegistry; on Unregister chdb releases its hold and we free the
+// caller-side wrapper (typed-array references included).
+//===---------------------------------------------------------------------===//
+
+// Resolve the connection arg: undefined/null -> default in-process connection;
+// External<void> -> a Session-bound chdb_connection*. Throws a JS exception
+// and returns false on a misuse / no-default-available error.
+static bool resolveArrowConn(Napi::Env env, Napi::Value handle, chdb_connection ** out) {
+  if (handle.IsExternal()) {
+    *out = static_cast<chdb_connection *>(handle.As<Napi::External<void>>().Data());
+    if (*out == nullptr) {
+      Napi::Error::New(env, "Connection handle is null (closed?)").ThrowAsJavaScriptException();
+      return false;
+    }
+    return true;
+  }
+  if (handle.IsNull() || handle.IsUndefined()) {
+    char * err = nullptr;
+    chdb_connection * c = get_default_conn(&err);
+    if (c == nullptr) {
+      std::string msg = err ? err : "no default connection available";
+      if (err) free(err);
+      Napi::Error::New(env, msg).ThrowAsJavaScriptException();
+      return false;
+    }
+    *out = c;
+    return true;
+  }
+  Napi::TypeError::New(env, "Connection must be a Session handle or null").ThrowAsJavaScriptException();
+  return false;
+}
+
+// Pull a `BigInt` off the call info as a raw pointer. JS hands us 64-bit
+// pointers losslessly through BigInt; anything else is a misuse.
+static bool pointerArg(Napi::Env env, Napi::Value v, const char * field, uint64_t * out) {
+  if (!v.IsBigInt()) {
+    Napi::TypeError::New(env, std::string(field) + " must be a BigInt pointer").ThrowAsJavaScriptException();
+    return false;
+  }
+  bool lossless = false;
+  *out = v.As<Napi::BigInt>().Uint64Value(&lossless);
+  if (!lossless) {
+    Napi::TypeError::New(env, std::string(field) + " BigInt did not convert losslessly").ThrowAsJavaScriptException();
+    return false;
+  }
+  if (*out == 0) {
+    Napi::Error::New(env, std::string(field) + " pointer is null").ThrowAsJavaScriptException();
+    return false;
+  }
+  return true;
+}
+
+// nativeArrowRegisterArray(conn, tableName, schemaPtr, arrayPtr)
+//   schemaPtr / arrayPtr are JS-owned ArrowSchema * / ArrowArray * (BigInt).
+//   chdb takes a snapshot via chdb_arrow_array_scan and registers the table.
+Napi::Value ArrowRegisterArrayWrapper(const Napi::CallbackInfo & info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 4 || !info[1].IsString()) {
+    Napi::TypeError::New(env, "Usage: connection, tableName, schemaPtr, arrayPtr").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection * conn = nullptr;
+  if (!resolveArrowConn(env, info[0], &conn)) return env.Undefined();
+  std::string tableName = info[1].As<Napi::String>().Utf8Value();
+  uint64_t schemaPtr = 0, arrayPtr = 0;
+  if (!pointerArg(env, info[2], "schemaPtr", &schemaPtr)) return env.Undefined();
+  if (!pointerArg(env, info[3], "arrayPtr", &arrayPtr)) return env.Undefined();
+
+  chdb_state st = chdb_arrow_array_scan(
+      *conn,
+      tableName.c_str(),
+      reinterpret_cast<chdb_arrow_schema>(static_cast<uintptr_t>(schemaPtr)),
+      reinterpret_cast<chdb_arrow_array>(static_cast<uintptr_t>(arrayPtr)));
+  if (st != CHDBSuccess) {
+    Napi::Error::New(env, "chdb_arrow_array_scan failed for table " + tableName).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  return env.Undefined();
+}
+
+// nativeArrowRegisterStream(conn, tableName, streamPtr) — for multi-batch data.
+Napi::Value ArrowRegisterStreamWrapper(const Napi::CallbackInfo & info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[1].IsString()) {
+    Napi::TypeError::New(env, "Usage: connection, tableName, streamPtr").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection * conn = nullptr;
+  if (!resolveArrowConn(env, info[0], &conn)) return env.Undefined();
+  std::string tableName = info[1].As<Napi::String>().Utf8Value();
+  uint64_t streamPtr = 0;
+  if (!pointerArg(env, info[2], "streamPtr", &streamPtr)) return env.Undefined();
+
+  chdb_state st = chdb_arrow_scan(
+      *conn,
+      tableName.c_str(),
+      reinterpret_cast<chdb_arrow_stream>(static_cast<uintptr_t>(streamPtr)));
+  if (st != CHDBSuccess) {
+    Napi::Error::New(env, "chdb_arrow_scan failed for table " + tableName).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  return env.Undefined();
+}
+
+//===---------------------------------------------------------------------===//
+// High-level table registration. JS hands the addon a list of column
+// descriptors (`name`, Arrow format string, plain Buffers / TypedArrays for
+// validity / data / offsets), and the addon assembles the ArrowSchema and
+// ArrowArray children + struct root so chdb can read the data with no IPC
+// round-trip and no Arrow header dependency on the JS side.
+//
+// Lifetime: chdb keeps a reference inside its own ArrowStreamRegistry, so the
+// underlying byte buffers (held by JS) must stay alive until Unregister is
+// called. We keep both the C structs and Napi::Reference handles to each JS
+// Buffer pinned in a per-(connection, tableName) live-registration record.
+//===---------------------------------------------------------------------===//
+
+struct ArrowColumnBuffers {
+  std::vector<Napi::Reference<Napi::Value>> jsRefs;  // pin each JS buffer
+  std::vector<std::vector<const void *>> bufferPtrs; // one per column (validity/data/offsets)
+};
+
+struct LiveArrowTable {
+  std::string format;                // "+s" + child format strings (owned strings below)
+  std::vector<std::string> formatStorage;
+  std::vector<std::string> nameStorage;
+  // Children are stored contiguously and pointed at via pointer-arrays below.
+  std::vector<AbiSchema> childSchemas;
+  std::vector<AbiArray> childArrays;
+  std::vector<AbiSchema *> childSchemaPtrs;
+  std::vector<AbiArray *> childArrayPtrs;
+  AbiSchema rootSchema{};
+  AbiArray rootArray{};
+  std::vector<const void *> rootBuffers;             // root struct: one null bitmap (NULL)
+  ArrowColumnBuffers buffers;
+};
+
+// Key: (connection pointer, table name). Lookup on unregister to free.
+using LiveArrowKey = std::pair<chdb_connection *, std::string>;
+struct LiveArrowKeyHash {
+  size_t operator()(const LiveArrowKey & k) const noexcept {
+    return std::hash<void *>{}(k.first) ^ std::hash<std::string>{}(k.second);
+  }
+};
+static std::unordered_map<LiveArrowKey, std::unique_ptr<LiveArrowTable>, LiveArrowKeyHash> g_live_arrow_tables;
+static std::mutex g_live_arrow_mu;
+
+// nativeArrowRegisterColumns(conn, tableName, columns)
+//   columns: Array<{ name, format, length, nullCount, buffers: Array<Buffer|null> }>
+//     - format: an Arrow C Data Interface format string ("i"/"l"/"g"/"b"/"u"/...)
+//     - buffers[0] = validity bitmap (null if nullCount === 0)
+//     - buffers[1] = data
+//     - buffers[2] = offsets (utf8 only)
+Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[1].IsString() || !info[2].IsArray()) {
+    Napi::TypeError::New(env, "Usage: connection, tableName, columns[]").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection * conn = nullptr;
+  if (!resolveArrowConn(env, info[0], &conn)) return env.Undefined();
+  std::string tableName = info[1].As<Napi::String>().Utf8Value();
+  Napi::Array columns = info[2].As<Napi::Array>();
+  uint32_t ncols = columns.Length();
+  if (ncols == 0) {
+    Napi::TypeError::New(env, "registerArrowTable: at least one column required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  auto live = std::make_unique<LiveArrowTable>();
+  live->formatStorage.reserve(ncols);
+  live->nameStorage.reserve(ncols);
+  live->childSchemas.resize(ncols);
+  live->childArrays.resize(ncols);
+  live->childSchemaPtrs.resize(ncols);
+  live->childArrayPtrs.resize(ncols);
+  live->buffers.bufferPtrs.resize(ncols);
+
+  int64_t rootLength = -1;
+
+  for (uint32_t i = 0; i < ncols; i++) {
+    Napi::Value colv = columns[i];
+    if (!colv.IsObject()) {
+      Napi::TypeError::New(env, "Each column must be an object").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    Napi::Object col = colv.As<Napi::Object>();
+    Napi::Value nameV = col.Get("name");
+    Napi::Value formatV = col.Get("format");
+    Napi::Value lengthV = col.Get("length");
+    Napi::Value nullCountV = col.Get("nullCount");
+    Napi::Value buffersV = col.Get("buffers");
+    if (!nameV.IsString() || !formatV.IsString() || !lengthV.IsNumber() || !buffersV.IsArray()) {
+      Napi::TypeError::New(env, "Column needs { name, format, length, buffers }").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    live->nameStorage.emplace_back(nameV.As<Napi::String>().Utf8Value());
+    live->formatStorage.emplace_back(formatV.As<Napi::String>().Utf8Value());
+    int64_t length = lengthV.As<Napi::Number>().Int64Value();
+    int64_t nullCount = nullCountV.IsNumber() ? nullCountV.As<Napi::Number>().Int64Value() : 0;
+    if (rootLength == -1) rootLength = length;
+    else if (rootLength != length) {
+      Napi::TypeError::New(env, "All columns must have the same length").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+
+    Napi::Array bufs = buffersV.As<Napi::Array>();
+    uint32_t nbufs = bufs.Length();
+    std::vector<const void *> ptrs;
+    ptrs.reserve(nbufs);
+    for (uint32_t b = 0; b < nbufs; b++) {
+      Napi::Value bv = bufs[b];
+      if (bv.IsNull() || bv.IsUndefined()) {
+        ptrs.push_back(nullptr);
+        continue;
+      }
+      if (!bv.IsBuffer()) {
+        Napi::TypeError::New(env, "Column buffers must be Node Buffers or null").ThrowAsJavaScriptException();
+        return env.Undefined();
+      }
+      Napi::Buffer<uint8_t> buf = bv.As<Napi::Buffer<uint8_t>>();
+      ptrs.push_back(buf.Data());
+      // Pin the JS Buffer so its underlying data stays alive until Unregister.
+      live->buffers.jsRefs.push_back(Napi::Reference<Napi::Value>::New(bv, 1));
+    }
+    live->buffers.bufferPtrs[i] = std::move(ptrs);
+
+    // Child ArrowSchema.
+    AbiSchema & cs = live->childSchemas[i];
+    cs = {};
+    cs.format = live->formatStorage.back().c_str();
+    cs.name = live->nameStorage.back().c_str();
+    cs.metadata = nullptr;
+    cs.flags = 2;  // ARROW_FLAG_NULLABLE
+    cs.n_children = 0;
+    cs.children = nullptr;
+    cs.dictionary = nullptr;
+    cs.release = AbiSchemaNoopRelease;
+    cs.private_data = nullptr;
+    live->childSchemaPtrs[i] = &cs;
+
+    // Child ArrowArray.
+    AbiArray & ca = live->childArrays[i];
+    ca = {};
+    ca.length = length;
+    ca.null_count = nullCount;
+    ca.offset = 0;
+    ca.n_buffers = static_cast<int64_t>(live->buffers.bufferPtrs[i].size());
+    ca.n_children = 0;
+    ca.buffers = live->buffers.bufferPtrs[i].data();
+    ca.children = nullptr;
+    ca.dictionary = nullptr;
+    ca.release = AbiArrayNoopRelease;
+    ca.private_data = nullptr;
+    live->childArrayPtrs[i] = &ca;
+  }
+
+  // Root struct schema.
+  live->format = "+s";
+  live->rootSchema = {};
+  live->rootSchema.format = live->format.c_str();
+  live->rootSchema.name = "";
+  live->rootSchema.metadata = nullptr;
+  live->rootSchema.flags = 0;
+  live->rootSchema.n_children = ncols;
+  live->rootSchema.children = live->childSchemaPtrs.data();
+  live->rootSchema.dictionary = nullptr;
+  live->rootSchema.release = AbiSchemaNoopRelease;
+  live->rootSchema.private_data = nullptr;
+
+  // Root struct array. Struct layout has exactly one buffer slot (validity);
+  // we pass NULL to indicate no nulls at the row level.
+  live->rootBuffers = { nullptr };
+  live->rootArray = {};
+  live->rootArray.length = rootLength;
+  live->rootArray.null_count = 0;
+  live->rootArray.offset = 0;
+  live->rootArray.n_buffers = 1;
+  live->rootArray.n_children = ncols;
+  live->rootArray.buffers = live->rootBuffers.data();
+  live->rootArray.children = live->childArrayPtrs.data();
+  live->rootArray.dictionary = nullptr;
+  live->rootArray.release = AbiArrayNoopRelease;
+  live->rootArray.private_data = nullptr;
+
+  chdb_state st = chdb_arrow_array_scan(
+      *conn,
+      tableName.c_str(),
+      reinterpret_cast<chdb_arrow_schema>(&live->rootSchema),
+      reinterpret_cast<chdb_arrow_array>(&live->rootArray));
+  if (st != CHDBSuccess) {
+    Napi::Error::New(env, "chdb_arrow_array_scan failed for table " + tableName).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(g_live_arrow_mu);
+    LiveArrowKey key{ conn, tableName };
+    // Replace any prior entry — Unregister would otherwise leak the old refs.
+    g_live_arrow_tables[key] = std::move(live);
+  }
+  return env.Undefined();
+}
+
+// nativeArrowUnregister(conn, tableName) — drops the registry entry.
+Napi::Value ArrowUnregisterWrapper(const Napi::CallbackInfo & info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[1].IsString()) {
+    Napi::TypeError::New(env, "Usage: connection, tableName").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection * conn = nullptr;
+  if (!resolveArrowConn(env, info[0], &conn)) return env.Undefined();
+  std::string tableName = info[1].As<Napi::String>().Utf8Value();
+
+  chdb_state st = chdb_arrow_unregister_table(*conn, tableName.c_str());
+  if (st != CHDBSuccess) {
+    Napi::Error::New(env, "chdb_arrow_unregister_table failed for table " + tableName).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  // Drop the JS-buffer pins and the C-side struct storage. After chdb's
+  // unregister returns, the engine no longer reaches our buffers, so freeing
+  // them is safe.
+  {
+    std::lock_guard<std::mutex> lock(g_live_arrow_mu);
+    g_live_arrow_tables.erase(LiveArrowKey{ conn, tableName });
+  }
+  return env.Undefined();
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   // Export the functions
   exports.Set("Query", Napi::Function::New(env, QueryWrapper));
@@ -900,6 +1287,12 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("CreateConnection", Napi::Function::New(env, CreateConnectionWrapper));
   exports.Set("CloseConnection", Napi::Function::New(env, CloseConnectionWrapper));
   exports.Set("QueryWithConnection", Napi::Function::New(env, QueryWithConnectionWrapper));
+
+  // Arrow C Data Interface bindings.
+  exports.Set("ArrowRegisterArray", Napi::Function::New(env, ArrowRegisterArrayWrapper));
+  exports.Set("ArrowRegisterStream", Napi::Function::New(env, ArrowRegisterStreamWrapper));
+  exports.Set("ArrowRegisterColumns", Napi::Function::New(env, ArrowRegisterColumnsWrapper));
+  exports.Set("ArrowUnregister", Napi::Function::New(env, ArrowUnregisterWrapper));
 
   // Most-reliable exit cleanup: close every live connection on env teardown,
   // ahead of (and complementary to) the std::atexit backstop. Both call the
