@@ -17,5 +17,20 @@ export default defineConfig({
     fileParallelism: false,
     pool: 'forks',
     poolOptions: { forks: { singleFork: true } },
+    server: {
+      deps: {
+        // The CJS entrypoint (./index.js) owns the process-wide session and
+        // pending-op registries. Test files and setup.ts import it
+        // (`../../index.js`); src/connection/* reaches it via
+        // `require('../../index.js')` after tsc. If vitest transforms the
+        // import copy, the entrypoint evaluates TWICE — the global afterEach
+        // safety net (setup.ts) then drains a DIFFERENT instance than the
+        // one ChdbConnection creates sessions on, sessions leak across files,
+        // and the next file fails with "only one active data directory per
+        // process". Externalizing every `…/index.js` import routes it through
+        // Node's require cache so every importer shares one instance.
+        external: [/\/index\.js$/],
+      },
+    },
   },
 })

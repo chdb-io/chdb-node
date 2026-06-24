@@ -76,11 +76,51 @@ Errors are typed (`ChdbSyntaxError`, `ChdbQueryError`, `ChdbConnectionError`,
 | AbortSignal / timeout | ✅ (single-shot is honest: rejects early; native runs to completion) |
 | Arrow **scan** (`registerArrowTable`, Arrow input) | ⏳ follow-up |
 | Arrow zero-copy (M2, `{ zeroCopy: true }`) | ⏳ follow-up |
+| chDB ↔ `@clickhouse/client` integration (`chdb/connection`, **experimental**) | ✅ |
+
+### chDB ↔ `@clickhouse/client` integration (`chdb/connection`, experimental)
+
+> **Status**: this integration uses the experimental
+> `createClient({ connection })` hook in `@clickhouse/client`
+> ([clickhouse-js#879](https://github.com/ClickHouse/clickhouse-js/pull/879)
+> merged; framing follow-up
+> [#880](https://github.com/ClickHouse/clickhouse-js/pull/880) merged).
+> Upstream considers this a deliberately narrow chDB-only hook — not a
+> public plugin system — and the shape may change. We'll keep
+> `chdb/connection` working against whatever the upstream hook evolves
+> into.
+
+For users coming from `@clickhouse/client`, chdb-node ships a
+**Connection** implementation under the `chdb/connection` subpath that
+plugs into `@clickhouse/client`'s `createClient({ connection })`
+injection point (tracking issue:
+[clickhouse-js#865](https://github.com/ClickHouse/clickhouse-js/issues/865)).
+
+```ts
+import { createChdbConnection } from 'chdb/connection'
+
+const conn = createChdbConnection({ path: ':memory:' })
+const r = await conn.query({ query: 'SELECT * FROM numbers(5)', format: 'JSONEachRow' })
+let body = ''
+for await (const chunk of r.stream) body += Buffer.from(chunk).toString('utf8')
+console.log(JSON.parse(`[${body.trim().split('\n').join(',')}]`))
+await conn.close()
+
+// chDB-specific escape hatches (raw ChdbResult, raw insert, session info)
+conn.chdb.queryAsync('SELECT 1', { format: 'arrow' })  // bytes/text/json/toArrow
+conn.chdb.session.path                                 // bound on-disk path
+```
+
+See [docs/design/pluggable-connection.md](docs/design/pluggable-connection.md)
+for the full design, the `Connection` interface, the `.chdb` extension
+namespace, the `tests/clickhouse-js/skip_list.json` parity blacklist,
+and the sync policy with `@clickhouse/client`.
 
 ### Design docs
 
 - [Layered API design](docs/design/architecture.md): the Layer 1 / Layer 2 / Layer 3 architecture, package shape, and intended user-facing surfaces.
 - [Layer 1 native binding reviewer guide](docs/design/layer1-native-binding.md): the PR #43 design and implementation map, organized by commit and review feedback.
+- [chDB ↔ `@clickhouse/client` integration (experimental)](docs/design/pluggable-connection.md): the `chdb/connection` surface, the `Connection` interface chdb-node implements, the `.chdb` extension namespace, and the parity-test sync policy.
 
 ### Runtimes
 

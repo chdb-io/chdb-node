@@ -1,0 +1,63 @@
+name: connection
+
+# Pluggable Connection CI for chdb-node.
+#
+# Two jobs:
+#   - contract: runs the in-repo Connection contract suite
+#                (test/v3/connection/contract.test.ts) against ChdbConnection.
+#                Fast, fully self-contained, no network.
+#   - parity:   clones @clickhouse/client at the configured ref (see
+#                tests/clickhouse-js/skip_list.json#syncedAgainst), links
+#                this checkout into it, and runs the upstream integration
+#                suite with ChdbConnection injected. tests/clickhouse-js/
+#                skip_list.json filters out the ~23 cases that are real
+#                chdb capability gaps (HTTP transport, auth/RBAC, server
+#                runtime). A new failure here is either a real new chdb
+#                gap (add to skip_list) or a bug in ChdbConnection.
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths-ignore: ["**/*.md"]
+  push:
+    branches: ["main"]
+    paths-ignore: ["**/*.md"]
+  workflow_dispatch: {}
+
+concurrency:
+  group: connection-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    env:
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Install patchelf
+        run: sudo apt-get update && sudo apt-get install -y patchelf
+      - run: npm install --ignore-scripts
+      - run: npm run libchdb
+      - run: npm run build
+      - run: npm run test:v3 -- test/v3/connection/
+
+  parity:
+    runs-on: ubuntu-latest
+    env:
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Install patchelf
+        run: sudo apt-get update && sudo apt-get install -y patchelf
+      - run: npm install --ignore-scripts
+      - run: npm run libchdb
+      - run: npm run build
+      - name: Cross-suite parity (clone @clickhouse/client, inject ChdbConnection, apply skip_list)
+        run: node tests/clickhouse-js/runner.mjs
