@@ -1,6 +1,6 @@
 {
   "name": "chdb",
-  "version": "3.1.0-rc.1",
+  "version": "3.1.0",
   "description": "chDB bindings for nodejs",
   "main": "index.js",
   "types": "index.d.ts",
@@ -65,10 +65,10 @@
     "node-gyp-build": "^4.6.0"
   },
   "optionalDependencies": {
-    "@chdb/lib-darwin-arm64": "26.5.1-rc.1",
-    "@chdb/lib-darwin-x64": "26.5.1-rc.1",
-    "@chdb/lib-linux-arm64-gnu": "26.5.1-rc.1",
-    "@chdb/lib-linux-x64-gnu": "26.5.1-rc.1"
+    "@chdb/lib-darwin-arm64": "26.5.2",
+    "@chdb/lib-darwin-x64": "26.5.2",
+    "@chdb/lib-linux-arm64-gnu": "26.5.2",
+    "@chdb/lib-linux-x64-gnu": "26.5.2"
   },
   "peerDependencies": {
     "apache-arrow": ">=14"
