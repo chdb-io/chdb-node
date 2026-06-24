@@ -32,9 +32,26 @@ cp libchdb.so "$PKG/"
 if [[ "$OS" == "darwin" ]]; then
   install_name_tool -change @loader_path/../../libchdb.so @loader_path/libchdb.so "$PKG/chdb_node.node"
 else
-  # $ORIGIN so the addon resolves libchdb.so from its own dir at runtime.
+  # node-gyp links the addon against the absolute build path
+  # (<module_root_dir>/libchdb.so) and libchdb.so carries no DT_SONAME, so ld
+  # bakes that absolute path as the DT_NEEDED. `--set-rpath '$ORIGIN'` alone
+  # does NOT fix it: the dynamic loader opens an absolute NEEDED verbatim and
+  # ignores RUNPATH, so the addon only loads on a machine that happens to have
+  # the build path (chdb-io/chdb-node#50). Rewrite the path-bearing NEEDED back
+  # to a bare soname FIRST, then point RUNPATH at the addon's own dir so it
+  # resolves the sibling libchdb.so shipped in the subpackage.
+  abs_needed=$(patchelf --print-needed "$PKG/chdb_node.node" | grep -E '/libchdb\.so$' || true)
+  if [ -n "$abs_needed" ]; then
+    patchelf --replace-needed "$abs_needed" libchdb.so "$PKG/chdb_node.node"
+  fi
   patchelf --set-rpath '$ORIGIN' "$PKG/chdb_node.node"
 fi
+
+# Guard against shipping a binary that only loads on the build machine: assert
+# the packaged addon has no build-absolute library references. Environment-
+# independent (it inspects the binary, not its runtime), so it catches the bug
+# even on the build runner where a stale absolute path still resolves.
+bash scripts/assert-relocatable.sh "$PKG/chdb_node.node"
 
 echo "module.exports = require('./chdb_node.node');" > "$PKG/index.js"
 

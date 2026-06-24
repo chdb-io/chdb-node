@@ -82,10 +82,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.x
-      - run: sudo apt-get update && sudo apt-get install -y patchelf
+      - run: sudo apt-get update && sudo apt-get install -y patchelf binutils
       - run: npm install --ignore-scripts && npm run libchdb && npm run build
       - name: Pack main + platform subpackage
         run: |
+          # Stamp the subpackage with the SAME version main pins in
+          # optionalDependencies (derived from update_libchdb.sh, as the publish
+          # workflow does). Without this the local build is 0.0.0-dev, which does
+          # NOT satisfy main's pin, so `npm install` silently pulls the PUBLISHED
+          # subpackage from the registry — the cleanroom then tests the released
+          # binary instead of the one just built, which is how a non-relocatable
+          # binary (chdb-io/chdb-node#50) shipped past a green cleanroom.
+          REL=$(grep -E '^LATEST_RELEASE=' update_libchdb.sh | cut -d= -f2)
+          export CHDB_LIB_VERSION="${REL#v}"
           npm run build:platform
           MAIN_TGZ="$PWD/$(npm pack --silent)"
           SUB_DIR="$PWD/npm/@chdb/lib-linux-x64-gnu"
@@ -97,5 +106,18 @@ jobs:
           mkdir -p /tmp/cleanroom && cd /tmp/cleanroom
           npm init -y >/dev/null
           npm install --no-save "$SUB_TGZ" "$MAIN_TGZ"
+          # The exact binary that will be dlopen'd must be relocatable. Assert it
+          # directly on the INSTALLED file — this also fails loudly (instead of a
+          # cryptic dlopen error) if npm resolved the subpackage from the registry
+          # rather than the local tgz.
+          INSTALLED_NODE="node_modules/@chdb/lib-linux-x64-gnu/chdb_node.node"
+          bash "$GITHUB_WORKSPACE/scripts/assert-relocatable.sh" "$INSTALLED_NODE"
           cp "$GITHUB_WORKSPACE/scripts/smoke-e2e.mjs" ./smoke-e2e.mjs
+          # Relocation-faithful e2e: delete the build-machine libchdb.so so a
+          # baked absolute/build-dir library reference (chdb-io/chdb-node#50)
+          # can no longer be satisfied from the build tree. The installed package
+          # must resolve libchdb.so from the subpackage via $ORIGIN alone —
+          # exactly what a real user's machine offers. Without this the test
+          # passes on the build runner even when the binary is unshippable.
+          rm -f "$GITHUB_WORKSPACE/libchdb.so"
           node smoke-e2e.mjs
