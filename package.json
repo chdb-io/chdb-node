@@ -4,6 +4,9 @@
   "description": "chDB bindings for nodejs",
   "main": "index.js",
   "types": "index.d.ts",
+  "bin": {
+    "chdb-gen-types": "dist/layer3/codegen/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./index.d.ts",
@@ -31,7 +34,7 @@
     "build:platform": "bash ./scripts/build-platform-pkg.sh",
     "bench": "node bench/bench.js",
     "build": "node-gyp configure build --verbose && npm run fixloaderpath && npm run build:ts",
-    "build:ts": "tsc -p tsconfig.build.json",
+    "build:ts": "rm -rf dist && tsc -p tsconfig.build.json",
     "prepack": "npm run build:ts",
     "install": "node -e \"\""
   },

@@ -34,6 +34,15 @@ jobs:
         run: npm run libchdb
       - name: Build (addon + dist)
         run: npm run build
+      - name: Exercise the freshly built addon (not the published prebuilt)
+        # The loader prefers the published @chdb/lib-<platform> subpackage over a
+        # local build (see dist/loader.js). That published binary lags behind
+        # in-repo native source — e.g. the Layer 3 Arrow C Data Interface methods
+        # (ArrowRegisterColumns/…) only exist once republished. Drop the installed
+        # subpackage so loadNative() falls through to the just-built
+        # build/Release/chdb_node.node and the suite tests this PR's native source.
+        shell: bash
+        run: rm -rf node_modules/@chdb/lib-*
       - name: Test (v2 mocha + v3 vitest)
         run: npm run test:all
 

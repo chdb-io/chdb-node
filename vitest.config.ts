@@ -16,7 +16,10 @@ export default defineConfig({
     // share a single process and run serially (no parallelism).
     fileParallelism: false,
     pool: 'forks',
-    poolOptions: { forks: { singleFork: true } },
+    // --expose-gc lets the Arrow-input GC safety-net test (FinalizationRegistry
+    // fallback in arrow-input.ts) drive collection deterministically enough to
+    // assert the finalizer ran. Harmless for every other test.
+    poolOptions: { forks: { singleFork: true, execArgv: ['--expose-gc'] } },
     server: {
       deps: {
         // The CJS entrypoint (./index.js) owns the process-wide session and

@@ -1,0 +1,44 @@
+// Fixture for the from-prisma parser tests. Covers the common scalar types,
+// optional / list modifiers, db.* attributes, enums, and relation fields
+// (which must be skipped).
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  bigId     BigInt
+  email     String   @unique
+  name      String?
+  age       Int?     @db.SmallInt
+  height    Float
+  weight    Float    @db.Real
+  balance   Decimal  @db.Decimal(18, 4)
+  price     Decimal
+  createdAt DateTime @default(now())
+  bornOn    DateTime @db.Date
+  active    Boolean
+  tags      String[]
+  meta      Json?
+  role      Role
+  // A relation: must be skipped, not emitted as a column.
+  posts     Post[]
+  fixed     String   @db.Char(16)
+}
+
+model Post {
+  id     Int    @id @default(autoincrement())
+  title  String
+  userId Int
+  user   User   @relation(fields: [userId], references: [id])
+}

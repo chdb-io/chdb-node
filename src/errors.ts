@@ -77,6 +77,21 @@ export class ChdbBindError extends ChdbError {
   readonly code = 'CHDB_BIND'
 }
 
+/**
+ * A fluent-builder contract was violated. Most often this is a build-time fault —
+ * a SELECT with no source, an unsupported expression, an empty IN list, an
+ * invalid table/argument passed to a helper — raised while turning a chain into
+ * SQL, before any query runs. The builder also raises it for a few terminal-side
+ * contract violations that are the builder's own (not the engine's): e.g.
+ * `executeTakeFirstOrThrow` when the query returns no rows, or `registerArrowTable`
+ * rejecting malformed columns. Either way it is the builder's own error and never
+ * carries a ClickHouse code. Engine/runtime failures (syntax, connection,
+ * timeout, …) still surface as the existing classes above.
+ */
+export class ChdbCompileError extends ChdbError {
+  readonly code = 'CHDB_COMPILE'
+}
+
 /** Progress snapshot carried by streaming-insert callbacks and errors (payload-side ledger). */
 export interface InsertProgress {
   /** Rows flushed to the engine so far (non-empty payload lines; exact for line-delimited formats). */

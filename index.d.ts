@@ -356,3 +356,9 @@ export function version(): {
   arch: string;
   napi?: number;
 };
+
+// Layer 3: the fluent, immutable query builder, a sibling of the pluggable
+// Connection surface (`chdb/connection`), both sitting on Layer 1. `selectFrom`,
+// `database`, `insertInto`, `chFn`, `chTable`, the builders, the compile output
+// types, and ChdbCompileError. Generated declarations live in dist/layer3.
+export * from './dist/layer3';
