@@ -78,11 +78,15 @@ export class ChdbBindError extends ChdbError {
 }
 
 /**
- * The fluent query builder could not turn a chain into SQL — e.g. a SELECT with
- * no source, an unsupported expression, or an empty IN list. This is the only
- * net-new error the builder layer introduces: it is raised while building SQL,
- * before any query runs, so it never carries a ClickHouse code. Runtime failures
- * (syntax, connection, timeout, …) still surface as the existing classes above.
+ * A fluent-builder contract was violated. Most often this is a build-time fault —
+ * a SELECT with no source, an unsupported expression, an empty IN list, an
+ * invalid table/argument passed to a helper — raised while turning a chain into
+ * SQL, before any query runs. The builder also raises it for a few terminal-side
+ * contract violations that are the builder's own (not the engine's): e.g.
+ * `executeTakeFirstOrThrow` when the query returns no rows, or `registerArrowTable`
+ * rejecting malformed columns. Either way it is the builder's own error and never
+ * carries a ClickHouse code. Engine/runtime failures (syntax, connection,
+ * timeout, …) still surface as the existing classes above.
  */
 export class ChdbCompileError extends ChdbError {
   readonly code = 'CHDB_COMPILE'

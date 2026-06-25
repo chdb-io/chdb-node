@@ -130,7 +130,13 @@ export function planSources(args: ParsedArgs): SourcePlan {
       database: args.database,
     }
     const sources: Record<string, IntrospectSource> = {}
-    for (const t of args.tables) sources[t] = { kind: 'url', config, table: t }
+    for (const t of args.tables) {
+      // A duplicate --table would silently overwrite the earlier source; flag it.
+      if (Object.prototype.hasOwnProperty.call(sources, t)) {
+        throw new Error(`Duplicate --table '${t}'`)
+      }
+      sources[t] = { kind: 'url', config, table: t }
+    }
     return { mode: 'introspect', sources }
   }
   if (args.from !== undefined) {
@@ -187,7 +193,15 @@ export async function main(argv: ReadonlyArray<string>, writers: { stdout: (s: s
   const banner = describeBanner(args)
   const ts = emitDatabase(db, { interfaceName: args.name, banner })
   if (args.out !== undefined) {
-    writeFileSync(args.out, ts)
+    // Surface a clean error + exit code on write failure (permission denied,
+    // bad path, …) instead of crashing with a raw stack trace, matching the
+    // planSources/introspectDatabase steps above.
+    try {
+      writeFileSync(args.out, ts)
+    } catch (e) {
+      writers.stderr(`gen-types: ${(e as Error).message}\n`)
+      return { code: 1 }
+    }
   } else {
     writers.stdout(ts)
   }

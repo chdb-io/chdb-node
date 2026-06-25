@@ -92,6 +92,19 @@ function isViewEngine(engine: string): boolean {
 }
 
 /**
+ * Whether a ClickHouse column type is nullable. ClickHouse nests `Nullable`
+ * inside `LowCardinality` (e.g. `LowCardinality(Nullable(String))`), so unwrap a
+ * leading `LowCardinality(...)` before checking — matching how `ch-types.ts`'s
+ * `CHTypeOf` strips `LowCardinality` ahead of `Nullable`, so the two agree.
+ */
+function isNullableType(type: string): boolean {
+  let t = type.trim()
+  const lc = 'LowCardinality('
+  if (t.startsWith(lc) && t.endsWith(')')) t = t.slice(lc.length, -1).trim()
+  return t.startsWith('Nullable(')
+}
+
+/**
  * The local-engine introspector returned by `db.introspection`. Reads the
  * engine's `system.databases` / `system.tables` / `system.columns` rather than
  * issuing a DESCRIBE per table, so `getMetadata()` is a single pair of queries.
@@ -143,7 +156,7 @@ export class ChdbIntrospector implements DatabaseIntrospector {
       bucket.push({
         name: c.name,
         dataType: c.type,
-        isNullable: c.type.startsWith('Nullable('),
+        isNullable: isNullableType(c.type),
         isAutoIncrementing: false,
         hasDefaultValue: c.default_kind !== '',
         comment: c.comment === '' ? undefined : c.comment,

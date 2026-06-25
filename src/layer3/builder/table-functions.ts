@@ -14,6 +14,7 @@
 
 import { ChExpression } from './expression'
 import type { Expr } from '../compiler/nodes'
+import { ChdbCompileError } from '../../errors'
 
 /** Build a table-function expression with bound arguments. */
 function tableFn(name: string, args: ReadonlyArray<{ value: unknown; type?: string }>): ChExpression {
@@ -34,6 +35,27 @@ function compact(
 }
 
 const str = (value: string) => ({ value, type: 'String' })
+
+/**
+ * Resolve a both-or-neither credential pair into bound args. Supplying exactly
+ * one half (e.g. `accessKeyId` without `secretAccessKey`) is almost always a
+ * config mistake that would otherwise be silently dropped, producing an
+ * unauthenticated query — so reject it instead.
+ */
+function credPair(
+  fn: string,
+  aName: string,
+  aValue: string | undefined,
+  bName: string,
+  bValue: string | undefined,
+): { value: unknown; type?: string }[] {
+  if ((aValue === undefined) !== (bValue === undefined)) {
+    const have = aValue !== undefined ? aName : bName
+    const missing = aValue !== undefined ? bName : aName
+    throw new ChdbCompileError(`chTable.${fn}: ${have} was provided without ${missing}; supply both or neither`)
+  }
+  return aValue !== undefined && bValue !== undefined ? [str(aValue), str(bValue)] : []
+}
 
 export interface S3Options {
   url: string
@@ -94,15 +116,12 @@ export const chTable = {
 
   /** `s3(url[, access_key, secret], [format], [structure])`. */
   s3(opts: S3Options): ChExpression {
-    const creds =
-      opts.accessKeyId !== undefined && opts.secretAccessKey !== undefined
-        ? [str(opts.accessKeyId), str(opts.secretAccessKey)]
-        : []
+    const creds = credPair('s3', 'accessKeyId', opts.accessKeyId, 'secretAccessKey', opts.secretAccessKey)
     return tableFn(
       's3',
       compact([
         str(opts.url),
-        ...creds.map((c) => c as { value: unknown; type?: string }),
+        ...creds,
         opts.format !== undefined ? str(opts.format) : undefined,
         opts.structure !== undefined ? str(opts.structure) : undefined,
       ]),
@@ -135,10 +154,7 @@ export const chTable = {
 
   /** `postgresql(host:port, database, table[, user, password][, schema])`. */
   postgresql(opts: PgOptions): ChExpression {
-    const auth =
-      opts.user !== undefined && opts.password !== undefined
-        ? [str(opts.user), str(opts.password)]
-        : []
+    const auth = credPair('postgresql', 'user', opts.user, 'password', opts.password)
     return tableFn(
       'postgresql',
       compact([
@@ -153,19 +169,13 @@ export const chTable = {
 
   /** `mysql(host:port, database, table, user, password)`. */
   mysql(opts: MySqlOptions): ChExpression {
-    const auth =
-      opts.user !== undefined && opts.password !== undefined
-        ? [str(opts.user), str(opts.password)]
-        : []
+    const auth = credPair('mysql', 'user', opts.user, 'password', opts.password)
     return tableFn('mysql', compact([str(opts.host), str(opts.database), str(opts.table), ...auth]))
   },
 
   /** `iceberg(url[, access_key, secret])`. */
   iceberg(opts: LakeOptions): ChExpression {
-    const creds =
-      opts.accessKeyId !== undefined && opts.secretAccessKey !== undefined
-        ? [str(opts.accessKeyId), str(opts.secretAccessKey)]
-        : []
+    const creds = credPair('iceberg', 'accessKeyId', opts.accessKeyId, 'secretAccessKey', opts.secretAccessKey)
     return tableFn('iceberg', compact([str(opts.url), ...creds]))
   },
 
@@ -180,10 +190,7 @@ export const chTable = {
 
   /** `deltaLake(url[, access_key, secret])`. */
   deltaLake(opts: LakeOptions): ChExpression {
-    const creds =
-      opts.accessKeyId !== undefined && opts.secretAccessKey !== undefined
-        ? [str(opts.accessKeyId), str(opts.secretAccessKey)]
-        : []
+    const creds = credPair('deltaLake', 'accessKeyId', opts.accessKeyId, 'secretAccessKey', opts.secretAccessKey)
     return tableFn('deltaLake', compact([str(opts.url), ...creds]))
   },
 }

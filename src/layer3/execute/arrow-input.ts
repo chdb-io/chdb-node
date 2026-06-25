@@ -63,6 +63,14 @@ function validate(name: string, columns: ReadonlyArray<ArrowColumnInput>): void 
     const n = Array.isArray(c.data) ? c.data.length : (c.data as { length: number }).length
     if (len === -1) len = n
     else if (n !== len) throw new ChdbCompileError(`registerArrowTable: column "${c.name}" has ${n} rows, expected ${len}`)
+    // A nulls mask must cover exactly the rows it annotates. A shorter/longer
+    // mask would otherwise be silently dropped from the validity bitmap while
+    // still feeding nullCount, producing an inconsistent ArrowArray descriptor.
+    if (c.nulls != null && c.nulls.length !== n) {
+      throw new ChdbCompileError(
+        `registerArrowTable: column "${c.name}" nulls mask has ${c.nulls.length} entries, expected ${n}`,
+      )
+    }
   }
 }
 
@@ -78,8 +86,10 @@ function bitmap(mask: ReadonlyArray<boolean>): Buffer {
 /** Encode one column into the native descriptor the addon understands. */
 function encodeColumn(col: ArrowColumnInput): NativeArrowColumn {
   const length = Array.isArray(col.data) ? col.data.length : (col.data as { length: number }).length
-  // Validity bitmap: one bit per row, 1 = valid; null when all-valid.
-  const validity = col.nulls && col.nulls.length === length ? bitmap(col.nulls) : null
+  // Validity bitmap: one bit per row, 1 = valid; null when there's no mask.
+  // `validate()` has already guaranteed col.nulls (when present) covers exactly
+  // `length` rows, so the bitmap and nullCount always agree.
+  const validity = col.nulls ? bitmap(col.nulls) : null
   const nullCount = col.nulls ? col.nulls.reduce((n, v) => (v ? n : n + 1), 0) : 0
 
   switch (col.type) {

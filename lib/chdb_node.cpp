@@ -94,10 +94,19 @@ static chdb_connection *open_raw(const std::string &path) {
   return (conn_ptr && *conn_ptr) ? conn_ptr : nullptr;
 }
 
+// Arrow-table registry cleanup (defined alongside g_live_arrow_tables below).
+// A connection's pinned JS buffers live in that registry keyed by the raw
+// chdb_connection*, so they must be dropped when the connection closes — else
+// they leak for the life of the process, the engine retains dangling refs, and
+// a later reused connection address could collide with the stale key.
+static void erase_arrow_tables_for_conn(chdb_connection *conn);
+static void clear_all_arrow_tables();
+
 // Close every live connection. atexit backstop (the JS layer closes sessions on
 // 'exit' too); also used so a leaked connection never outlives the process.
 static void hard_close_all() {
   std::lock_guard<std::mutex> lk(g_reg_mu);
+  clear_all_arrow_tables();
   for (chdb_connection *c : g_reg.conns) {
     if (c) chdb_close_conn(c);
   }
@@ -150,6 +159,7 @@ static chdb_connection *acquire_session_conn(const std::string &path, char **err
       // Only the in-memory default is up (boundKey ""). It is transient and must
       // yield so this session can bind a real data directory.
       if (g_reg.defaultConn) {
+        erase_arrow_tables_for_conn(g_reg.defaultConn);
         chdb_close_conn(g_reg.defaultConn);
         g_reg.conns.erase(g_reg.defaultConn);
         g_reg.defaultConn = nullptr;
@@ -180,6 +190,9 @@ static void release_session_conn(chdb_connection *conn) {
   std::lock_guard<std::mutex> lk(g_reg_mu);
   auto it = g_reg.conns.find(conn);
   if (it == g_reg.conns.end()) return; // already released / unknown handle
+  // Drop any Arrow tables pinned on this connection before closing it, so the
+  // JS buffer references aren't orphaned in g_live_arrow_tables.
+  erase_arrow_tables_for_conn(conn);
   chdb_close_conn(conn);
   g_reg.conns.erase(it);
   if (conn == g_reg.defaultConn) g_reg.defaultConn = nullptr;
@@ -1081,6 +1094,23 @@ struct LiveArrowKeyHash {
 static std::unordered_map<LiveArrowKey, std::unique_ptr<LiveArrowTable>, LiveArrowKeyHash> g_live_arrow_tables;
 static std::mutex g_live_arrow_mu;
 
+// Drop every registered Arrow table belonging to `conn`, releasing the pinned
+// JS buffer references and C-side struct storage. Called from the connection
+// close paths so a session closed without an explicit Unregister doesn't leak.
+static void erase_arrow_tables_for_conn(chdb_connection *conn) {
+  std::lock_guard<std::mutex> lock(g_live_arrow_mu);
+  for (auto it = g_live_arrow_tables.begin(); it != g_live_arrow_tables.end();) {
+    if (it->first.first == conn) it = g_live_arrow_tables.erase(it);
+    else ++it;
+  }
+}
+
+// Drop the entire registry (process teardown backstop).
+static void clear_all_arrow_tables() {
+  std::lock_guard<std::mutex> lock(g_live_arrow_mu);
+  g_live_arrow_tables.clear();
+}
+
 // nativeArrowRegisterColumns(conn, tableName, columns)
 //   columns: Array<{ name, format, length, nullCount, buffers: Array<Buffer|null> }>
 //     - format: an Arrow C Data Interface format string ("i"/"l"/"g"/"b"/"u"/...)
@@ -1112,7 +1142,8 @@ Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
   live->childArrayPtrs.resize(ncols);
   live->buffers.bufferPtrs.resize(ncols);
 
-  int64_t rootLength = -1;
+  int64_t rootLength = 0;
+  bool rootLengthSet = false;
 
   for (uint32_t i = 0; i < ncols; i++) {
     Napi::Value colv = columns[i];
@@ -1134,8 +1165,18 @@ Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
     live->formatStorage.emplace_back(formatV.As<Napi::String>().Utf8Value());
     int64_t length = lengthV.As<Napi::Number>().Int64Value();
     int64_t nullCount = nullCountV.IsNumber() ? nullCountV.As<Napi::Number>().Int64Value() : 0;
-    if (rootLength == -1) rootLength = length;
-    else if (rootLength != length) {
+    // Reject negatives explicitly: a negative length flows straight into
+    // ArrowArray.length, and a negative nullCount mismatches the validity bitmap.
+    if (length < 0 || nullCount < 0) {
+      Napi::TypeError::New(env, "Column length and nullCount must be non-negative").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    // A separate flag (not a -1 sentinel) so a column whose length is legitimately
+    // any value, including 0, sets the root length on the first column.
+    if (!rootLengthSet) {
+      rootLength = length;
+      rootLengthSet = true;
+    } else if (rootLength != length) {
       Napi::TypeError::New(env, "All columns must have the same length").ThrowAsJavaScriptException();
       return env.Undefined();
     }

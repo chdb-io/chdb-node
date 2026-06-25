@@ -263,14 +263,19 @@ export class SelectQueryBuilder<O = Record<string, unknown>> {
     return executeSelect<O>(this.ctx, this.node, opts)
   }
 
-  /** Run and return the first row, or `undefined` when there are none. */
-  async executeTakeFirst(opts?: ExecuteOptions): Promise<O | undefined> {
+  /**
+   * Run and return the first row, or `undefined` when there are none. Only the
+   * row (JSON) view makes sense here: `format:'arrow'`/raw return a Table or
+   * ChdbResult, not an array, so they're excluded at the type level rather than
+   * silently yielding a malformed `rows[0]`.
+   */
+  async executeTakeFirst(opts?: Omit<ExecuteOptions, 'format'> & { format?: 'json' }): Promise<O | undefined> {
     const rows = (await executeSelect<O>(this.ctx, this.node, opts)) as O[]
     return rows[0]
   }
 
   /** Run and return the first row, throwing if there are none. */
-  async executeTakeFirstOrThrow(opts?: ExecuteOptions): Promise<O> {
+  async executeTakeFirstOrThrow(opts?: Omit<ExecuteOptions, 'format'> & { format?: 'json' }): Promise<O> {
     const first = await this.executeTakeFirst(opts)
     if (first === undefined) {
       throw new ChdbCompileError('executeTakeFirstOrThrow: the query returned no rows')

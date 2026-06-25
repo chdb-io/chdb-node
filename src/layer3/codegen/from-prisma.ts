@@ -33,7 +33,9 @@ export function parsePrismaSchema(source: string): IntrospectedDatabase {
   const noComments = stripComments(source)
   const enums = collectEnumNames(noComments)
   const models = collectModels(noComments)
-  const out: IntrospectedDatabase = {}
+  // Null-prototype map: model names come from an untrusted .prisma source, so a
+  // model named `__proto__` must become an own key, not mutate the prototype.
+  const out: IntrospectedDatabase = Object.create(null)
   for (const [name, body] of models) {
     out[name] = modelToColumns(body, enums)
   }
@@ -44,11 +46,29 @@ function stripComments(src: string): string {
   // Prisma uses `//` line comments and `///` doc comments. No block comments.
   return src
     .split('\n')
-    .map((line) => {
-      const i = line.indexOf('//')
-      return i === -1 ? line : line.slice(0, i)
-    })
+    .map(stripLineComment)
     .join('\n')
+}
+
+/**
+ * Drop a trailing `//` comment, but only when the `//` is outside a double-quoted
+ * string — otherwise a value like `url = "postgresql://host/db"` would be
+ * truncated mid-string and corrupt the schema.
+ */
+function stripLineComment(line: string): string {
+  let inStr = false
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (inStr) {
+      if (c === '\\') i++ // skip the escaped character
+      else if (c === '"') inStr = false
+    } else if (c === '"') {
+      inStr = true
+    } else if (c === '/' && line[i + 1] === '/') {
+      return line.slice(0, i)
+    }
+  }
+  return line
 }
 
 function collectEnumNames(src: string): ReadonlySet<string> {
@@ -88,7 +108,8 @@ function findMatchingBrace(src: string, openIdx: number): number {
 }
 
 function modelToColumns(body: string, enums: ReadonlySet<string>): ColumnSchema {
-  const cols: ColumnSchema = {}
+  // Null-prototype map — see parsePrismaSchema: field names are untrusted too.
+  const cols: ColumnSchema = Object.create(null)
   for (const raw of body.split('\n')) {
     const line = raw.trim()
     if (line === '' || line.startsWith('@@')) continue

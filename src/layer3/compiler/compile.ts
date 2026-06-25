@@ -100,6 +100,13 @@ class Compiler {
         return `${this.expr(node.node)} AS ${quoteIdentifier(node.alias)}`
       case 'Subquery':
         return `(${this.select(node.query)})`
+      default: {
+        // Exhaustiveness guard: if a new Expr variant is added to nodes.ts
+        // without a case here, this fails to type-check rather than silently
+        // returning undefined and emitting malformed SQL.
+        const _exhaustive: never = node
+        throw new ChdbCompileError(`Unsupported expression node ${JSON.stringify((_exhaustive as { kind?: string }).kind)}`)
+      }
     }
   }
 
@@ -245,6 +252,12 @@ export function compileQuery(node: QueryNode): CompiledQuery {
     case 'InsertSelect':
       sql = c.insertSelect(node)
       break
+    default: {
+      // Exhaustiveness guard: a new QueryNode variant added without a case
+      // here fails to type-check rather than leaving `sql` unassigned.
+      const _exhaustive: never = node
+      throw new ChdbCompileError(`Unsupported query node ${JSON.stringify((_exhaustive as { kind?: string }).kind)}`)
+    }
   }
   return { sql, parameters: c.params.parameters }
 }
@@ -292,7 +305,11 @@ function formatSettings(settings: Readonly<Record<string, string | number | bool
       } else if (typeof v === 'boolean') {
         rendered = v ? '1' : '0'
       } else {
-        rendered = `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
+        // ClickHouse SQL string literals escape `'` by DOUBLING it (`''`), not
+        // with a backslash — backslash escapes can be rejected or behave
+        // differently depending on engine settings. Mirror the adapter in
+        // src/connection/chdb-connection.ts so SETTINGS values stay consistent.
+        rendered = `'${String(v).replace(/'/g, "''")}'`
       }
       return `${name} = ${rendered}`
     })

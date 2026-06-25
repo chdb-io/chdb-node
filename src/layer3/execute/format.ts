@@ -6,7 +6,7 @@
  * (`Row[]` / Arrow `Table` / raw `ChdbResult`).
  */
 
-import { ChdbCompileError } from '../../errors'
+import { ChdbCompileError, ChdbInternalError } from '../../errors'
 
 export type OutputView = 'rows' | 'arrow' | 'raw'
 
@@ -66,7 +66,16 @@ export function planFormat(format?: string): FormatPlan {
 export function parseRows<T>(text: string): T[] {
   const out: T[] = []
   for (const line of text.split('\n')) {
-    if (line.length > 0) out.push(JSON.parse(line) as T)
+    if (line.length === 0) continue
+    try {
+      out.push(JSON.parse(line) as T)
+    } catch (cause) {
+      // A malformed line (truncated output, a partial chunk, or an error
+      // embedded in the stream) must surface as a typed ChdbError with the
+      // offending content — never a bare SyntaxError (errors.ts iron rule #1).
+      const snippet = line.length > 200 ? `${line.slice(0, 200)}…` : line
+      throw new ChdbInternalError(`failed to parse JSONEachRow output line: ${snippet}`, { cause })
+    }
   }
   return out
 }
