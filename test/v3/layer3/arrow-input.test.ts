@@ -124,4 +124,53 @@ describe('registerArrowTable — round-trips JS data through the engine', () => 
   it('rejects an empty column list', () => {
     expect(() => registerArrowTable('bad', [])).toThrow(/at least one column/)
   })
+
+  it('close() is idempotent (a second close is a no-op)', () => {
+    const t = registerArrowTable('arr_double_close', [
+      { name: 'x', type: 'Int32', data: new Int32Array([1]) },
+    ])
+    t.close()
+    expect(() => t.close()).not.toThrow()
+  })
+})
+
+// Best-effort GC safety net: when a handle is dropped without close(), the
+// FinalizationRegistry should unregister the table so native stops pinning its
+// buffers. Timing is non-deterministic by spec, so we nudge GC a few times and
+// poll. Requires --expose-gc (wired via vitest.config.ts execArgv).
+describe('registerArrowTable — GC fallback unregisters a leaked handle', () => {
+  // Register inside a helper that returns nothing, so no reference to the handle
+  // survives in the caller's scope and it becomes collectable.
+  function leak(name: string): void {
+    registerArrowTable(name, [{ name: 'x', type: 'Int32', data: new Int32Array([7]) }])
+  }
+
+  it.skipIf(typeof global.gc !== 'function')(
+    'unregisters the table after the handle is collected',
+    async () => {
+      const name = 'arr_gc_leak'
+      leak(name)
+
+      // The table is registered right now: a query consumes it (single-pass)
+      // but leaves it registered.
+      const before = (await selectFrom(chTable.arrowstream(name).as('t'))
+        .select('x')
+        .execute()) as { x: number }[]
+      expect(before).toEqual([{ x: 7 }])
+
+      // Drive collection. Once the finalizer runs, the table is gone and the
+      // query rejects.
+      let collected = false
+      for (let i = 0; i < 50 && !collected; i++) {
+        global.gc!()
+        await new Promise((r) => setTimeout(r, 10))
+        try {
+          await selectFrom(chTable.arrowstream(name).as('t')).select('x').execute()
+        } catch {
+          collected = true
+        }
+      }
+      expect(collected).toBe(true)
+    },
+  )
 })

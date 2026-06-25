@@ -17,8 +17,38 @@
  * handle for each query.
  */
 
-import { runtime, type RuntimeSession } from '../runtime'
+import { runtime, type Runtime, type RuntimeSession } from '../runtime'
 import { ChdbCompileError } from '../../errors'
+
+/**
+ * Best-effort safety net: if a handle is garbage-collected without an explicit
+ * `close()`, unregister the table so native stops pinning its JS buffers
+ * (`Napi::Reference`). This is non-deterministic — the JS spec gives no timing
+ * guarantee that finalizers run at all — so an explicit `close()` (ideally in a
+ * `try/finally`) is still required. This only catches the leak when a caller
+ * forgets.
+ *
+ * The held value must NOT reference the handle itself or the encoded buffers:
+ * a finalization registry keeps its held value alive, so closing over the
+ * handle would pin it forever (it could never be collected, defeating the
+ * registry), and holding `encoded` would keep the very buffers we want freed.
+ * `rt`/`conn`/`name`/`state` are small or shared; native owns the buffer pins
+ * and releases them on unregister.
+ */
+const arrowFinalizers = new FinalizationRegistry<{
+  rt: Runtime
+  conn: unknown
+  name: string
+  state: { live: boolean }
+}>(({ rt, conn, name, state }) => {
+  if (!state.live) return
+  state.live = false
+  try {
+    rt._arrowUnregister(conn, name)
+  } catch {
+    // best effort: connection may already be closed, table already erased, etc.
+  }
+})
 
 /** A column the caller asks to register. The shape mirrors apache-arrow naming. */
 export type ArrowColumnInput =
@@ -143,24 +173,33 @@ export function registerArrowTable(
   const encoded = columns.map(encodeColumn)
   const conn = opts.session !== undefined ? (opts.session as { _handle?: unknown })._handle : null
   const rt = runtime()
-  let live = false
+  // Shared between close/refresh and the GC finalizer so all three agree on
+  // whether the table is currently registered.
+  const state = { live: false }
   const register = (): void => {
     rt._arrowRegisterColumns(conn, name, encoded)
-    live = true
+    state.live = true
   }
   const unregister = (): void => {
-    if (!live) return
+    if (!state.live) return
     rt._arrowUnregister(conn, name)
-    live = false
+    state.live = false
   }
   register()
-  return {
+  const handle: ArrowTableHandle = {
     close(): void {
       unregister()
+      // Explicitly closed: drop the GC safety net so the finalizer can't fire
+      // a redundant unregister later.
+      arrowFinalizers.unregister(handle)
     },
     refresh(): void {
       unregister()
       register()
     },
   }
+  // Register the GC fallback. The handle is also the unregister token so
+  // `close()` can cancel it.
+  arrowFinalizers.register(handle, { rt, conn, name, state }, handle)
+  return handle
 }
