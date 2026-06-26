@@ -7,6 +7,7 @@
  */
 
 import type { ChdbResult } from '../../result'
+import { ChdbStreamError } from '../../errors'
 import { runtime, type RuntimeSession } from '../runtime'
 import { compileQuery, type CompiledQuery } from '../compiler/compile'
 import type { QueryNode, SelectQueryNode } from '../compiler/nodes'
@@ -62,6 +63,57 @@ export async function executeSelect<O>(
   if (plan.view === 'rows') return parseRows<O>(result.text())
   if (plan.view === 'arrow') return result.toArrow()
   return result
+}
+
+/**
+ * Compile a SELECT and stream its rows lazily, one at a time, instead of
+ * buffering the whole result (the large-result path: a forgotten `.limit()` on a
+ * big scan stays O(chunk) in memory rather than materializing 3–4×N).
+ *
+ * Fixed to the JSONEachRow row view so streamed rows equal executed rows. Caller
+ * settings ride in the statement's SETTINGS clause; the 64-bit-int precision
+ * setting instead rides on a session-level SET before the stream opens (see
+ * {@link streamSelectRows} for why). Values are still bound server-side (via
+ * queryStreamBind), so streaming is as injection-safe as `.execute()`. Requires a
+ * bound session: the default connection has no streaming cursor.
+ *
+ * `timeout` is intentionally absent from the options: Layer 1 streaming has no
+ * deadline knob (only `signal`), so accepting it would imply unsupported behavior.
+ */
+export function executeSelectStream<O>(
+  ctx: ExecContext,
+  node: SelectQueryNode,
+  opts: Omit<ExecuteOptions, 'format' | 'timeout'> = {},
+): AsyncIterableIterator<O> {
+  if (ctx.session === undefined) {
+    throw new ChdbStreamError(
+      'stream() requires a bound session; use chdb.session().selectFrom(...).stream() ' +
+        '(pass chdb.session(path) for a persistent database)',
+    )
+  }
+  const compiled = compileQuery(mergeSettings(node, opts.settings))
+  // The generator takes `session` as a non-optional parameter (rather than closing
+  // over the narrowed ctx.session) so the non-undefined type holds inside the
+  // closure across TypeScript versions.
+  return streamSelectRows<O>(ctx.session, compiled, opts.signal)
+}
+
+async function* streamSelectRows<O>(
+  session: RuntimeSession,
+  compiled: CompiledQuery,
+  signal: AbortSignal | undefined,
+): AsyncIterableIterator<O> {
+  // chDB builds the streaming output format from the connection's session settings
+  // at OPEN time, not from a query's trailing SETTINGS clause (which executeSelect
+  // rides in SQL). So the row view's 64-bit-int precision setting must be SET on the
+  // session first, otherwise UInt64/Int64 come back as lossy JS numbers and streamed
+  // rows would differ from executed rows. The setting persists on the session by design.
+  await session.queryAsync('SET output_format_json_quote_64bit_integers = 1', { format: 'CSV' })
+  const stream = session.queryStreamBind(compiled.sql, compiled.parameters, {
+    format: 'JSONEachRow',
+    signal,
+  })
+  yield* stream.rows() as AsyncIterableIterator<O>
 }
 
 /** Compile and run any query node that returns no row view (UPDATE/DELETE/INSERT…SELECT). */

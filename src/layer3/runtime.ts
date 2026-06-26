@@ -31,6 +31,17 @@ export interface RuntimeStreamOptions {
   signal?: AbortSignal
 }
 
+/**
+ * The subset of Layer 1's ChdbQueryStream the fluent `.stream()` terminal uses:
+ * a row-level async iterator plus explicit cancellation.
+ */
+export interface RuntimeRowStream<O = unknown> {
+  /** Lazily yields one parsed row at a time across all chunks. */
+  rows(): AsyncIterableIterator<O>
+  /** Cancel the stream and release the native cursor (best effort). */
+  cancel(): void
+}
+
 export interface RuntimeInsertParams {
   table: string
   values: ReadonlyArray<Record<string, unknown> | ReadonlyArray<unknown>>
@@ -52,6 +63,7 @@ export interface RuntimeSession {
   queryBindAsync(query: string, params: object, opts?: RuntimeQueryOptions): Promise<ChdbResult>
   insert(params: RuntimeInsertParams): Promise<RuntimeInsertSummary>
   queryStream(query: string, opts?: RuntimeStreamOptions): unknown
+  queryStreamBind(query: string, params: object, opts?: RuntimeStreamOptions): RuntimeRowStream
   close(): void
 }
 

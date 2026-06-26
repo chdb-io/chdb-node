@@ -719,11 +719,15 @@ static void stream_close(StreamState *st) {
   }
 }
 
-// Args: (connection, sql, format) -> External<StreamState>
+// Args: (connection, sql, format[, paramsObj]) -> External<StreamState>
+// When paramsObj is present, the stream is opened with server-side parameter
+// binding (chdb_stream_query_with_params_n) — values are pre-formatted to param
+// strings by the JS layer and never spliced into the SQL, exactly like the
+// one-shot QueryWithParams path. Otherwise the plain (param-less) stream opens.
 Napi::Value StreamQueryWrapper(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
   if (info.Length() < 3 || !info[0].IsExternal() || !info[1].IsString() || !info[2].IsString()) {
-    Napi::TypeError::New(env, "Usage: connection, sql, format").ThrowAsJavaScriptException();
+    Napi::TypeError::New(env, "Usage: connection, sql, format[, params]").ThrowAsJavaScriptException();
     return env.Undefined();
   }
   chdb_connection *connPtr = static_cast<chdb_connection *>(info[0].As<Napi::External<void>>().Data());
@@ -735,7 +739,29 @@ Napi::Value StreamQueryWrapper(const Napi::CallbackInfo &info) {
   std::string sql = info[1].As<Napi::String>();
   std::string format = info[2].As<Napi::String>();
 
-  chdb_result *handle = chdb_stream_query_n(conn, sql.data(), sql.size(), format.data(), format.size());
+  const bool hasParams = info.Length() >= 4 && info[3].IsObject();
+  chdb_result *handle;
+  if (hasParams) {
+    std::vector<std::string> names, values;
+    if (!collectParams(info[3].As<Napi::Object>(), names, values)) {
+      Napi::TypeError::New(env, "param values must be pre-formatted strings").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    size_t n = names.size();
+    std::vector<const char *> cnames(n), cvalues(n);
+    std::vector<size_t> vlens(n);
+    for (size_t i = 0; i < n; i++) {
+      cnames[i] = names[i].c_str();
+      cvalues[i] = values[i].data();
+      vlens[i] = values[i].size();
+    }
+    handle = chdb_stream_query_with_params_n(
+        conn, sql.data(), sql.size(), format.data(), format.size(),
+        n ? cnames.data() : nullptr, nullptr /* name lens => strlen */,
+        n ? cvalues.data() : nullptr, n ? vlens.data() : nullptr, n);
+  } else {
+    handle = chdb_stream_query_n(conn, sql.data(), sql.size(), format.data(), format.size());
+  }
   if (!handle) {
     Napi::Error::New(env, "chdb stream query returned a null handle").ThrowAsJavaScriptException();
     return env.Undefined();

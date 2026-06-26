@@ -20,6 +20,7 @@ import type {
 import { ChExpression, toExpr, toValue, type ExprInput } from './expression'
 import {
   executeSelect,
+  executeSelectStream,
   type ExecContext,
   type ExecuteOptions,
 } from '../execute/terminal'
@@ -281,5 +282,21 @@ export class SelectQueryBuilder<O = Record<string, unknown>> {
       throw new ChdbCompileError('executeTakeFirstOrThrow: the query returned no rows')
     }
     return first
+  }
+
+  /**
+   * Stream rows lazily instead of buffering the whole result — the large-result
+   * path. Values are still bound server-side, so this is as injection-safe as
+   * {@link execute}. Requires a bound session (`chdb.session()`); the default
+   * connection has no streaming cursor. Only one stream may be active per session
+   * at a time. An `AbortSignal` in `opts` cancels the stream. `timeout` is not
+   * accepted — Layer 1 streaming has no deadline knob, only `signal`.
+   *
+   * ```ts
+   * for await (const row of db.selectFrom('events').selectAll().stream()) { … }
+   * ```
+   */
+  stream(opts?: Omit<ExecuteOptions, 'format' | 'timeout'>): AsyncIterableIterator<O> {
+    return executeSelectStream<O>(this.ctx, this.node, opts)
   }
 }

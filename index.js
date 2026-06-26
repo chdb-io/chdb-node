@@ -609,6 +609,21 @@ class Session {
   // at a time (one streaming cursor per connection); other sessions stream in
   // parallel on their own connections.
   queryStream(sql, opts = {}) {
+    return this.#startStream(sql, opts, undefined);
+  }
+
+  // v3 streaming with server-side parameter binding. Same contract as
+  // queryStream, but {name:Type} placeholders are bound from `params` by the
+  // engine (chdb_stream_query_with_params_n) — values never enter the SQL text,
+  // so a streamed read is as injection-safe as queryBindAsync. Throws a typed
+  // ChdbBindError synchronously on a bad param value.
+  queryStreamBind(sql, params = {}, opts = {}) {
+    return this.#startStream(sql, opts, formatParams(params));
+  }
+
+  // Shared stream starter. `bound` is undefined for the param-less path or a
+  // pre-formatted { name: literal } map for the bound path.
+  #startStream(sql, opts, bound) {
     if (!this.connection) throw new ChdbClosedError("No active connection available");
     if (!sql) throw new ChdbStreamError("queryStream requires a non-empty query");
     if (this._activeStream && !this._activeStream.closed) {
@@ -617,7 +632,9 @@ class Session {
     const prep = prepArrow(sql, opts, "JSONEachRow");
     let handle;
     try {
-      handle = chdbNode.StreamQuery(this.connection, prep.sql, prep.format);
+      handle = bound === undefined
+        ? chdbNode.StreamQuery(this.connection, prep.sql, prep.format)
+        : chdbNode.StreamQuery(this.connection, prep.sql, prep.format, bound);
     } catch (e) {
       throw asQueryError(e);
     }
