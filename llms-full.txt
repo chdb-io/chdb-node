@@ -1,0 +1,209 @@
+# chdb (Node.js / Bun / Deno) — full reference for LLMs
+
+chDB is an in-process ClickHouse SQL engine. The `chdb` npm package runs ClickHouse
+queries inside your JS process with no server and no Docker, over local files,
+in-memory tables, and remote sources (S3, Postgres, MySQL, MongoDB, ClickHouse,
+Iceberg, Delta Lake). Powered by the full ClickHouse engine (1000+ SQL functions).
+
+Install: `npm i chdb`
+Runtimes: Node 18/20/22, Bun, Deno.
+Platforms: linux-x64-gnu, linux-arm64-gnu, darwin-x64, darwin-arm64 (prebuilt; no
+node-gyp, no Python, no postinstall download). Windows unsupported — use WSL2.
+Native binary ships as per-platform `@chdb/lib-*` optionalDependencies, version-
+locked to a ClickHouse release.
+
+The package exposes three sibling API surfaces over one engine:
+- Layer 1 — direct bindings: `query`, `queryBind`, `queryAsync`, `queryBindAsync`,
+  `insert`, `Session`, `version`.
+- Layer 2 — a pluggable `Connection` for `@clickhouse/client`, imported from `chdb/connection`.
+- Layer 3 — fluent, type-safe query builder + federation: `selectFrom`, `insertInto`,
+  `updateTable`, `deleteFrom`, `connect`, `session`, `database`, `sql`, `chTable`, `chFn`.
+
+================================================================
+LAYER 1 — direct API
+================================================================
+
+query(sql, format='CSV') -> string
+  Synchronous, blocking. v2-compatible. Returns the formatted result as a string.
+
+queryBind(sql, params, format='CSV') -> string
+  Synchronous with server-side {name:Type} parameter binding. No injection.
+  e.g. queryBind("SELECT {n:UInt32} AS v", { n: 21 }, "CSV")
+
+queryAsync(sql, opts?) -> Promise<ChdbResult>
+  Non-blocking (runs on libuv pool). opts: { format?, signal?, timeout? }.
+
+queryBindAsync(sql, params, opts?) -> Promise<ChdbResult>
+  Non-blocking parameterized query.
+
+insert(params) -> Promise<InsertSummary>
+  Default-connection insert. See Session.insert for the param shapes.
+
+ChdbResult:
+  .text() -> string                 formatted output
+  .bytes() -> Uint8Array            raw bytes (Arrow IPC when format:'arrow')
+  .json<T>() -> T                   parses a JSON/JSONEachRow result
+  .toArrow() -> arrow.Table         requires the optional `apache-arrow` peer dep
+  .rowsRead .bytesRead .elapsed     metrics
+
+class Session(path?='', opts?)
+  new Session()        -> temporary in-memory database (temp dir, auto-cleaned)
+  new Session("./db")  -> persistent database at ./db
+  opts: { installSignalHandlers?: boolean }  (default false; library does not steal signals)
+  Methods:
+    .query(sql, format='CSV') -> string                      (sync)
+    .queryBind(sql, params, format='CSV') -> string          (sync, bound)
+    .queryAsync(sql, opts?) -> Promise<ChdbResult>
+    .queryBindAsync(sql, params, opts?) -> Promise<ChdbResult>
+    .insert(params) -> Promise<InsertSummary>
+    .queryStream(sql, opts?) -> ChdbQueryStream               (real chunked stream)
+    .queryStreamBind(sql, params, opts?) -> ChdbQueryStream   (streaming + bound params)
+    .close()                                                  (idempotent; alias cleanup())
+    .open -> boolean
+  Supports `using s = new Session()` (Symbol.dispose / asyncDispose).
+
+insert param shapes (Session.insert / insert):
+  1. Row arrays:    { table, values: [{col: v}, ...] | [[v, ...], ...], columns? }
+  2. Raw passthrough: { table, values: Buffer|Uint8Array|string, format }   (no V8 string limit)
+  3. Backpressured stream: { table, values: Readable|AsyncIterable, format,
+       maxChunkBytes?, maxRowBytes?, maxBufferedBytes?, stallTimeout?, onProgress?, signal? }
+  Stream insert failure reasons (all typed, all settle the promise, carry progress):
+  source-error | stall | backpressure-overflow | write-failure | row-too-large | abort.
+  Semantics: at-least-once (already-flushed chunks are not rolled back).
+
+ChdbQueryStream (AsyncIterable<StreamChunk>):
+  for await (const chunk of stream) { chunk.raw() / .text() / .rows(); chunk.numRows }
+  .rows() -> async iterator of parsed rows (JSONEachRow / JSONCompactEachRow)
+  .toReadable() -> Node Readable (object mode)
+  .cancel()
+  One active stream per session. Cancellable via opts.signal (AbortSignal).
+
+version() -> { chdb, libchdb, platform, arch, napi }
+
+================================================================
+LAYER 3 — fluent builder + federation
+================================================================
+
+session(path?) -> Database          a Database bound to a Session at path (or temp)
+database({ session? }) -> Database   a Database over an existing RuntimeSession
+selectFrom(source) / insertInto(table) / updateTable(table) / deleteFrom(table)
+  Standalone builders on the default connection.
+
+Database methods mirror the standalone builders: db.selectFrom(...), db.insertInto(...),
+db.updateTable(...), db.deleteFrom(...), and db.session (the underlying Session).
+
+SelectQueryBuilder (immutable; each method returns a new builder):
+  projection: .select(col | [cols]) .selectAll() .distinct()
+  filter:     .where(col, op, val) | .where(expr) .andWhere .orWhere .having
+  group/order:.groupBy(cols) .orderBy(col, 'asc'|'desc') .limit(n) .offset(n)
+  joins:      .innerJoin / .leftJoin / .fullJoin(src, leftKey, rightKey) .crossJoin(src)
+  set ops:    .union .unionAll .intersect .except
+  ClickHouse: .final() .sample(rate) .prewhere(...) .settings({...}) .format(name) .limitBy(n, cols)
+  compose:    .as(alias) .toNode() .compile() -> { sql, parameters }
+  terminals:  .execute(opts?) -> Row[]            (opts.format: 'json'(default)|'arrow'|raw name)
+              .executeTakeFirst() -> Row | undefined
+              .executeTakeFirstOrThrow() -> Row
+              .stream(opts?) -> AsyncIterableIterator<Row>   (lazy, O(chunk); requires a bound session)
+  Every interpolated/passed value is bound server-side ({pN:Type} placeholder). No injection.
+
+Operators accepted by where/having: = != <> < <= > >= + - * / % like 'not like'
+ilike 'not ilike' in 'not in' is 'is not'.
+
+Expression helpers:
+  sql`...`            tagged template; interpolations are bound, fragments are literal SQL
+  ref(name) val(v) fn(name, ...args)   and the `eb` bundle { ref, val, fn, sql }
+  chTable(name, ...args)   a table function call (e.g. chTable('s3', url, format))
+  chFn(name, ...args)      a parametric/scalar function expression
+
+connect(config) -> Connection      federation entry
+  config: { url, username?, password?, database?, clickhouseSettings?, format?, ... }
+  The url scheme selects the table function:
+    clickhouse:        -> remote()
+    clickhouse-cloud:  -> remoteSecure()
+    postgres: / postgresql: / supabase:  -> postgresql()
+    mysql:             -> mysql()
+    mongodb: / mongodb+srv:  -> mongodb()
+    s3:                -> s3()
+    gcs: / gs:         -> gcs()
+    azureblob:         -> azureBlobStorage()
+    https: / file: / chdb: / memory:
+  A Connection exposes the same builders (selectFrom, ...). Cross-source JOINs are native.
+  clickhouseSettings is forwarded to the engine; clickhouse-js-only HTTP fields are accepted
+  for parity but not applied.
+
+Codegen / introspection:
+  CLI `chdb-gen-types`  generate typed schema (types.ts) from a live DB, or from a
+                        Drizzle / Prisma schema file.
+  introspectDatabase / introspectTable / describeSource / emitDatabase  (programmatic)
+  parseDrizzleFile / parseDrizzleSource / parsePrismaSchema             (static conversion)
+  registerArrowTable(...)  register an in-memory Arrow/columnar dataset as arrowstream('name')
+
+================================================================
+LAYER 2 — @clickhouse/client integration (import 'chdb/connection')
+================================================================
+
+A Connection implementation you plug into @clickhouse/client. Keep createClient from
+@clickhouse/client; pass createChdbConnection() as its `connection`.
+
+import { createClient } from '@clickhouse/client'
+import { createChdbConnection } from 'chdb/connection'
+const client = createClient({
+  connection: createChdbConnection({ path: ':memory:' }),  // or an on-disk path, e.g. './db'
+})
+const rs = await client.query({ query: 'SELECT 1', format: 'JSONEachRow' })
+await client.insert({ table: 't', values: [{ id: 1 }], format: 'JSONEachRow' })
+await client.close()
+
+  Exports: createChdbConnection(opts?), ChdbConnection, ChdbConnectionOptions ({ path? }).
+  client.query / command / exec / insert / ping / close, and ResultSet / Row /
+  ClickHouseError, are @clickhouse/client's own (the Connection interface + result types are
+  re-exported verbatim from @clickhouse/client-common).
+  path: ':memory:' (default, ephemeral, process-shared) or an on-disk path (persistent);
+  a different on-disk path while one is live is rejected (one engine per process).
+  query() buffers the whole result; for large/streaming reads use Session.queryStream
+  (Layer 1) or the Layer 3 .stream().
+  Requires @clickhouse/client >= 1.23.0-head.b25cda1.1, which ships the
+  createClient({ connection }) hook this uses.
+  Use Layer 2 ONLY to migrate existing clickhouse-js code. For new code use Layer 1 or 3.
+
+================================================================
+TYPES, FORMATS, ERRORS
+================================================================
+
+Type mapping (precision-safe):
+  Int64/UInt64        -> string in JSON rows (avoids JS number precision loss); bigint in Arrow.
+  Int128/256          -> string (JSON) / fixed_size_binary (Arrow).
+  Float64             -> number.
+  DateTime            -> 'YYYY-MM-DD HH:MM:SS' string in JSON; pass DateTime64 for sub-second.
+  Array / Nullable / Map / Tuple  -> JS array / null / object / array, round-tripped.
+  Pass JS bigint for 64-bit params; pass null for ClickHouse NULL.
+
+Output formats (.execute / queryAsync format option): 'json' (rows), 'arrow' (Table),
+or any ClickHouse format name (CSV, CSVWithNames, TSV, JSONEachRow, Parquet, Pretty, …)
+returned as a raw ChdbResult you read yourself.
+
+Errors (all extend ChdbError; carry .code, .clickhouseCode, .cause):
+  ChdbQueryError ChdbSyntaxError ChdbConnectionError ChdbClosedError ChdbBindError
+  ChdbInsertError (.failedAtRow, .reason) ChdbStreamError ChdbArrowError ChdbAbortError
+  ChdbTimeoutError ChdbCompileError ChdbPlatformUnsupportedError ChdbBinaryVersionMismatchError
+  Iron rule: never a silent hang, silent wrong result, or precision loss — always a typed error.
+
+================================================================
+KEY BEHAVIORS / GOTCHAS
+================================================================
+
+- One connection per data path per process: the engine is a process-wide singleton.
+  Same path → shared (ref-counted); a different path while one is live throws
+  ChdbConnectionError. Each Session owns its own connection — close it (or use `using`).
+- Cancellation: a streaming query can be truly cancelled (queryStream + AbortSignal).
+  A one-shot queryAsync is honest single-shot — abort/timeout rejects the promise early,
+  but the native computation runs to completion and its result is discarded.
+- INSERT … SELECT with table functions streams entirely inside the engine (block by
+  block, bounded memory); data never enters JS. Use it for copies/migrations. You only
+  need data to pass through your code when you must transform rows yourself.
+- 64-bit integers: strings in JSON, bigint in Arrow. Always pass bigint for 64-bit params.
+- No SQL injection with queryBind, the sql tag, or the fluent builder (server-side binding).
+
+Repository: https://github.com/chdb-io/chdb-node
+chDB project: https://github.com/chdb-io/chdb
+Docs: https://clickhouse.com/docs/chdb

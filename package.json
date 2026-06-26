@@ -51,7 +51,11 @@
     "index.mjs",
     "index.d.ts",
     "dist",
-    "example.js"
+    "example.js",
+    "AGENTS.md",
+    "llms-full.txt",
+    "src/layer3/AGENTS.md",
+    "src/connection/AGENTS.md"
   ],
   "devDependencies": {
     "@types/node": "^20.14.0",
