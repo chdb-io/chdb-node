@@ -329,6 +329,14 @@ export class Session {
   queryStream(query: string, opts?: StreamOptions): ChdbQueryStream;
 
   /**
+   * Like {@link queryStream}, but binds `{name:Type}` placeholders server-side
+   * from `params` (values never enter the SQL text, so a streamed read is as
+   * injection-safe as {@link queryBindAsync}). Throws a typed `ChdbBindError`
+   * synchronously on a bad param value.
+   */
+  queryStreamBind(query: string, params: object, opts?: StreamOptions): ChdbQueryStream;
+
+  /**
    * Closes the session: releases the native connection and, for a temporary
    * session, removes the temporary directory. Idempotent and never throws.
    */
