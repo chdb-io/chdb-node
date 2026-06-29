@@ -20,6 +20,7 @@ import {
 } from './chdb-tool-core.mjs'
 
 export { ChDBVector } from './chdb-vector.mjs'
+export { ChDBStore } from './chdb-store.mjs'
 
 const rowsOutput = z.object({
   rows: z.array(z.record(z.string(), z.any())),

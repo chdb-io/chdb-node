@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { Session } from '../../../index.js'
 // @ts-expect-error - .mjs adapter has a sibling .d.mts; vitest resolves the runtime file
-import { chdbTools, chdbQueryTool, ChDBVector } from '../../../integrations/mastra.mjs'
+import { chdbTools, chdbQueryTool, ChDBVector, ChDBStore } from '../../../integrations/mastra.mjs'
 
 // The Mastra adapter wraps the same executors via createTool, and re-exports ChDBVector.
 
@@ -38,5 +38,14 @@ describe('chdb/mastra', () => {
 
   it('chdbQueryTool returns a single tool', () => {
     expect(chdbQueryTool({ session: db }).id).toBe('chdb-query')
+  })
+
+  it('re-exports ChDBStore (memory + observability)', async () => {
+    expect(typeof ChDBStore).toBe('function')
+    const store = new ChDBStore({ session: db }) as any
+    await store.stores.memory.saveThread({
+      thread: { id: 't', resourceId: 'r', title: 'x', createdAt: new Date(), updatedAt: new Date(), metadata: {} },
+    })
+    expect((await store.stores.memory.getThreadById({ threadId: 't' })).id).toBe('t')
   })
 })

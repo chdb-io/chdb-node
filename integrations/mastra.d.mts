@@ -50,3 +50,23 @@ export class ChDBVector {
   deleteVector(params: { indexName: string; id: string }): Promise<void>
   deleteVectors(params: { indexName: string; filter: Record<string, unknown> }): Promise<void>
 }
+
+export interface ChDBStoreOptions {
+  /** Reuse a chdb Session, or omit to bind a fresh one. */
+  session?: Session
+  /** On-disk path for a new Session (':memory:' default) when `session` is omitted. */
+  path?: string
+  /** Storage id (Mastra base id). */
+  id?: string
+}
+
+/**
+ * A Mastra storage adapter backed by chDB, scoped to the memory (threads/messages)
+ * and observability (AI tracing spans) domains — the columnar-friendly ones; AI
+ * trace/span data becomes analytically queryable with SQL. Records are stored as
+ * JSON in ReplacingMergeTree tables (upsert by id / (traceId,spanId)). Other Mastra
+ * domains are not implemented — compose another backend for them.
+ */
+export class ChDBStore {
+  constructor(opts?: ChDBStoreOptions)
+}
