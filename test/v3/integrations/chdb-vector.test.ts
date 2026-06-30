@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-// @ts-expect-error - .mjs adapter resolved at runtime; types via the package subpath
+// @ts-ignore - .mjs adapter resolved at runtime; types via the package subpath
 import { ChDBVector } from '../../../integrations/chdb-vector.mjs'
 
 // ChDBVector backed by chDB's vector_similarity (HNSW) index — verifies the store
@@ -72,5 +72,13 @@ describe('ChDBVector', () => {
 
   it('rejects metrics with no index form', async () => {
     await expect(store.createIndex({ indexName: 'd', dimension: 3, metric: 'dotproduct' })).rejects.toThrow(/not supported/)
+  })
+
+  it('generates ids when none are provided (randomUUID, ESM-safe)', async () => {
+    await store.createIndex({ indexName: 'docs', dimension: 2 })
+    const ids = await store.upsert({ indexName: 'docs', vectors: [[1, 0], [0, 1]] })
+    expect(ids).toHaveLength(2)
+    expect(ids[0]).toMatch(/^[0-9a-f-]{36}$/)
+    expect((await store.describeIndex({ indexName: 'docs' })).count).toBe(2)
   })
 })

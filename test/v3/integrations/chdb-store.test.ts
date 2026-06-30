@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { Session } from '../../../index.js'
-// @ts-expect-error - .mjs adapter resolved at runtime
+// @ts-ignore - .mjs adapter resolved at runtime
 import { ChDBStore } from '../../../integrations/chdb-store.mjs'
 
 // ChDBStore (Mastra storage) — memory (threads/messages) + observability (AI spans),

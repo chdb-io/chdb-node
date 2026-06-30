@@ -24,7 +24,9 @@ import { Session } from '../index.mjs'
 
 const now = () => Date.now()
 const ms = (d) => (d instanceof Date ? d.getTime() : d ? new Date(d).getTime() : 0)
-const esc = (s) => `'${String(s).replace(/'/g, "''")}'`
+// ClickHouse string literals interpret backslash escapes, so neutralize both
+// backslashes and quotes; null/undefined → empty string (not the text 'undefined').
+const esc = (s) => `'${String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
 
 function reviveDates(obj, fields) {
   if (!obj) return obj
@@ -208,8 +210,10 @@ class ChDBObservabilityStore extends ObservabilityStorage {
   }
 
   async updateSpan(args) {
+    // UpdateSpanArgs = { traceId, spanId, updates }; merge only `updates` so
+    // extraneous top-level keys never leak into the persisted span record.
     const { traceId, spanId } = args
-    const patch = args.updates ?? args.span ?? args
+    const patch = args.updates ?? {}
     const rows = await this.#rows(
       `SELECT record FROM mastra_ai_spans FINAL WHERE traceId = ${esc(traceId)} AND spanId = ${esc(spanId)} LIMIT 1`,
     )

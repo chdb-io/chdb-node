@@ -36,7 +36,10 @@ export const CHDB_SOURCE_FIELD_DESCRIPTION =
  *   maxRows: cap on rows returned (default 1000); `truncated` flags when hit.
  */
 export function createChdbExecutor(opts = {}) {
-  const { session, allowWrite = false, maxRows = 1000 } = opts
+  const { session, allowWrite = false } = opts
+  // Coerce to a positive integer once so a bad maxRows can't make slice()/`truncated`
+  // misbehave (e.g. 0, negative, NaN, or a non-integer).
+  const maxRows = Math.max(1, Math.floor(Number(opts.maxRows) || 1000))
   let roSession // lazy read-only twin
 
   function conn() {

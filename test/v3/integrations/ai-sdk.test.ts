@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { Session } from '../../../index.js'
-// @ts-expect-error - .mjs adapter has a sibling .d.mts; vitest resolves the runtime file
+// @ts-ignore - .mjs adapter has a sibling .d.mts; vitest resolves the runtime file
 import { chdbTools, chdbQueryTool } from '../../../integrations/ai-sdk.mjs'
 
 // The Vercel AI SDK adapter wraps the shared executors: a schema-aware toolset

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { Session } from '../../../index.js'
-// @ts-expect-error - .mjs adapter has a sibling .d.mts; vitest resolves the runtime file
+// @ts-ignore - .mjs adapter has a sibling .d.mts; vitest resolves the runtime file
 import { chdbTools, chdbQueryTool, ChDBVector, ChDBStore } from '../../../integrations/mastra.mjs'
 
 // The Mastra adapter wraps the same executors via createTool, and re-exports ChDBVector.

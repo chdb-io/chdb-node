@@ -8,6 +8,7 @@
 //
 // `@mastra/core` and `zod` are optional peer dependencies of chdb.
 
+import { randomUUID } from 'node:crypto'
 import { MastraVector } from '@mastra/core/vector'
 import { Session } from '../index.mjs'
 
@@ -33,8 +34,8 @@ export class ChDBVector extends MastraVector {
     this.#session = opts.session ?? new Session(opts.path ?? '')
     this.#session.query('SET allow_experimental_vector_similarity_index = 1', 'CSV')
     this.#session.query(
-      `CREATE TABLE IF NOT EXISTS ${META_TABLE} (name String, dimension UInt32, metric String)` +
-        ` ENGINE = ReplacingMergeTree ORDER BY name`,
+      `CREATE TABLE IF NOT EXISTS ${META_TABLE} (name String, dimension UInt32, metric String, _updated Int64)` +
+        ` ENGINE = ReplacingMergeTree(_updated) ORDER BY name`,
       'CSV',
     )
   }
@@ -51,14 +52,14 @@ export class ChDBVector extends MastraVector {
     if (!Number.isInteger(dim) || dim <= 0) throw new Error(`ChDBVector: dimension must be a positive integer`)
     this.#session.query(
       `CREATE TABLE IF NOT EXISTS \`${indexName}\` (` +
-        `id String, vector Array(Float32), metadata String DEFAULT '{}', ` +
+        `id String, vector Array(Float32), metadata String DEFAULT '{}', _v Int64, ` +
         `INDEX vec_idx vector TYPE vector_similarity('hnsw', '${fn}', ${dim}) GRANULARITY 1` +
-        `) ENGINE = MergeTree ORDER BY id`,
+        `) ENGINE = ReplacingMergeTree(_v) ORDER BY id`,
       'CSV',
     )
     await this.#session.queryBindAsync(
-      `INSERT INTO ${META_TABLE} (name, dimension, metric) VALUES ({n:String}, {d:UInt32}, {m:String})`,
-      { n: indexName, d: dim, m: metric },
+      `INSERT INTO ${META_TABLE} (name, dimension, metric, _updated) VALUES ({n:String}, {d:UInt32}, {m:String}, {u:Int64})`,
+      { n: indexName, d: dim, m: metric, u: Date.now() },
       { format: 'CSV' },
     )
   }
@@ -66,17 +67,16 @@ export class ChDBVector extends MastraVector {
   async upsert({ indexName, vectors, metadata, ids }) {
     assertIdent(indexName)
     if (!Array.isArray(vectors) || vectors.length === 0) return []
-    const outIds = vectors.map((_, i) => (ids && ids[i] != null ? String(ids[i]) : cryptoId()))
-    // True upsert: drop any existing rows for these ids, then insert.
-    await this.#session.queryBindAsync(
-      `DELETE FROM \`${indexName}\` WHERE id IN {ids:Array(String)}`,
-      { ids: outIds },
-      { format: 'CSV' },
-    )
-    const rows = vectors.map((v, i) => ({
+    const outIds = vectors.map((_, i) => (ids && ids[i] != null ? String(ids[i]) : randomUUID()))
+    // Idempotent upsert without a separate DELETE: ReplacingMergeTree(_v) keeps the
+    // highest _v per id, and reads use FINAL — so a re-inserted id resolves to the
+    // latest row (no async-DELETE race, no transient duplicates).
+    const v = Date.now()
+    const rows = vectors.map((vec, i) => ({
       id: outIds[i],
-      vector: Array.from(v, Number),
+      vector: Array.from(vec, Number),
       metadata: JSON.stringify(metadata && metadata[i] ? metadata[i] : {}),
+      _v: v,
     }))
     await this.#session.insert({ table: indexName, values: rows })
     return outIds
@@ -88,11 +88,11 @@ export class ChDBVector extends MastraVector {
     const where = filterToSql(filter)
     const cols = includeVector ? 'id, metadata, vector' : 'id, metadata'
     const sql =
-      `SELECT ${cols}, ${fn}(vector, {q:Array(Float32)}) AS _dist FROM \`${indexName}\`` +
+      `SELECT ${cols}, ${fn}(vector, {q:Array(Float32)}) AS _dist FROM \`${indexName}\` FINAL` +
       `${where} ORDER BY _dist ASC LIMIT {k:UInt32}`
     const res = await this.#session.queryBindAsync(
       sql,
-      { q: Array.from(queryVector, Number), k: topK | 0 },
+      { q: Array.from(queryVector, Number), k: Math.max(1, Math.floor(Number(topK) || 10)) },
       { format: 'JSON' },
     )
     const data = res.json()?.data ?? []
@@ -120,7 +120,7 @@ export class ChDBVector extends MastraVector {
     )
     const meta = m.json()?.data?.[0]
     if (!meta) throw new Error(`ChDBVector: index '${indexName}' does not exist`)
-    const c = await this.#session.queryAsync(`SELECT count() AS c FROM \`${indexName}\``, { format: 'JSON' })
+    const c = await this.#session.queryAsync(`SELECT count() AS c FROM \`${indexName}\` FINAL`, { format: 'JSON' })
     return { dimension: Number(meta.dimension), count: Number(c.json()?.data?.[0]?.c ?? 0), metric: meta.metric }
   }
 
@@ -147,7 +147,7 @@ export class ChDBVector extends MastraVector {
     if (id == null) throw new Error('ChDBVector: updateVector requires an id')
     // Read the existing row so a metadata-only or vector-only update preserves the other field.
     const res = await this.#session.queryBindAsync(
-      `SELECT vector, metadata FROM \`${indexName}\` WHERE id = {id:String} LIMIT 1`,
+      `SELECT vector, metadata FROM \`${indexName}\` FINAL WHERE id = {id:String} LIMIT 1`,
       { id: String(id) },
       { format: 'JSON' },
     )
@@ -169,11 +169,6 @@ export class ChDBVector extends MastraVector {
   }
 }
 
-function cryptoId() {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  return require('crypto').randomUUID()
-}
-
 function safeJson(s) {
   try {
     return s ? JSON.parse(s) : {}
@@ -192,7 +187,10 @@ function filterToSql(filter) {
       throw new Error(`ChDBVector: operator filters are not supported yet (key ${JSON.stringify(k)})`)
     }
     if (!IDENT.test(k)) throw new Error(`ChDBVector: invalid filter key ${JSON.stringify(k)}`)
-    const lit = typeof v === 'number' || typeof v === 'boolean' ? String(v) : `'${String(v).replace(/'/g, "''")}'`
+    const lit =
+      typeof v === 'number' || typeof v === 'boolean'
+        ? String(v)
+        : `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
     parts.push(`JSONExtractString(metadata, '${k}') = ${lit}`)
   }
   return ` WHERE ${parts.join(' AND ')}`

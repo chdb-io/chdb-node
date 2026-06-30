@@ -9,10 +9,37 @@ export interface ChdbToolOptions {
   maxRows?: number
 }
 
-/** A schema-aware chDB toolset for Mastra: { chdbQuery, chdbListTables, chdbDescribeSource }. */
-export function chdbTools(opts?: ChdbToolOptions): Record<string, unknown>
+export interface ChdbQueryResult {
+  rows: Array<Record<string, unknown>>
+  rowCount: number
+  truncated: boolean
+  error?: string
+}
+export interface ChdbListTablesResult {
+  tables: string[]
+  error?: string
+}
+export interface ChdbDescribeResult {
+  columns: Array<{ name: string; type: string }>
+  error?: string
+}
+
+/** A Mastra tool whose `execute` resolves to a typed result `T`. */
+export interface ChdbTool<T> {
+  id: string
+  description: string
+  execute(input: Record<string, unknown>): Promise<T>
+  [key: string]: unknown
+}
+
+/** A schema-aware chDB toolset for Mastra agents. */
+export function chdbTools(opts?: ChdbToolOptions): {
+  chdbQuery: ChdbTool<ChdbQueryResult>
+  chdbListTables: ChdbTool<ChdbListTablesResult>
+  chdbDescribeSource: ChdbTool<ChdbDescribeResult>
+}
 /** Just the read-only query tool. */
-export function chdbQueryTool(opts?: ChdbToolOptions): unknown
+export function chdbQueryTool(opts?: ChdbToolOptions): ChdbTool<ChdbQueryResult>
 export default chdbTools
 
 export interface ChDBVectorOptions {
