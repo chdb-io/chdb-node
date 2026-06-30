@@ -26,6 +26,10 @@
       "types": "./integrations/mastra.d.mts",
       "import": "./integrations/mastra.mjs"
     },
+    "./hypequery": {
+      "types": "./integrations/hypequery.d.mts",
+      "import": "./integrations/hypequery.mjs"
+    },
     "./package.json": "./package.json"
   },
   "repository": {
@@ -67,6 +71,7 @@
     "integrations"
   ],
   "devDependencies": {
+    "@hypequery/clickhouse": "^2.1.1",
     "@mastra/core": "^1.47.0",
     "@types/node": "^20.14.0",
     "ai": "^7.0.2",
@@ -90,6 +95,7 @@
     "@chdb/lib-linux-x64-gnu": "26.5.2"
   },
   "peerDependencies": {
+    "@hypequery/clickhouse": ">=2",
     "@mastra/core": ">=0.10",
     "ai": ">=5",
     "apache-arrow": ">=14",
@@ -106,6 +112,9 @@
       "optional": true
     },
     "zod": {
+      "optional": true
+    },
+    "@hypequery/clickhouse": {
       "optional": true
     }
   },
