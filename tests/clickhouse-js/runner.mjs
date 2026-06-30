@@ -3,11 +3,18 @@
  * chdb-node × @clickhouse/client cross-suite parity runner.
  *
  * Clones @clickhouse/client at a configured ref, builds it, patches
- * upstream's `vitest.node.setup.ts` in-place to wrap
+ * upstream's `packages/client-node/vitest.setup.ts` in-place to wrap
  * `globalThis.environmentSpecificCreateClient` with `createChdbConnection`,
  * then runs the integration suite filtered by
  * `tests/clickhouse-js/skip_list.json`. The setup patch is restored in a
  * try/finally block so the upstream checkout isn't left dirty.
+ *
+ * Upstream layout note: clickhouse-js #931 embedded the Vitest config and
+ * setup into the node package, moving the root `vitest.node.setup.ts` /
+ * `vitest.node.config.ts` to `packages/client-node/vitest.setup.ts` /
+ * `vitest.config.ts`. The integration specs themselves stay package-rooted
+ * (`packages/{client-common,client-node}/__tests__/...`), so skip_list paths
+ * are unaffected.
  *
  * Sync policy (encoded in skip_list.json's `syncedAgainst` block):
  *
@@ -94,17 +101,17 @@ const CHDB_INJECTION_END   = "// <<< chdb-runner injection — DO NOT EDIT <<<";
 
 /**
  * Append the ChdbConnection wrapping snippet to upstream's
- * `vitest.node.setup.ts` so vitest actually loads it (the setup file is
- * already in upstream's `setupFiles` config, so appending to it is the
- * one mechanism guaranteed to be picked up regardless of vitest version
- * or CLI flag support). Returns a `{file, original}` snapshot for
+ * `packages/client-node/vitest.setup.ts` so vitest actually loads it (the
+ * setup file is already in upstream's `setupFiles` config, so appending to
+ * it is the one mechanism guaranteed to be picked up regardless of vitest
+ * version or CLI flag support). Returns a `{file, original}` snapshot for
  * try/finally restoration.
  */
 function injectSetup() {
-  const target = join(WORK_DIR, "vitest.node.setup.ts");
+  const target = join(WORK_DIR, "packages", "client-node", "vitest.setup.ts");
   if (!existsSync(target)) {
     throw new Error(
-      `[runner] upstream vitest.node.setup.ts not found at ${target}; ` +
+      `[runner] upstream packages/client-node/vitest.setup.ts not found at ${target}; ` +
       `injection cannot proceed`,
     );
   }
@@ -235,12 +242,20 @@ function runVitest() {
   const excludes = buildSkipPattern();
   const patches = applyPerTestSkips();
   try {
+    // Call the node package's `test:integration` script directly rather than
+    // the root `test:node:integration` aggregator. The aggregator is itself an
+    // `npm --prefix packages/client-node run test:integration`, so forwarding
+    // vitest flags through it (`npm run test:node:integration -- --exclude X`)
+    // would feed `--exclude X` to the inner `npm`, not to vitest. Going
+    // straight to the package script keeps a single `--` hop to vitest. The
+    // config is auto-loaded from packages/client-node/vitest.config.ts (its
+    // `root` is the repo root, so the repo-root-relative skip_list globs match).
     const args = [
+      "--prefix",
+      "packages/client-node",
       "run",
-      "test:node:integration",
+      "test:integration",
       "--",
-      "--config",
-      "vitest.node.config.ts",
     ];
     for (const f of excludes) args.push("--exclude", f);
     const env = {
