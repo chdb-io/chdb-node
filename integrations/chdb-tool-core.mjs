@@ -31,8 +31,10 @@ export const CHDB_SOURCE_FIELD_DESCRIPTION =
  *   session: a chdb Session whose data to query (defaults to the in-process default
  *     connection, suitable for stateless file/s3/url queries).
  *   allowWrite: false (default) runs reads on a dedicated engine-level read-only session
- *     (SET readonly = 1) bound to the same data path, so a write/DDL the model emits is
- *     rejected by the engine, not just by a prompt. true uses the session directly.
+ *     (SET readonly = 2) bound to the same data path, so a write/DDL the model emits is
+ *     rejected by the engine, not just by a prompt. readonly=2 (not 1) is required so
+ *     external table functions like file()/url()/s3() still work — readonly=1 rejects
+ *     them with Code:164. true uses the session directly.
  *   maxRows: cap on rows returned (default 1000); `truncated` flags when hit.
  */
 export function createChdbExecutor(opts = {}) {
@@ -46,7 +48,7 @@ export function createChdbExecutor(opts = {}) {
     if (allowWrite) return session ?? null
     if (roSession === undefined) {
       roSession = new Session(session ? session.path : '')
-      roSession.query('SET readonly = 1', 'CSV')
+      roSession.query('SET readonly = 2', 'CSV')
     }
     return roSession
   }
