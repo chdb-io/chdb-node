@@ -2,9 +2,9 @@
   "$schema_comment": "chdb-node skip list for @clickhouse/client's integration suite. AUTHORITATIVE blacklist applied by tests/clickhouse-js/runner.mjs when running @clickhouse/client's tests with ChdbConnection injected. Format: skipFiles is per-file (entire suite of tests in the file is excluded — for files where chdb does not implement the capability the file exercises); skipTests is per-case for cases inside an otherwise-runnable file (the runner patches the file in place to convert it(...) → it.skip(...) before vitest collects, and restores after). reasons documents WHY each entry is here. Maintained per @clickhouse/client release; chdb-node refreshes the list when upstream cuts a new version.",
   "syncedAgainst": {
     "ref": "ClickHouse/clickhouse-js main",
-    "policy": "While the createClient({ connection }) injection PR is open: ShawnChen-Sirius fork branch. After merge: ClickHouse/clickhouse-js main (CURRENT — PR #879 was merged 2026-06-23 as commit c2e28b9; PR #880 follow-up was merged 2026-06-23 as commit 274844f). After next release: latest released tag.",
-    "lastSyncedSha": "274844f",
-    "lastSyncedAt": "2026-06-24"
+    "policy": "While the createClient({ connection }) injection PR is open: ShawnChen-Sirius fork branch. After merge: ClickHouse/clickhouse-js main (CURRENT — PR #879 was merged 2026-06-23 as commit c2e28b9; PR #880 follow-up was merged 2026-06-23 as commit 274844f). After next release: latest released tag. NOTE: PR #931 (commit 199f9946) embedded the Vitest config/setup into the node package — the runner now patches packages/client-node/vitest.setup.ts and runs the packages/client-node test:integration script; the spec files stayed package-rooted so the paths below are unchanged.",
+    "lastSyncedSha": "199f9946",
+    "lastSyncedAt": "2026-06-30"
   },
   "skipFiles": [
     {
