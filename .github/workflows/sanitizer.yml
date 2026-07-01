@@ -12,6 +12,14 @@ on:
   schedule:
     - cron: "0 3 * * 1" # weekly
 
+# Retry a transient registry reset instead of reddening the job; combined with
+# the per-job actions/setup-node `cache: npm` most runs skip the network.
+env:
+  npm_config_fetch_retries: "5"
+  npm_config_fetch_retry_mintimeout: "20000"
+  npm_config_fetch_retry_maxtimeout: "120000"
+  npm_config_fetch_timeout: "600000"
+
 jobs:
   asan:
     runs-on: ubuntu-latest
@@ -24,6 +32,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.x
+          cache: npm
       - run: npm install --ignore-scripts
       - run: npm run libchdb
       - name: Build addon with ASan/UBSan

@@ -1,12 +1,22 @@
 name: prebuild-publish
 
-# On a version tag: build the per-platform @chdb/lib-* native subpackages on
-# each target runner and publish them, then publish the thin main `chdb` package
-# (which pulls the subpackages in via optionalDependencies). No QEMU — native
-# arm runners are used directly.
+# On a version tag:
+#   1. subpackages — build the per-platform @chdb/lib-* native packages on each target
+#      runner and publish them (idempotent). No QEMU; native arm runners.
+#   2. main — publish the thin `chdb` package, but a STABLE release is published to a
+#      holding dist-tag ('unverified'), NOT 'latest'. Prereleases go to 'next'.
+#   3. verify — on a matrix of clean machines (every target platform x Node version),
+#      install the JUST-PUBLISHED `chdb` from npm (no repo build artifacts) and run the
+#      installed-package tests. This exercises what a user actually gets: the packed
+#      files, the @chdb/lib-* binary resolved via optionalDependencies, its rpath at the
+#      installed location, and the subpath exports. (This is the gate that #50 needed:
+#      a binary with the build machine's absolute rpath passed the in-tree build test
+#      but failed on every clean host.)
+#   4. promote — only after verify is green on every leg, move 'latest' to the new
+#      version. If verify fails, users on 'latest' never see the broken release.
 #
-# Gated on update_libchdb.sh pointing at a libchdb release that includes
-# #73 (chdb_query_with_params) and #15 (chdb_query_arrow).
+# Gated on update_libchdb.sh pointing at a libchdb release that includes the required
+# C ABI (chdb_query_with_params, chdb_query_arrow).
 
 on:
   push:
@@ -41,8 +51,6 @@ jobs:
       - run: npm run test:all
       - name: Derive subpackage version from update_libchdb.sh
         run: |
-          # The published @chdb/lib-* version is decoupled from the libchdb
-          # download (LATEST_RELEASE); see LIBCHDB_NPM_VERSION in update_libchdb.sh.
           echo "CHDB_LIB_VERSION=$(grep -E '^LIBCHDB_NPM_VERSION=' update_libchdb.sh | cut -d= -f2)" >> "$GITHUB_ENV"
       - name: Build subpackage
         run: npm run build:platform
@@ -55,8 +63,6 @@ jobs:
             echo "$NAME@$VER already published; skipping (lets a re-run finish a partially-published release)."
             exit 0
           fi
-          # Publish; tolerate the race where the version exists but the registry
-          # read above lagged — key off the publish error, not a (lagging) read.
           if out=$(npm publish --access public 2>&1); then
             echo "$out"
           else
@@ -85,10 +91,12 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           npm pkg set version="$VERSION"
+          # A stable release is published to a holding tag and only moved to 'latest'
+          # by the promote job after verify passes; prereleases stay on 'next'.
           if [[ "$VERSION" == *-* ]]; then
             echo "NPM_DIST_TAG=next" >> "$GITHUB_ENV"
           else
-            echo "NPM_DIST_TAG=latest" >> "$GITHUB_ENV"
+            echo "NPM_DIST_TAG=unverified" >> "$GITHUB_ENV"
           fi
       - name: Publish main (prepack builds dist; idempotent)
         run: |
@@ -105,5 +113,57 @@ jobs:
               && echo "chdb@$VER already on the registry (publish conflict); treating as success." \
               || exit 1
           fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  verify:
+    needs: main
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-15-intel]
+        node: ["18", "20", "22"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4   # only to obtain the installed-package tests
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "${{ matrix.node }}.x"
+      - name: Install the PUBLISHED chdb in a clean dir and run the installed-package tests
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          work="$(mktemp -d)"
+          cp -R "$GITHUB_WORKSPACE/test/pack" "$work/test"
+          cd "$work"
+          npm init -y >/dev/null
+          # The version may lag in the registry right after publish; retry.
+          ok=
+          for i in 1 2 3 4 5 6; do
+            if npm install "chdb@$VER" vitest@2 >/tmp/i.log 2>&1; then ok=1; break; fi
+            echo "install attempt $i failed (registry propagation?); retry in 15s"; sleep 15
+          done
+          [ -n "$ok" ] || { echo "could not install chdb@$VER"; tail -20 /tmp/i.log; exit 1; }
+          node -e "console.log('verifying installed chdb', require('chdb/package.json').version, 'on', process.version, process.platform, process.arch)"
+          npx vitest run test
+
+  promote:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          registry-url: "https://registry.npmjs.org"
+      - name: Move 'latest' to the verified version (stable only)
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          if [[ "$VER" == *-* ]]; then
+            echo "prerelease $VER stays on 'next'; not promoting to latest."
+            exit 0
+          fi
+          echo "verify passed on every platform; promoting chdb@$VER to latest"
+          npm dist-tag add "chdb@$VER" latest
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

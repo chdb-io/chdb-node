@@ -95,6 +95,7 @@
     "@chdb/lib-linux-x64-gnu": "26.5.2"
   },
   "peerDependencies": {
+    "@clickhouse/client": ">=1.23.0",
     "@hypequery/clickhouse": ">=2",
     "@mastra/core": ">=0.10",
     "ai": ">=5",
@@ -102,6 +103,9 @@
     "zod": ">=3"
   },
   "peerDependenciesMeta": {
+    "@clickhouse/client": {
+      "optional": true
+    },
     "apache-arrow": {
       "optional": true
     },

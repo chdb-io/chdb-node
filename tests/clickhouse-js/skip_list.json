@@ -1,10 +1,10 @@
 {
   "$schema_comment": "chdb-node skip list for @clickhouse/client's integration suite. AUTHORITATIVE blacklist applied by tests/clickhouse-js/runner.mjs when running @clickhouse/client's tests with ChdbConnection injected. Format: skipFiles is per-file (entire suite of tests in the file is excluded — for files where chdb does not implement the capability the file exercises); skipTests is per-case for cases inside an otherwise-runnable file (the runner patches the file in place to convert it(...) → it.skip(...) before vitest collects, and restores after). reasons documents WHY each entry is here. Maintained per @clickhouse/client release; chdb-node refreshes the list when upstream cuts a new version.",
   "syncedAgainst": {
-    "ref": "ClickHouse/clickhouse-js main",
-    "policy": "While the createClient({ connection }) injection PR is open: ShawnChen-Sirius fork branch. After merge: ClickHouse/clickhouse-js main (CURRENT — PR #879 was merged 2026-06-23 as commit c2e28b9; PR #880 follow-up was merged 2026-06-23 as commit 274844f). After next release: latest released tag. NOTE: PR #931 (commit 199f9946) embedded the Vitest config/setup into the node package — the runner now patches packages/client-node/vitest.setup.ts and runs the packages/client-node test:integration script; the spec files stayed package-rooted so the paths below are unchanged.",
-    "lastSyncedSha": "199f9946",
-    "lastSyncedAt": "2026-06-30"
+    "ref": "client-1.23.0",
+    "policy": "While the createClient({ connection }) injection PR is open: ShawnChen-Sirius fork branch. After merge: ClickHouse/clickhouse-js main. After next release: latest released tag (CURRENT — @clickhouse/client 1.23.0 was published to npm on 2026-06-29 as GitHub tag `client-1.23.0` at commit 70ad405, the first stable release containing the `connection` injection point from PR #879/#880). NOTE on Vitest layout: this release was cut BEFORE PR #931 (which merged 2026-06-30 as commit 199f9946 and embedded the Vitest config/setup into `packages/client-node/`). The `client-1.23.0` tag therefore still has the root-level `vitest.node.setup.ts` / `vitest.node.config.ts` and the root `test:node:integration` script — runner.mjs auto-detects and adapts to either layout. Spec paths in skipFiles/skipTests below are package-rooted (`packages/{client-common,client-node}/__tests__/...`) and unchanged across both layouts.",
+    "lastSyncedSha": "70ad405",
+    "lastSyncedAt": "2026-07-01"
   },
   "skipFiles": [
     {

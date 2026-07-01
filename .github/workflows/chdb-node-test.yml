@@ -12,6 +12,15 @@ on:
 # chdb_query_with_params (#73) and chdb_query_arrow (#15) across all four target
 # platforms, so the full v2 + v3 suite is expected green here.
 
+# Harden the registry fetch so a transient reset (e.g. ECONNRESET during
+# install) retries instead of reddening the job. Combined with the per-job
+# actions/setup-node `cache: npm`, most runs never hit the network at all.
+env:
+  npm_config_fetch_retries: "5"
+  npm_config_fetch_retry_mintimeout: "20000"
+  npm_config_fetch_retry_maxtimeout: "120000"
+  npm_config_fetch_timeout: "600000"
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -28,6 +37,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: npm
       - name: Install JS deps (no compile-on-install)
         run: npm install --ignore-scripts
       - name: Fetch libchdb
@@ -58,6 +68,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.x
+          cache: npm
       - run: npm install --ignore-scripts && npm run libchdb && npm run build
       - uses: oven-sh/setup-bun@v2
       - name: Bun smoke
@@ -91,6 +102,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.x
+          cache: npm
       - run: sudo apt-get update && sudo apt-get install -y patchelf binutils
       - run: npm install --ignore-scripts && npm run libchdb && npm run build
       - name: Pack main + platform subpackage
