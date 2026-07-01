@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createQueryBuilder } from '@hypequery/clickhouse'
 import { Session } from '../../../index.js'
 // @ts-ignore - .mjs adapter has a sibling .d.mts; vitest resolves the runtime file
@@ -16,6 +16,13 @@ beforeEach(() => {
   s.query(`CREATE TABLE trips (trip_id String, passenger_count UInt8, total_amount Float64) ENGINE = MergeTree ORDER BY trip_id`)
   s.query(`INSERT INTO trips VALUES ('a',1,10),('b',2,20),('c',2,35),('d',4,50)`)
   db = createQueryBuilder({ adapter: chdbAdapter({ session: s }) })
+})
+
+afterEach(() => {
+  // Keep resource lifetimes case-local rather than relying on
+  // test/v3/setup.ts's global safety net; makes any leak easier to
+  // pin to the offending case.
+  s?.close()
 })
 
 describe('chdb/hypequery', () => {

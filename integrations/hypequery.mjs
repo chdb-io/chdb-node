@@ -80,11 +80,21 @@ function substituteParameters(sql, params) {
 }
 
 function escapeValue(value) {
+  // null / undefined → SQL NULL (matches ClickHouse convention and avoids the
+  // literal string 'undefined' that `JSON.stringify(undefined)` would produce).
+  if (value === null || value === undefined) return 'NULL'
   if (typeof value === 'boolean') return value ? 'true' : 'false'
   if (typeof value === 'number') return value.toString()
+  // BigInt is unquoted numeric to match ClickHouse's numeric literal syntax and
+  // avoid `JSON.stringify(BigInt(...))` throwing "Do not know how to serialize".
+  if (typeof value === 'bigint') return value.toString()
   if (typeof value === 'string') return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
   if (value instanceof Date) return `'${value.toISOString()}'`
-  return `'${JSON.stringify(value)}'`
+  // Objects / arrays: JSON stringify, then apply the same backslash + single-quote
+  // escaping the string branch uses. ClickHouse SQL doubles `'` inside string
+  // literals; leaving raw single quotes from the JSON encoding produces malformed
+  // SQL (e.g. `{name:"O'Reilly"}` → `'{"name":"O'Reilly"}'` which chokes the parser).
+  return `'${JSON.stringify(value).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
 }
 
 function parseJsonEachRow(text) {

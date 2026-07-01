@@ -1,3 +1,4 @@
+import type { ReadableStream } from 'node:stream/web'
 import type { Session } from '../index.js'
 
 export interface ChdbAdapterOptions {
