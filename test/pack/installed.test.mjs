@@ -14,7 +14,13 @@
 import { describe, it, expect } from 'vitest'
 import { query, queryAsync, Session, version } from 'chdb'
 
-describe('installed chdb package', () => {
+// Run cases sequentially. The suite mixes the standalone default connection
+// (`version()`, `query()`, `queryAsync()`) with a `Session` that binds its
+// own temp data directory; libchdb's single-active-data-directory constraint
+// means those two cannot coexist mid-flight in the same process. Running
+// serially (and without shuffle) guarantees the Session case's setup/teardown
+// doesn't race the default-connection cases.
+describe.sequential('installed chdb package', () => {
   it('loads the native binary and reports a version', () => {
     const v = version()
     expect(typeof v).toBe('object')
