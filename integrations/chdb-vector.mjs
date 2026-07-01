@@ -1,10 +1,15 @@
 // ChDBVector — a Mastra vector store backed by chDB's ClickHouse vector engine.
 //
 // Similarity search uses chDB-core's HNSW vector index (`vector_similarity`), so a
-// query is index-accelerated ANN, not a brute-force distance scan over every row:
-//   INDEX vec_idx vector TYPE vector_similarity('hnsw', '<distFn>', <dim>)
-//   ... ORDER BY <distFn>(vector, [q]) LIMIT k   -- the index prunes granules
-// (verified via EXPLAIN indexes=1: the vec_idx skip-index is used).
+// query is index-accelerated approximate ANN, not a brute-force scan over every row:
+//   INDEX vec_idx vector TYPE vector_similarity('hnsw', '<distFn>', <dim>) GRANULARITY <big>
+//   ... ORDER BY <distFn>(vector, [q]) LIMIT k
+// The GRANULARITY must be large enough that one HNSW graph covers a whole part;
+// with the default GRANULARITY 1 a sub-index is built per 8192-row granule and a
+// top-k search consults every one, so no granules are pruned and it degrades to a
+// full scan (EXPLAIN indexes=1 shows all granules read). With a large GRANULARITY
+// the index prunes granules (EXPLAIN shows a fraction read) and results are
+// approximate nearest neighbours.
 //
 // `@mastra/core` and `zod` are optional peer dependencies of chdb.
 
@@ -15,6 +20,9 @@ import { Session } from '../index.mjs'
 // Mastra metric -> ClickHouse distance function used by the vector_similarity index.
 // The index supports cosineDistance and L2Distance; dotproduct has no index form.
 const METRIC_FN = { cosine: 'cosineDistance', euclidean: 'L2Distance' }
+// One HNSW graph per part rather than per 8192-row granule; anything past a part's
+// granule count collapses to "whole part", so this is effectively unbounded.
+const HNSW_GRANULARITY = 100000000
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
 const META_TABLE = '__chdb_vector_meta'
 
@@ -53,7 +61,10 @@ export class ChDBVector extends MastraVector {
     this.#session.query(
       `CREATE TABLE IF NOT EXISTS \`${indexName}\` (` +
         `id String, vector Array(Float32), metadata String DEFAULT '{}', _v Int64, ` +
-        `INDEX vec_idx vector TYPE vector_similarity('hnsw', '${fn}', ${dim}) GRANULARITY 1` +
+        `INDEX vec_idx vector TYPE vector_similarity('hnsw', '${fn}', ${dim}) GRANULARITY ${HNSW_GRANULARITY}, ` +
+        // Reject wrong-length vectors at the engine: a mismatched dimension would
+        // otherwise insert silently and corrupt the HNSW graph.
+        `CONSTRAINT check_dim CHECK length(vector) = ${dim}` +
         `) ENGINE = ReplacingMergeTree(_v) ORDER BY id`,
       'CSV',
     )
@@ -85,14 +96,14 @@ export class ChDBVector extends MastraVector {
   async query({ indexName, queryVector, topK = 10, filter, includeVector = false }) {
     assertIdent(indexName)
     const fn = await this.#metricFn(indexName)
-    const where = filterToSql(filter)
+    const { where, params } = filterToSql(filter)
     const cols = includeVector ? 'id, metadata, vector' : 'id, metadata'
     const sql =
       `SELECT ${cols}, ${fn}(vector, {q:Array(Float32)}) AS _dist FROM \`${indexName}\` FINAL` +
       `${where} ORDER BY _dist ASC LIMIT {k:UInt32}`
     const res = await this.#session.queryBindAsync(
       sql,
-      { q: Array.from(queryVector, Number), k: Math.max(1, Math.floor(Number(topK) || 10)) },
+      { q: Array.from(queryVector, Number), k: Math.max(1, Math.floor(Number(topK) || 10)), ...params },
       { format: 'JSON' },
     )
     const data = res.json()?.data ?? []
@@ -137,9 +148,9 @@ export class ChDBVector extends MastraVector {
 
   async deleteVectors({ indexName, filter }) {
     assertIdent(indexName)
-    const where = filterToSql(filter)
+    const { where, params } = filterToSql(filter)
     if (!where) throw new Error('ChDBVector: deleteVectors requires a filter')
-    this.#session.query(`DELETE FROM \`${indexName}\`${where.replace(/^ WHERE/, ' WHERE')}`, 'CSV')
+    await this.#session.queryBindAsync(`DELETE FROM \`${indexName}\`${where}`, params, { format: 'CSV' })
   }
 
   async updateVector({ indexName, id, update }) {
@@ -177,21 +188,26 @@ function safeJson(s) {
   }
 }
 
-// Translate a flat equality metadata filter ({ key: value }) to a WHERE clause over
-// the JSON metadata column. Operator filters ($gt, $in, …) are not supported yet.
+// Translate a flat equality metadata filter ({ key: value }) to a WHERE clause plus
+// the params to bind for it. Operator filters ($gt, $in, …) are not supported yet.
+// Keys are validated as identifiers (safe to inline); values are always bound as
+// String params — never interpolated into the SQL — which matters on the destructive
+// deleteVectors() path and also makes numeric/boolean filters work: metadata is
+// stored as JSON text, so JSONExtractString yields the value's string form and every
+// filter must compare against that string ("2024", "true"), not a bare literal.
 function filterToSql(filter) {
-  if (!filter || typeof filter !== 'object' || Object.keys(filter).length === 0) return ''
+  if (!filter || typeof filter !== 'object' || Object.keys(filter).length === 0) return { where: '', params: {} }
   const parts = []
+  const params = {}
+  let i = 0
   for (const [k, v] of Object.entries(filter)) {
     if (v !== null && typeof v === 'object') {
       throw new Error(`ChDBVector: operator filters are not supported yet (key ${JSON.stringify(k)})`)
     }
     if (!IDENT.test(k)) throw new Error(`ChDBVector: invalid filter key ${JSON.stringify(k)}`)
-    const lit =
-      typeof v === 'number' || typeof v === 'boolean'
-        ? String(v)
-        : `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
-    parts.push(`JSONExtractString(metadata, '${k}') = ${lit}`)
+    const p = `f${i++}`
+    parts.push(`JSONExtractString(metadata, '${k}') = {${p}:String}`)
+    params[p] = String(v)
   }
-  return ` WHERE ${parts.join(' AND ')}`
+  return { where: ` WHERE ${parts.join(' AND ')}`, params }
 }

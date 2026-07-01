@@ -51,6 +51,42 @@ describe('ChDBVector', () => {
     expect(res.map((r: any) => r.id)).toEqual(['a'])
   })
 
+  it('filters by numeric and boolean metadata', async () => {
+    await store.createIndex({ indexName: 'docs', dimension: 3 })
+    await store.upsert({
+      indexName: 'docs',
+      vectors: [[0.1, 0.2, 0.3], [0.11, 0.21, 0.31], [0.12, 0.22, 0.32]],
+      metadata: [{ year: 2024, ok: true }, { year: 2023, ok: true }, { year: 2024, ok: false }],
+      ids: ['a', 'b', 'c'],
+    })
+    const byYear = await store.query({ indexName: 'docs', queryVector: [0.1, 0.2, 0.3], topK: 5, filter: { year: 2024 } })
+    expect(byYear.map((r: any) => r.id).sort()).toEqual(['a', 'c'])
+    const byBool = await store.query({ indexName: 'docs', queryVector: [0.1, 0.2, 0.3], topK: 5, filter: { ok: true } })
+    expect(byBool.map((r: any) => r.id).sort()).toEqual(['a', 'b'])
+  })
+
+  it('deletes by metadata filter (bound params on the destructive path)', async () => {
+    await store.createIndex({ indexName: 'docs', dimension: 3 })
+    await store.upsert({
+      indexName: 'docs',
+      vectors: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+      metadata: [{ tag: 'drop' }, { tag: 'keep' }, { tag: 'drop' }],
+      ids: ['a', 'b', 'c'],
+    })
+    await store.deleteVectors({ indexName: 'docs', filter: { tag: 'drop' } })
+    expect((await store.describeIndex({ indexName: 'docs' })).count).toBe(1)
+    const res = await store.query({ indexName: 'docs', queryVector: [0, 1, 0], topK: 5 })
+    expect(res.map((r: any) => r.id)).toEqual(['b'])
+  })
+
+  it('rejects a vector whose length does not match the index dimension', async () => {
+    await store.createIndex({ indexName: 'docs', dimension: 3 })
+    await expect(
+      store.upsert({ indexName: 'docs', vectors: [[1, 0]], ids: ['bad'] }),
+    ).rejects.toThrow(/check_dim|[Cc]onstraint/)
+    expect((await store.describeIndex({ indexName: 'docs' })).count).toBe(0)
+  })
+
   it('upsert replaces an existing id (true upsert)', async () => {
     await store.createIndex({ indexName: 'docs', dimension: 3 })
     await store.upsert({ indexName: 'docs', vectors: [[1, 0, 0]], metadata: [{ v: 1 }], ids: ['x'] })
