@@ -3,18 +3,24 @@
  * chdb-node × @clickhouse/client cross-suite parity runner.
  *
  * Clones @clickhouse/client at a configured ref, builds it, patches
- * upstream's `packages/client-node/vitest.setup.ts` in-place to wrap
+ * upstream's vitest setup in-place to wrap
  * `globalThis.environmentSpecificCreateClient` with `createChdbConnection`,
  * then runs the integration suite filtered by
  * `tests/clickhouse-js/skip_list.json`. The setup patch is restored in a
  * try/finally block so the upstream checkout isn't left dirty.
  *
- * Upstream layout note: clickhouse-js #931 embedded the Vitest config and
- * setup into the node package, moving the root `vitest.node.setup.ts` /
- * `vitest.node.config.ts` to `packages/client-node/vitest.setup.ts` /
- * `vitest.config.ts`. The integration specs themselves stay package-rooted
- * (`packages/{client-common,client-node}/__tests__/...`), so skip_list paths
- * are unaffected.
+ * Upstream layout note (auto-detected at runtime):
+ *
+ *   - **pre-#931** layout (e.g. `client-1.23.0` release tag, cut before
+ *     #931 merged): setup lives at repo-root `vitest.node.setup.ts`;
+ *     integration script is `npm run test:node:integration` at the root.
+ *   - **post-#931** layout (main, and any release cut after #931):
+ *     Vitest config + setup embedded into `packages/client-node/`;
+ *     integration script is `test:integration` in that package.
+ *
+ * The integration specs themselves stay package-rooted
+ * (`packages/{client-common,client-node}/__tests__/...`) in both layouts,
+ * so skip_list paths are unaffected by the reorg.
  *
  * Sync policy (encoded in skip_list.json's `syncedAgainst` block):
  *
@@ -100,21 +106,51 @@ const CHDB_INJECTION_BEGIN = "// >>> chdb-runner injection — DO NOT EDIT >>>";
 const CHDB_INJECTION_END   = "// <<< chdb-runner injection — DO NOT EDIT <<<";
 
 /**
- * Append the ChdbConnection wrapping snippet to upstream's
- * `packages/client-node/vitest.setup.ts` so vitest actually loads it (the
- * setup file is already in upstream's `setupFiles` config, so appending to
- * it is the one mechanism guaranteed to be picked up regardless of vitest
- * version or CLI flag support). Returns a `{file, original}` snapshot for
- * try/finally restoration.
+ * Detect the upstream Vitest layout (pre-#931 root, or post-#931
+ * per-package). Returns the concrete file path to patch and the npm
+ * script incantation to invoke.
+ *
+ * Detection is done by probing which setup file exists on disk — cheaper
+ * and more reliable than parsing package.json scripts.
  */
-function injectSetup() {
-  const target = join(WORK_DIR, "packages", "client-node", "vitest.setup.ts");
-  if (!existsSync(target)) {
-    throw new Error(
-      `[runner] upstream packages/client-node/vitest.setup.ts not found at ${target}; ` +
-      `injection cannot proceed`,
-    );
+function detectLayout() {
+  const postPath = join(WORK_DIR, "packages", "client-node", "vitest.setup.ts");
+  const prePath = join(WORK_DIR, "vitest.node.setup.ts");
+  if (existsSync(postPath)) {
+    return {
+      kind: "post-931",
+      setupFile: postPath,
+      // packages/client-node has its own `test:integration` script; going
+      // through the root aggregator adds an extra `npm run` hop that swallows
+      // vitest CLI flags, so we invoke the package script directly.
+      npmArgs: ["--prefix", "packages/client-node", "run", "test:integration", "--"],
+    };
   }
+  if (existsSync(prePath)) {
+    return {
+      kind: "pre-931",
+      setupFile: prePath,
+      // Pre-#931 layout: the root `test:node:integration` script IS the
+      // vitest invocation (no aggregator layer), so `--` forwarding is clean.
+      npmArgs: ["run", "test:node:integration", "--", "--config", "vitest.node.config.ts"],
+    };
+  }
+  throw new Error(
+    `[runner] no recognized vitest setup file found; tried:\n  ${postPath}\n  ${prePath}`,
+  );
+}
+
+/**
+ * Append the ChdbConnection wrapping snippet to the detected setup file
+ * so vitest actually loads it (the setup file is already in upstream's
+ * `setupFiles` config, so appending to it is the one mechanism guaranteed
+ * to be picked up regardless of vitest version or CLI flag support).
+ * Returns a `{file, original}` snapshot for try/finally restoration.
+ */
+function injectSetup(layout) {
+  const target = layout.setupFile;
+  console.log(`[runner] detected upstream layout: ${layout.kind}`);
+  console.log(`[runner] patching setup file:      ${target}`);
   const original = readFileSync(target, "utf8");
   // Strip any leftover injection from a prior crashed run, then append fresh.
   const cleaned = stripInjection(original);
@@ -238,25 +274,12 @@ function restorePerTestSkips(patches) {
 }
 
 function runVitest() {
-  const setupSnap = injectSetup();
+  const layout = detectLayout();
+  const setupSnap = injectSetup(layout);
   const excludes = buildSkipPattern();
   const patches = applyPerTestSkips();
   try {
-    // Call the node package's `test:integration` script directly rather than
-    // the root `test:node:integration` aggregator. The aggregator is itself an
-    // `npm --prefix packages/client-node run test:integration`, so forwarding
-    // vitest flags through it (`npm run test:node:integration -- --exclude X`)
-    // would feed `--exclude X` to the inner `npm`, not to vitest. Going
-    // straight to the package script keeps a single `--` hop to vitest. The
-    // config is auto-loaded from packages/client-node/vitest.config.ts (its
-    // `root` is the repo root, so the repo-root-relative skip_list globs match).
-    const args = [
-      "--prefix",
-      "packages/client-node",
-      "run",
-      "test:integration",
-      "--",
-    ];
+    const args = [...layout.npmArgs];
     for (const f of excludes) args.push("--exclude", f);
     const env = {
       ...process.env,
