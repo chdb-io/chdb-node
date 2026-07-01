@@ -28,6 +28,14 @@ concurrency:
   group: connection-${{ github.ref }}
   cancel-in-progress: true
 
+# Retry a transient registry reset instead of reddening the job; combined with
+# the per-job actions/setup-node `cache: npm` most runs skip the network.
+env:
+  npm_config_fetch_retries: "5"
+  npm_config_fetch_retry_mintimeout: "20000"
+  npm_config_fetch_retry_maxtimeout: "120000"
+  npm_config_fetch_timeout: "600000"
+
 jobs:
   contract:
     runs-on: ubuntu-latest
@@ -38,6 +46,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.x
+          cache: npm
       - name: Install patchelf
         run: sudo apt-get update && sudo apt-get install -y patchelf
       - run: npm install --ignore-scripts
@@ -54,6 +63,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.x
+          cache: npm
       - name: Install patchelf
         run: sudo apt-get update && sudo apt-get install -y patchelf
       - run: npm install --ignore-scripts
