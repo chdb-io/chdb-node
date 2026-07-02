@@ -11,14 +11,17 @@
 //
 // hypequery's createQueryBuilder already accepts a custom `adapter` (DatabaseAdapter),
 // and it renders final SQL with `?`-positional params client-side, so the adapter only
-// has to run a complete SQL string and return JSONEachRow rows. This is intentionally
-// dependency-light: it does not import @hypequery/clickhouse at runtime (the adapter is
-// duck-typed against the DatabaseAdapter shape).
+// has to run a complete SQL string and return JSONEachRow rows. It renders those params
+// with hypequery's own substituteParameters (exported since @hypequery/clickhouse 2.1.2),
+// so the SQL it produces is byte-identical to hypequery's built-in HTTP adapter — no
+// copied escaping to drift out of sync.
 //
-// `@hypequery/clickhouse` is an optional peer dependency (types only).
+// `@hypequery/clickhouse` is an optional peer dependency: it's only needed when you use
+// this adapter, which by definition means hypequery is already installed.
 
 // In the chdb-node package this imports from the package ESM entry:
 import { Session, queryAsync } from '../index.mjs'
+import { substituteParameters } from '@hypequery/clickhouse'
 
 const ROW_FORMAT = 'JSONEachRow'
 
@@ -52,8 +55,8 @@ export function chdbAdapter(opts = {}) {
       return chunkStreamToReadable(chStream)
     },
 
-    // hypequery calls render() when present (else its own substituteParameters); we
-    // reproduce its rendering exactly so generated SQL matches the HTTP adapter.
+    // hypequery calls render() when present (else its own substituteParameters); we call
+    // the very same substituteParameters, so generated SQL matches the HTTP adapter exactly.
     render(sql, params = []) {
       return substituteParameters(sql, params)
     },
@@ -62,40 +65,7 @@ export function chdbAdapter(opts = {}) {
 
 export default chdbAdapter
 
-// --- helpers (mirror @hypequery/clickhouse core/utils.ts exactly) ------------
-// If hypequery exports substituteParameters/escapeValue (see the proposed PR),
-// import them instead of duplicating, so the two stay byte-identical.
-
-function substituteParameters(sql, params) {
-  if (!params || params.length === 0) return sql
-  const parts = sql.split('?')
-  if (parts.length - 1 !== params.length) {
-    throw new Error(
-      `chdbAdapter: mismatch between placeholders and parameters — ${parts.length - 1} placeholders, ${params.length} parameters.`,
-    )
-  }
-  let out = ''
-  for (let i = 0; i < params.length; i++) out += parts[i] + escapeValue(params[i])
-  return out + parts[parts.length - 1]
-}
-
-function escapeValue(value) {
-  // null / undefined → SQL NULL (matches ClickHouse convention and avoids the
-  // literal string 'undefined' that `JSON.stringify(undefined)` would produce).
-  if (value === null || value === undefined) return 'NULL'
-  if (typeof value === 'boolean') return value ? 'true' : 'false'
-  if (typeof value === 'number') return value.toString()
-  // BigInt is unquoted numeric to match ClickHouse's numeric literal syntax and
-  // avoid `JSON.stringify(BigInt(...))` throwing "Do not know how to serialize".
-  if (typeof value === 'bigint') return value.toString()
-  if (typeof value === 'string') return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
-  if (value instanceof Date) return `'${value.toISOString()}'`
-  // Objects / arrays: JSON stringify, then apply the same backslash + single-quote
-  // escaping the string branch uses. ClickHouse SQL doubles `'` inside string
-  // literals; leaving raw single quotes from the JSON encoding produces malformed
-  // SQL (e.g. `{name:"O'Reilly"}` → `'{"name":"O'Reilly"}'` which chokes the parser).
-  return `'${JSON.stringify(value).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
-}
+// --- helpers ----------------------------------------------------------------
 
 function parseJsonEachRow(text) {
   const out = []
