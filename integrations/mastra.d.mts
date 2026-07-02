@@ -34,12 +34,15 @@ export type ChdbToolset = Record<
   | 'list_functions'
   | 'attach_file',
   ChdbAgentTool
->
+> & {
+  /** Release the Session this toolset owns (non-enumerable; no-op if you passed your own). */
+  close(): void
+}
 
 /** The canonical chDB agent toolset for Mastra agents (thin over ChDBTool). */
 export function chdbTools(opts?: ChdbToolsOptions): ChdbToolset
-/** Just the read-only run_select_query tool. */
-export function chdbQueryTool(opts?: ChdbToolsOptions): ChdbAgentTool
+/** Just the read-only run_select_query tool (carries the same close()). */
+export function chdbQueryTool(opts?: ChdbToolsOptions): ChdbAgentTool & { close(): void }
 export default chdbTools
 
 export interface ChDBVectorOptions {

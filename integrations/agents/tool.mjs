@@ -93,24 +93,39 @@ export class ChDBTool {
     this.#session =
       session ?? new Session(path === ':memory:' || path === '' || path == null ? '' : path)
 
-    // Exact 64-bit integers survive JSON as strings rather than lossy floats.
-    this.#session.query('SET output_format_json_quote_64bit_integers=1', 'CSV')
-    if (this.maxExecutionTime != null) {
-      // engine-side wall-clock bound; a runaway query raises TIMEOUT_EXCEEDED
-      this.#session.query(`SET max_execution_time=${this.maxExecutionTime}`, 'CSV')
-    }
-    // Attachments must be materialized BEFORE the read-only lock, because
-    // CREATE VIEW is a write that readonly=2 rejects. This is why read-only
-    // tools declare files at construction rather than via attachFile().
-    for (const [name, spec] of Object.entries(attachments || {})) {
-      const [p, fmt] = Array.isArray(spec) ? spec : [spec, null]
-      this.#createFileView(name, p, fmt)
-    }
-    if (this.readOnly) {
-      // readonly=2 (NOT 1): blocks INSERT/CREATE/ALTER/DROP while still allowing
-      // SELECT and the file()/s3()/url() table functions that are chDB's whole
-      // point. readonly=1 rejects those. Cannot be un-set.
-      this.#session.query('SET readonly=2', 'CSV')
+    // If any setup below throws (a bad attachment path, an engine SET error),
+    // the constructor never returns, so a Session we own would otherwise leak
+    // (the caller has no instance to close()). Close it before re-throwing.
+    try {
+      // Exact 64-bit integers survive JSON as strings rather than lossy floats.
+      this.#session.query('SET output_format_json_quote_64bit_integers=1', 'CSV')
+      if (this.maxExecutionTime != null) {
+        // engine-side wall-clock bound; a runaway query raises TIMEOUT_EXCEEDED
+        this.#session.query(`SET max_execution_time=${this.maxExecutionTime}`, 'CSV')
+      }
+      // Attachments must be materialized BEFORE the read-only lock, because
+      // CREATE VIEW is a write that readonly=2 rejects. This is why read-only
+      // tools declare files at construction rather than via attachFile().
+      for (const [name, spec] of Object.entries(attachments || {})) {
+        const [p, fmt] = Array.isArray(spec) ? spec : [spec, null]
+        this.#createFileView(name, p, fmt)
+      }
+      if (this.readOnly) {
+        // readonly=2 (NOT 1): blocks INSERT/CREATE/ALTER/DROP while still allowing
+        // SELECT and the file()/s3()/url() table functions that are chDB's whole
+        // point. readonly=1 rejects those. Cannot be un-set.
+        this.#session.query('SET readonly=2', 'CSV')
+      }
+    } catch (e) {
+      if (this.#ownsSession && this.#session) {
+        try {
+          this.#session.close()
+        } catch {
+          /* best effort */
+        }
+        this.#session = null
+      }
+      throw e
     }
   }
 

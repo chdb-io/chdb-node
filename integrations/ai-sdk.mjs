@@ -34,6 +34,10 @@ export {
  * attach_file. Pass the whole object as `tools` to generateText/streamText. Each
  * tool resolves to the contract's dispatch envelope ({ ok, result } | { ok, error }),
  * so the model reads engine errors and self-corrects (P4).
+ *
+ * When you don't pass `session`/`tool`, the toolset owns a Session; call the
+ * non-enumerable `tools.close()` when done to release it (a no-op if you passed
+ * your own). It's non-enumerable so the AI SDK doesn't treat it as a tool.
  * @param {{ session?: object, readOnly?: boolean, allowWrite?: boolean, maxRows?: number,
  *   maxBytes?: number, maxExecutionTime?: number|null, fileAllowlist?: string[]|null,
  *   attachments?: object|null, path?: string, tool?: ChDBTool }} [opts]
@@ -48,12 +52,19 @@ export function chdbTools(opts = {}) {
       execute: async (input) => t.call(d.name, input ?? {}),
     })
   }
+  Object.defineProperty(tools, 'close', { value: () => t.close(), enumerable: false })
   return tools
 }
 
-/** Just the read-only query tool, for when you only want one. */
+/**
+ * Just the read-only query tool, for when you only want one. Carries the same
+ * non-enumerable `close()` as the full toolset (owned Session lifetime).
+ */
 export function chdbQueryTool(opts = {}) {
-  return chdbTools(opts).run_select_query
+  const tools = chdbTools(opts)
+  const t = tools.run_select_query
+  Object.defineProperty(t, 'close', { value: tools.close, enumerable: false })
+  return t
 }
 
 export default chdbTools
