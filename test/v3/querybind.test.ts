@@ -37,7 +37,7 @@ describe('queryBind path A (server-side chdb_query_with_params)', () => {
     }
   })
 
-  it('rejects unsafe-integer / null params with a typed ChdbBindError', () => {
+  it('rejects unsafe-integer params with a typed ChdbBindError', () => {
     try {
       queryBind('SELECT {n:Int64}', { n: 1e21 }, 'CSV')
       expect.unreachable('expected ChdbBindError')
@@ -45,11 +45,41 @@ describe('queryBind path A (server-side chdb_query_with_params)', () => {
       expect(e.name).toBe('ChdbBindError')
       expect(e.code).toBe('CHDB_BIND')
     }
+  })
+
+  it('binds a null param as SQL NULL against a Nullable placeholder (\\N, @clickhouse/client-compatible)', () => {
+    // null / undefined -> the TSV null marker \N, which the engine binds as NULL.
+    for (const nullish of [null, undefined]) {
+      const row = JSON.parse(
+        queryBind(
+          'SELECT {v:Nullable(String)} AS v, ({v:Nullable(String)} IS NULL) AS isNull',
+          { v: nullish },
+          'JSONEachRow',
+        ).trim(),
+      )
+      expect(row).toEqual({ v: null, isNull: 1 })
+    }
+    // Non-string Nullable columns bind \N as NULL too.
+    expect(t('SELECT {n:Nullable(Int64)} IS NULL', { n: null })).toBe('1')
+    // The literal string "NULL" is NOT coerced to null — only \N is the marker.
+    expect(t('SELECT {v:Nullable(String)} IS NULL', { v: 'NULL' })).toBe('0')
+    // A null NESTED in an Array uses the NULL keyword and round-trips element-wise.
+    const arr = JSON.parse(
+      queryBind('SELECT {xs:Array(Nullable(Int64))} AS xs', { xs: [1, null, 3] }, 'JSONEachRow').trim(),
+    )
+    expect(arr.xs).toEqual([1, null, 3])
+  })
+
+  it('lets the engine reject a null bound to a non-Nullable placeholder', () => {
+    // Matches the HTTP client + server: \N against a non-Nullable type is an
+    // ENGINE error, not a client-side bind throw.
     try {
       queryBind('SELECT {n:Int64}', { n: null }, 'CSV')
-      expect.unreachable('expected ChdbBindError')
+      expect.unreachable('expected an engine error')
     } catch (e: any) {
-      expect(e.name).toBe('ChdbBindError')
+      expect(e).toBeInstanceOf(Error)
+      expect(String(e.code)).toMatch(/^CHDB_/)
+      expect(e.name).not.toBe('ChdbBindError')
     }
   })
 
