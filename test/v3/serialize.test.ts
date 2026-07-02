@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { escapeStringLiteral, validateIdentifier, serializeValue } from '../../src/serialize'
+import {
+  escapeStringLiteral,
+  validateIdentifier,
+  serializeValue,
+  formatParamValue,
+} from '../../src/serialize'
 import { ChdbBindError } from '../../src/errors'
 // Round-trip literals through the REAL engine to prove correctness + injection safety.
 import { query } from '../../index.js'
@@ -93,6 +98,31 @@ describe('serializeValue (string assertions)', () => {
     expect(serializeValue(new Map<string, unknown>([['k', 1]]))).toBe("{'k':1}")
     expect(serializeValue({ a: 1, b: 'x' })).toBe("{'a':1,'b':'x'}")
     expect(serializeValue([[1, 2], [3]])).toBe('[[1,2],[3]]')
+  })
+})
+
+describe('formatParamValue (server-side {name:Type} binding)', () => {
+  it('emits the TSV null marker \\N for a top-level null/undefined', () => {
+    // Byte-for-byte matches @clickhouse/client-common formatQueryParams
+    // (printNullAsKeyword=false at the top level) — was a ChdbBindError throw.
+    expect(formatParamValue(null)).toBe('\\N')
+    expect(formatParamValue(undefined)).toBe('\\N')
+  })
+
+  it('keeps the NULL keyword for a null nested inside an Array/Map', () => {
+    expect(formatParamValue([1, null, 3])).toBe('[1,NULL,3]')
+    expect(formatParamValue(new Map<string, unknown>([['k', null]]))).toBe("{'k':NULL}")
+  })
+
+  it('TSV-escapes a top-level string without SQL-quoting it', () => {
+    expect(formatParamValue('a\tb')).toBe('a\\tb')
+    expect(formatParamValue("no'quote")).toBe("no'quote")
+  })
+
+  it('still rejects non-finite / unsafe / unserializable values', () => {
+    expect(() => formatParamValue(NaN)).toThrow(ChdbBindError)
+    expect(() => formatParamValue(1e21)).toThrow(ChdbBindError)
+    expect(() => formatParamValue(Symbol('x'))).toThrow(ChdbBindError)
   })
 })
 
