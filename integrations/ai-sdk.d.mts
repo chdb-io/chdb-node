@@ -1,42 +1,44 @@
-import type { Session } from '../index.js'
+import type { ChDBTool, ChDBToolOptions, ToolEnvelope } from './agents/tool.mjs'
 
-export interface ChdbToolOptions {
-  /** A chdb Session whose data to query. Defaults to the in-process default connection. */
-  session?: Session
-  /** Allow writes/DDL. Default false: reads run on an engine-level read-only session. */
+export { ChDBTool } from './agents/tool.mjs'
+export {
+  ChDBError,
+  ChDBReadOnlyError,
+  ChDBSyntaxError,
+  ChDBUnknownObjectError,
+} from './agents/errors.mjs'
+
+export interface ChdbToolsOptions extends ChDBToolOptions {
+  /** Inverse of `readOnly`, accepted for convenience (allowWrite:true === readOnly:false). */
   allowWrite?: boolean
-  /** Cap on rows returned to the model (default 1000); `truncated` flags when hit. */
-  maxRows?: number
+  /** Use a prebuilt ChDBTool instead of constructing one from these options. */
+  tool?: ChDBTool
 }
 
-export interface ChdbQueryResult {
-  rows: Array<Record<string, unknown>>
-  rowCount: number
-  truncated: boolean
-  error?: string
-}
-export interface ChdbListTablesResult {
-  tables: string[]
-  error?: string
-}
-export interface ChdbDescribeResult {
-  columns: Array<{ name: string; type: string }>
-  error?: string
-}
-
-/** A tool whose `execute` resolves to a typed result `T` (the framework adds its own fields). */
-export interface ChdbTool<T> {
+/** A Vercel AI SDK tool whose `execute` resolves to the dispatch envelope. */
+export interface ChdbAgentTool {
   description: string
-  execute(args: Record<string, unknown>, options?: unknown): Promise<T>
+  execute(input: Record<string, unknown>, options?: unknown): Promise<ToolEnvelope>
   [key: string]: unknown
 }
 
-/** A schema-aware chDB toolset for the Vercel AI SDK. */
-export function chdbTools(opts?: ChdbToolOptions): {
-  chdbQuery: ChdbTool<ChdbQueryResult>
-  chdbListTables: ChdbTool<ChdbListTablesResult>
-  chdbDescribeSource: ChdbTool<ChdbDescribeResult>
+/** The canonical CONTRACT.md tool set, keyed by contract tool name. */
+export type ChdbToolset = Record<
+  | 'run_select_query'
+  | 'list_databases'
+  | 'list_tables'
+  | 'describe_table'
+  | 'get_sample_data'
+  | 'list_functions'
+  | 'attach_file',
+  ChdbAgentTool
+> & {
+  /** Release the Session this toolset owns (non-enumerable; no-op if you passed your own). */
+  close(): void
 }
-/** Just the read-only query tool. */
-export function chdbQueryTool(opts?: ChdbToolOptions): ChdbTool<ChdbQueryResult>
+
+/** The canonical chDB agent toolset for the Vercel AI SDK (thin over ChDBTool). */
+export function chdbTools(opts?: ChdbToolsOptions): ChdbToolset
+/** Just the read-only run_select_query tool (carries the same close()). */
+export function chdbQueryTool(opts?: ChdbToolsOptions): ChdbAgentTool & { close(): void }
 export default chdbTools

@@ -3,10 +3,20 @@ import { Session } from '../../../index.js'
 // @ts-ignore - .mjs adapter has a sibling .d.mts; vitest resolves the runtime file
 import { chdbTools, chdbQueryTool } from '../../../integrations/ai-sdk.mjs'
 
-// The Vercel AI SDK adapter wraps the shared executors: a schema-aware toolset
-// (query / listTables / describeSource) with engine-level read-only by default.
+// The Vercel AI SDK adapter exposes the canonical CONTRACT.md toolset as thin
+// wrappers over ChDBTool.call() — each execute() resolves to the dispatch
+// envelope ({ ok, result } | { ok, error }).
 
 const callOpts = { toolCallId: 't', messages: [] }
+const CANON = [
+  'attach_file',
+  'describe_table',
+  'get_sample_data',
+  'list_databases',
+  'list_functions',
+  'list_tables',
+  'run_select_query',
+]
 let db: Session
 
 beforeEach(() => {
@@ -16,45 +26,48 @@ beforeEach(() => {
 })
 
 describe('chdb/ai-sdk', () => {
-  it('exposes a three-tool toolset', () => {
+  it('exposes the canonical contract toolset', () => {
     const tools = chdbTools({ session: db })
-    expect(Object.keys(tools).sort()).toEqual(['chdbDescribeSource', 'chdbListTables', 'chdbQuery'])
+    expect(Object.keys(tools).sort()).toEqual(CANON)
     for (const t of Object.values(tools) as any[]) expect(typeof t.execute).toBe('function')
   })
 
-  it('chdbQuery runs SQL and returns rows', async () => {
-    const { chdbQuery } = chdbTools({ session: db }) as any
-    const out = await chdbQuery.execute({ sql: 'SELECT id, name FROM t ORDER BY id' }, callOpts)
-    expect(out.error).toBeUndefined()
-    expect(out.rowCount).toBe(2)
-    expect(out.rows).toEqual([
-      { id: 1, name: 'Alice' },
-      { id: 2, name: 'Bob' },
+  it('run_select_query binds params and returns an ok envelope', async () => {
+    const { run_select_query } = chdbTools({ session: db }) as any
+    const out = await run_select_query.execute(
+      { sql: 'SELECT id, name FROM t WHERE id >= {min:UInt64} ORDER BY id', params: { min: 1 } },
+      callOpts,
+    )
+    expect(out.ok).toBe(true)
+    expect(out.result.rowCount).toBe(2)
+    // 64-bit ints come back exact (quoted), per the contract's silent-conversion policy.
+    expect(out.result.rows).toEqual([
+      { id: '1', name: 'Alice' },
+      { id: '2', name: 'Bob' },
     ])
   })
 
-  it('chdbListTables and chdbDescribeSource expose the schema', async () => {
-    const { chdbListTables, chdbDescribeSource } = chdbTools({ session: db }) as any
-    const tables = await chdbListTables.execute({}, callOpts)
-    expect(tables.tables).toContain('t')
-    const desc = await chdbDescribeSource.execute({ source: 't' }, callOpts)
-    expect(desc.columns).toEqual([
-      { name: 'id', type: 'UInt64' },
-      { name: 'name', type: 'String' },
-    ])
+  it('list_tables and describe_table expose the schema', async () => {
+    const { list_tables, describe_table } = chdbTools({ session: db }) as any
+    const tables = await list_tables.execute({}, callOpts)
+    expect(tables.ok).toBe(true)
+    expect(tables.result).toContain('t')
+    const desc = await describe_table.execute({ target: 't' }, callOpts)
+    expect(desc.ok).toBe(true)
+    expect(desc.result.map((c: any) => c.name)).toEqual(['id', 'name'])
   })
 
-  it('is read-only by default — a write is rejected by the engine', async () => {
-    const { chdbQuery } = chdbTools({ session: db }) as any
-    const out = await chdbQuery.execute({ sql: "INSERT INTO t VALUES (3, 'Eve')" }, callOpts)
-    expect(out.rows).toEqual([])
-    expect(out.error).toMatch(/readonly|read-only|Cannot/i)
+  it('is read-only by default — a write returns a READONLY error envelope', async () => {
+    const { run_select_query } = chdbTools({ session: db }) as any
+    const out = await run_select_query.execute({ sql: "INSERT INTO t VALUES (3, 'Eve')" }, callOpts)
+    expect(out.ok).toBe(false)
+    expect(out.error.type).toBe('READONLY')
   })
 
-  it('returns the engine error instead of throwing', async () => {
+  it('surfaces the engine error in the envelope instead of throwing', async () => {
     const tool = chdbQueryTool({ session: db }) as any
     const out = await tool.execute({ sql: 'SELECT * FROM does_not_exist' }, callOpts)
-    expect(out.rows).toEqual([])
-    expect(typeof out.error).toBe('string')
+    expect(out.ok).toBe(false)
+    expect(typeof out.error.message).toBe('string')
   })
 })
