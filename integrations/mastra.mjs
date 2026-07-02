@@ -6,69 +6,58 @@
 //   const agent = new Agent({ name: 'analyst', model, tools: chdbTools({ session: db }) })
 //   const store = new ChDBVector({ session: db })   // RAG vector store (HNSW index)
 //
+// The tools are the canonical chDB agent surface defined in
+// integrations/agents/CONTRACT.md — run_select_query, list_databases,
+// list_tables, describe_table, get_sample_data, list_functions, attach_file —
+// each a thin wrapper that delegates to ChDBTool.call(), so behavior is identical
+// to the AI SDK adapter and to the Python reference (chdb.agents.ChDBTool).
+//
 // `@mastra/core` and `zod` are optional peer dependencies — install them in your app.
 
 import { createTool } from '@mastra/core/tools'
-import { z } from 'zod'
-import {
-  createChdbExecutor,
-  CHDB_QUERY_DESCRIPTION,
-  CHDB_LIST_TABLES_DESCRIPTION,
-  CHDB_DESCRIBE_DESCRIPTION,
-  CHDB_SQL_FIELD_DESCRIPTION,
-  CHDB_SOURCE_FIELD_DESCRIPTION,
-} from './chdb-tool-core.mjs'
+import { ChDBTool } from './agents/tool.mjs'
+import { AGENT_TOOL_DESCRIPTORS, resolveTool } from './agents/framework.mjs'
 
 export { ChDBVector } from './chdb-vector.mjs'
 export { ChDBStore } from './chdb-store.mjs'
-
-const rowsOutput = z.object({
-  rows: z.array(z.record(z.string(), z.any())),
-  rowCount: z.number(),
-  truncated: z.boolean(),
-  error: z.string().optional(),
-})
+export { ChDBTool } from './agents/tool.mjs'
+export {
+  ChDBError,
+  ChDBReadOnlyError,
+  ChDBSyntaxError,
+  ChDBUnknownObjectError,
+} from './agents/errors.mjs'
 
 // Mastra passes inputs under `.context`; fall back to the bare object for older versions.
-const field = (input, name) => (input && input.context && input.context[name]) ?? (input && input[name])
+const inputArgs = (input) => (input && input.context) || input || {}
 
 /**
- * A schema-aware chDB toolset for Mastra agents (discover → inspect → read-only query).
- * @param {{ session?: object, allowWrite?: boolean, maxRows?: number }} [opts]
+ * The canonical chDB agent toolset for Mastra agents: run_select_query,
+ * list_databases, list_tables, describe_table, get_sample_data, list_functions,
+ * attach_file. Each tool resolves to the contract's dispatch envelope
+ * ({ ok, result } | { ok, error }), so the model reads engine errors and
+ * self-corrects (P4).
+ * @param {{ session?: object, readOnly?: boolean, allowWrite?: boolean, maxRows?: number,
+ *   maxBytes?: number, maxExecutionTime?: number|null, fileAllowlist?: string[]|null,
+ *   attachments?: object|null, path?: string, tool?: ChDBTool }} [opts]
  */
 export function chdbTools(opts = {}) {
-  const ex = createChdbExecutor(opts)
-  return {
-    chdbQuery: createTool({
-      id: 'chdb-query',
-      description: CHDB_QUERY_DESCRIPTION,
-      inputSchema: z.object({ sql: z.string().describe(CHDB_SQL_FIELD_DESCRIPTION) }),
-      outputSchema: rowsOutput,
-      execute: async (input) => ex.query(field(input, 'sql')),
-    }),
-    chdbListTables: createTool({
-      id: 'chdb-list-tables',
-      description: CHDB_LIST_TABLES_DESCRIPTION,
-      inputSchema: z.object({}),
-      outputSchema: z.object({ tables: z.array(z.string()), error: z.string().optional() }),
-      execute: async () => ex.listTables(),
-    }),
-    chdbDescribeSource: createTool({
-      id: 'chdb-describe-source',
-      description: CHDB_DESCRIBE_DESCRIPTION,
-      inputSchema: z.object({ source: z.string().describe(CHDB_SOURCE_FIELD_DESCRIPTION) }),
-      outputSchema: z.object({
-        columns: z.array(z.object({ name: z.string(), type: z.string() })),
-        error: z.string().optional(),
-      }),
-      execute: async (input) => ex.describeSource(field(input, 'source')),
-    }),
+  const t = resolveTool(opts)
+  const tools = {}
+  for (const d of AGENT_TOOL_DESCRIPTORS) {
+    tools[d.name] = createTool({
+      id: d.id,
+      description: d.description,
+      inputSchema: d.schema,
+      execute: async (input) => t.call(d.name, inputArgs(input)),
+    })
   }
+  return tools
 }
 
-/** Just the query tool, for when you only want one. */
+/** Just the read-only query tool, for when you only want one. */
 export function chdbQueryTool(opts = {}) {
-  return chdbTools(opts).chdbQuery
+  return chdbTools(opts).run_select_query
 }
 
 export default chdbTools

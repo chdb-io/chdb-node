@@ -18,6 +18,10 @@
       "require": "./dist/connection/index.js",
       "default": "./dist/connection/index.js"
     },
+    "./agents": {
+      "types": "./integrations/agents/index.d.mts",
+      "import": "./integrations/agents/index.mjs"
+    },
     "./ai-sdk": {
       "types": "./integrations/ai-sdk.d.mts",
       "import": "./integrations/ai-sdk.mjs"
