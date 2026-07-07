@@ -84,6 +84,19 @@ describe('descriptors as the single source (CONTRACT.md)', () => {
     }
   })
 
+  it('loadDescriptors returns a defensive copy', () => {
+    // a caller mutating the result must not corrupt what toolSpecs()/
+    // capabilities()/AGENT_TOOL_DESCRIPTORS generate for everyone else
+    const d = loadDescriptors() as any
+    d.contract_version = '9.9.9'
+    d.tools[0].name = 'mutated'
+    d.tools[0].params.length = 0
+    const fresh = loadDescriptors() as any
+    expect(fresh.contract_version).toBe(CONTRACT_VERSION)
+    expect(fresh.tools[0].name).toBe('run_select_query')
+    expect((toolSpecs('anthropic') as any)[0].input_schema.required).toEqual(['sql'])
+  })
+
   it('reports capabilities keyed to the contract version', () => {
     const caps = capabilities()
     expect(caps.contract_version).toBe(CONTRACT_VERSION)
@@ -136,6 +149,21 @@ describe('argument validation (CONTRACT.md P3)', () => {
       const out: any = await t.call('get_sample_data', { target: 'numbers(100)', limit: null })
       expect(out.ok).toBe(true)
       expect(out.result.rowCount).toBe(5)
+    } finally {
+      t.close()
+    }
+  })
+
+  it('call() returns an envelope for a non-object arguments payload', async () => {
+    // the dispatch path never throws for caller mistakes: without this guard a
+    // string would spread into {0: 'S', 1: 'E', ...} garbage and run anyway
+    const t = new ChDBTool({ readOnly: true })
+    try {
+      for (const bad of ['SELECT 1', 42, ['sql']]) {
+        const out: any = await t.call('run_select_query', bad as any)
+        expect(out.ok).toBe(false)
+        expect(out.error.type).toBe('INVALID_ARGUMENT')
+      }
     } finally {
       t.close()
     }

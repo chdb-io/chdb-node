@@ -25,9 +25,19 @@ const records = readFileSync(resolve(CONF, 'cases.jsonl'), 'utf8')
   .map((l) => l.trim())
   .filter(Boolean)
   .map((l) => JSON.parse(l))
-// The first record without an "id" is the fixture header; everything else is a case.
-const header = records.find((r) => r.id === undefined)
-const cases = records.filter((r) => r.id !== undefined)
+// The FIRST record must be the fixture header (no "id") and every later record
+// must be a case (with "id") — anything else is a malformed fixture and fails
+// loudly instead of being silently reclassified (a case that lost its "id"
+// must not vanish by being mistaken for a second header).
+const [header, ...cases] = records
+if (!header || header.id !== undefined) {
+  throw new Error('cases.jsonl must start with a header record (no "id")')
+}
+for (const r of cases) {
+  if (r.id === undefined) {
+    throw new Error('cases.jsonl has a non-header record without an "id": ' + JSON.stringify(r))
+  }
+}
 
 // Replace the {{fixtures}} token in any string, recursively through objects.
 function sub(v: any): any {

@@ -25,16 +25,42 @@ export const CONTRACT_VERSION = '0.2.0'
 const DESCRIPTORS_PATH = join(dirname(fileURLToPath(import.meta.url)), 'descriptors.json')
 let cache = null
 
-/** Return the parsed descriptors.json (cached after the first read). */
+/**
+ * Return the parsed descriptors.json (the file is read once and cached; each
+ * call returns a deep copy, so a caller mutating the result cannot corrupt
+ * what toolSpecs()/capabilities()/AGENT_TOOL_DESCRIPTORS generate for everyone
+ * else in-process).
+ */
 export function loadDescriptors() {
-  if (cache == null) cache = JSON.parse(readFileSync(DESCRIPTORS_PATH, 'utf8'))
-  return cache
+  if (cache == null) {
+    try {
+      cache = JSON.parse(readFileSync(DESCRIPTORS_PATH, 'utf8'))
+    } catch (e) {
+      // A missing/broken descriptors.json takes down every toolSpecs()/
+      // capabilities()/adapter path — surface it as a diagnosable typed error
+      // instead of a raw fs error or SyntaxError.
+      throw new ChDBError(
+        `cannot load agent tool descriptors from ${DESCRIPTORS_PATH}: ${(e && e.message) || e}`,
+      )
+    }
+  }
+  return structuredClone(cache)
 }
+
+// The param types descriptors.json may declare. An unknown type must fail
+// loudly: silently rendering it as a permissive schema would degrade the
+// model-visible argument contract without any signal.
+const PARAM_TYPES = new Set(['string', 'integer', 'object'])
 
 function jsonSchema(params) {
   const properties = {}
   const required = []
   for (const p of params) {
+    if (!PARAM_TYPES.has(p.type)) {
+      throw new ChDBError(
+        `unknown descriptor param type ${JSON.stringify(p.type)} for ${JSON.stringify(p.name)} (expected one of ${[...PARAM_TYPES].join(', ')})`,
+      )
+    }
     const prop = { type: p.type }
     if (p.description) prop.description = p.description
     properties[p.name] = prop

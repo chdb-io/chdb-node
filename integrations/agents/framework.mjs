@@ -7,6 +7,7 @@
 
 import { z } from 'zod'
 import { loadDescriptors } from './descriptors.mjs'
+import { ChDBError } from './errors.mjs'
 import { ChDBTool } from './tool.mjs'
 
 /**
@@ -45,7 +46,14 @@ function zodParam(p) {
   let t
   if (p.type === 'string') t = z.string()
   else if (p.type === 'integer') t = z.number().int()
-  else t = z.record(z.string(), z.any())
+  else if (p.type === 'object') t = z.record(z.string(), z.any())
+  else {
+    // an unknown type must fail loudly, not render as a permissive schema
+    // that silently degrades the model-visible argument contract
+    throw new ChDBError(
+      `unknown descriptor param type ${JSON.stringify(p.type)} for ${JSON.stringify(p.name)}`,
+    )
+  }
   if (p.description) t = t.describe(p.description)
   return p.required ? t : t.optional()
 }

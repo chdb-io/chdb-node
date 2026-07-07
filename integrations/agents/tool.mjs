@@ -342,11 +342,25 @@ export class ChDBTool {
    * @returns {Promise<{ok: true, result: any} | {ok: false, error: {code:number, type:string, message:string}}>}
    */
   async call(name, args = {}) {
-    const a = { ...(args || {}) }
     const methodName = TOOL_METHODS[name]
     if (!methodName) {
       return { ok: false, error: { code: 0, type: 'UNKNOWN_TOOL', message: 'unknown tool: ' + name } }
     }
+    // Caller mistakes on the dispatch path never throw (P4): a non-object
+    // arguments payload comes back as an envelope, same as an unknown tool.
+    // (Spreading a string would silently produce {0: 'S', 1: 'E', ...} garbage,
+    // and the Python reference would raise on dict("...").)
+    if (args != null && (typeof args !== 'object' || Array.isArray(args))) {
+      return {
+        ok: false,
+        error: {
+          code: 0,
+          type: 'INVALID_ARGUMENT',
+          message: 'arguments must be an object, got ' + (Array.isArray(args) ? 'array' : typeof args),
+        },
+      }
+    }
+    const a = { ...(args || {}) }
     try {
       let result
       if (methodName === 'query') {
