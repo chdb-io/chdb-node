@@ -6,6 +6,8 @@ import { dirname, resolve } from 'node:path'
 import { ChDBTool } from '../../../integrations/agents/tool.mjs'
 // @ts-ignore
 import { ChDBError } from '../../../integrations/agents/errors.mjs'
+// @ts-ignore
+import { CONTRACT_VERSION, capabilities } from '../../../integrations/agents/descriptors.mjs'
 
 // Runs the language-neutral agent-tool conformance fixture
 // (integrations/agents/conformance/cases.jsonl) against ChDBTool. This is the
@@ -18,11 +20,14 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const CONF = resolve(HERE, '../../../integrations/agents/conformance')
 const FIXTURES = resolve(CONF, 'fixtures')
 
-const cases = readFileSync(resolve(CONF, 'cases.jsonl'), 'utf8')
+const records = readFileSync(resolve(CONF, 'cases.jsonl'), 'utf8')
   .split('\n')
   .map((l) => l.trim())
   .filter(Boolean)
   .map((l) => JSON.parse(l))
+// The first record without an "id" is the fixture header; everything else is a case.
+const header = records.find((r) => r.id === undefined)
+const cases = records.filter((r) => r.id !== undefined)
 
 // Replace the {{fixtures}} token in any string, recursively through objects.
 function sub(v: any): any {
@@ -73,7 +78,15 @@ async function invoke(tool: any, c: any): Promise<any> {
 describe('agents conformance (CONTRACT.md / cases.jsonl)', () => {
   expect(cases.length).toBeGreaterThan(0)
 
+  it('fixture header matches this binding contract version', () => {
+    expect(header, 'cases.jsonl must start with a header record').toBeDefined()
+    expect(header.contract_version).toBe(CONTRACT_VERSION)
+  })
+
+  const features = capabilities().features
   for (const c of cases) {
+    // capability-gated cases run only where the binding has the feature
+    if (c.requires && !features[c.requires]) continue
     it(`${c.id} [${c.pillar}]`, async () => {
       // A case may declare its own tool config; otherwise use a read-only tool.
       const tool = c.tool ? toolFrom(c.tool) : new ChDBTool({ readOnly: true })

@@ -6,6 +6,7 @@
 // 'chdb/ai-sdk' and 'chdb/mastra', which are built on top of this.
 
 export { ChDBTool, QueryResult } from './tool.mjs'
+export { CONTRACT_VERSION, capabilities, loadDescriptors, toolSpecs } from './descriptors.mjs'
 export {
   ChDBError,
   ChDBReadOnlyError,

@@ -72,7 +72,7 @@ export class ChDBTool {
   getSampleData(target: string, opts?: { database?: string | null; limit?: number }): Promise<QueryResult>
   listFunctions(opts?: { like?: string | null; limit?: number }): Promise<string[]>
   attachFile(name: string, path: string, format?: string | null): Promise<string>
-  toolSpecs(): Array<{ name: string; description: string; input_schema: object }>
+  toolSpecs(dialect?: import('./descriptors.mjs').ToolSpecDialect): object[]
   call(name: string, args?: Record<string, unknown>): Promise<ToolEnvelope>
   close(): void
 }
