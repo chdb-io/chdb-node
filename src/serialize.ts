@@ -218,15 +218,20 @@ function serializeArray(arr: ReadonlyArray<unknown>): string {
  * Because the engine binds the value (never interpolates it into SQL), there is
  * no escaping/injection surface here at all.
  *
- * @throws ChdbBindError on null/undefined (use a typed NULL in SQL instead),
- *   non-finite or unsafe-integer numbers, invalid Dates, or unsupported types.
+ * A top-level `null`/`undefined` becomes the TSV null marker `\N`, byte-for-byte
+ * matching @clickhouse/client-common's `formatQueryParams` (which emits `\N`
+ * when `printNullAsKeyword` is false — the default at the top level). The engine
+ * binds `\N` as SQL NULL for a Nullable placeholder (verified against
+ * Nullable(String) and Nullable(Int64)); binding it to a non-Nullable
+ * placeholder is rejected by the ENGINE, exactly as the HTTP client + server
+ * would. A `null` NESTED inside an Array/Map keeps the `NULL` keyword form (see
+ * serializeValue) — again matching the reference client.
+ *
+ * @throws ChdbBindError on non-finite or unsafe-integer numbers, invalid Dates,
+ *   or unsupported types.
  */
 export function formatParamValue(value: unknown): string {
-  if (value === null || value === undefined) {
-    throw new ChdbBindError(
-      'null/undefined parameter values are not supported; omit the parameter or use a typed NULL in SQL',
-    )
-  }
+  if (value === null || value === undefined) return '\\N'
   if (typeof value === 'string') return tsvEscape(value) // TSV/Escaped — engine binds as declared type
   if (value instanceof Date) return formatDateTimeUTC(value) // 'YYYY-MM-DD HH:MM:SS' (no TSV-special chars)
   // numbers / bigint / boolean / Array / TypedArray / Map / object: the

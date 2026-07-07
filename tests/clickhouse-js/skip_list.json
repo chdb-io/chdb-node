@@ -254,16 +254,6 @@
     },
     {
       "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
-      "test": "select with query binding > NULL parameter binding > should work with nulls",
-      "reason": "chdb's `queryBindAsync` NULL substitution diverges from the server's `param_*` URL-binding semantics (server-side strict-NULL handling)."
-    },
-    {
-      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
-      "test": "select with query binding > NULL parameter binding > should with an explicit undefined",
-      "reason": "Same chdb NULL/undefined parameter-binding divergence."
-    },
-    {
-      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
       "test": "select with query binding > Nested boolean types > handles boolean in a tuple",
       "reason": "Boolean inside Tuple parameter binding hits the same Tuple-serialization divergence above."
     },
