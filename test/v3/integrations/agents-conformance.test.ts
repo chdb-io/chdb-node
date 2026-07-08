@@ -39,10 +39,12 @@ for (const r of cases) {
   }
 }
 
-// Replace the {{fixtures}} token in any string, recursively through objects.
+// Replace the {{fixtures}} token in any string, recursively through objects
+// and arrays (tool configs carry arrays, e.g. file_allowlist).
 function sub(v: any): any {
   if (typeof v === 'string') return v.replaceAll('{{fixtures}}', FIXTURES)
-  if (v && typeof v === 'object' && !Array.isArray(v)) {
+  if (Array.isArray(v)) return v.map(sub)
+  if (v && typeof v === 'object') {
     const out: any = {}
     for (const [k, val] of Object.entries(v)) out[k] = sub(val)
     return out

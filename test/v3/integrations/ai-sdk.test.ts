@@ -23,6 +23,9 @@ beforeEach(() => {
   db = new Session()
   db.query(`CREATE TABLE t (id UInt64, name String) ENGINE = MergeTree ORDER BY id`)
   db.query(`INSERT INTO t VALUES (1, 'Alice'), (2, 'Bob')`)
+  // A caller-provided session must already match the declared mode: the tool
+  // probes readonly instead of mutating the shared session (CONTRACT.md P1).
+  db.query('SET readonly=2')
 })
 
 describe('chdb/ai-sdk', () => {

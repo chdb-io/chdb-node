@@ -38,11 +38,32 @@ describe('ChDBTool resource lifetime', () => {
 
   it('does not close a caller-provided session', async () => {
     const s = new Session('')
-    const t = new ChDBTool({ session: s })
+    // a fresh session is readonly=0, so the matching declaration is readOnly:false
+    const t = new ChDBTool({ session: s, readOnly: false })
     t.close() // must be a no-op on a session we do not own
     // the caller's session is still usable
     expect((await s.queryAsync('SELECT 1 AS x', { format: 'JSON' })).json().data).toEqual([{ x: 1 }])
     s.close()
+  })
+
+  it('refuses a caller-provided session whose readonly conflicts with the declared mode', () => {
+    const s = new Session('')
+    try {
+      // fresh session readonly=0 vs default readOnly:true — must NOT silently
+      // SET readonly=2 on the caller's session (irreversible); must refuse
+      let err: any
+      try {
+        new ChDBTool({ session: s })
+      } catch (e) {
+        err = e
+      }
+      expect(err).toBeInstanceOf(ChDBError)
+      expect(err.type).toBe('CONFIG_MISMATCH')
+      // the probe did not lock the session: it is still writable
+      expect(() => s.query('CREATE TABLE probe_check (a Int32) ENGINE = Memory')).not.toThrow()
+    } finally {
+      s.close()
+    }
   })
 })
 
@@ -173,7 +194,7 @@ describe('argument validation (CONTRACT.md P3)', () => {
 describe('adapter toolset close()', () => {
   it('exposes a non-enumerable close() that is not treated as a tool', () => {
     const s = new Session('')
-    const tools = chdbTools({ session: s }) as any
+    const tools = chdbTools({ session: s, allowWrite: true }) as any
     // close must not show up among the enumerated tools
     expect(Object.keys(tools)).toHaveLength(7)
     expect(Object.prototype.propertyIsEnumerable.call(tools, 'close')).toBe(false)

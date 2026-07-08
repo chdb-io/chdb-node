@@ -20,7 +20,13 @@
 import { Session } from '../../index.mjs'
 import { toolSpecs } from './descriptors.mjs'
 import { ChDBError, ChDBReadOnlyError, parseError } from './errors.mjs'
-import { pathAllowed, quoteIdent, quoteString, scanFilePaths } from './safety.mjs'
+import {
+  FALLBACK_KNOWN_TABLE_FUNCTIONS,
+  findSourceCalls,
+  pathAllowed,
+  quoteIdent,
+  quoteString,
+} from './safety.mjs'
 
 // Coerce a numeric argument to an integer, or throw a typed INVALID_ARGUMENT.
 // A non-numeric cap must fail loudly: Number('lots') is NaN, and every NaN
@@ -75,6 +81,7 @@ const TOOL_METHODS = {
 export class ChDBTool {
   #session
   #ownsSession
+  #knownTableFunctions
 
   /**
    * @param {{
@@ -109,10 +116,30 @@ export class ChDBTool {
     this.#session =
       session ?? new Session(path === ':memory:' || path === '' || path == null ? '' : path)
 
-    // If any setup below throws (a bad attachment path, an engine SET error),
-    // the constructor never returns, so a Session we own would otherwise leak
-    // (the caller has no instance to close()). Close it before re-throwing.
+    // If any setup below throws (a readonly mismatch, a bad attachment path,
+    // an engine SET error), the constructor never returns, so a Session we own
+    // would otherwise leak (the caller has no instance to close()). Close it
+    // before re-throwing.
     try {
+      if (!this.#ownsSession) {
+        // An external session's readonly state is probed, never mutated:
+        // SET readonly=2 cannot be lowered again, so silently applying it
+        // would irreversibly lock the caller's shared session (and any other
+        // tool on it); silently skipping it would leave a tool that claims
+        // read-only but isn't. A mismatch fails construction and forces an
+        // explicit choice: let the tool own its session, pass readOnly:false,
+        // or hand in a session already at readonly=2.
+        const expected = this.readOnly ? 2 : 0
+        const actual = this.#probeReadonly()
+        if (actual !== expected) {
+          throw new ChDBError(
+            `external session has readonly=${actual} but the tool was declared ` +
+              `readOnly=${this.readOnly} (expects readonly=${expected}); pass a matching ` +
+              `session, change the readOnly flag, or omit session so the tool owns one`,
+            { type: 'CONFIG_MISMATCH' },
+          )
+        }
+      }
       // Exact 64-bit integers survive JSON as strings rather than lossy floats.
       this.#session.query('SET output_format_json_quote_64bit_integers=1', 'CSV')
       if (this.maxExecutionTime != null) {
@@ -126,12 +153,17 @@ export class ChDBTool {
         const [p, fmt] = Array.isArray(spec) ? spec : [spec, null]
         this.#createFileView(name, p, fmt)
       }
-      if (this.readOnly) {
+      if (this.readOnly && this.#ownsSession) {
         // readonly=2 (NOT 1): blocks INSERT/CREATE/ALTER/DROP while still allowing
         // SELECT and the file()/s3()/url() table functions that are chDB's whole
         // point. readonly=1 rejects those. Cannot be un-set.
+        // (An external session was verified to be there already.)
         this.#session.query('SET readonly=2', 'CSV')
       }
+      // The allowlist gate judges table functions against what THIS engine
+      // exposes, so new source functions are gated by default instead of
+      // silently allowed by a stale hand-written list.
+      this.#knownTableFunctions = this.fileAllowlist ? this.#snapshotTableFunctions() : null
     } catch (e) {
       if (this.#ownsSession && this.#session) {
         try {
@@ -142,6 +174,29 @@ export class ChDBTool {
         this.#session = null
       }
       throw e
+    }
+  }
+
+  #probeReadonly() {
+    try {
+      return parseInt(String(this.#session.query("SELECT toInt32(getSetting('readonly'))", 'CSV')).trim(), 10)
+    } catch (e) {
+      if (e instanceof ChDBError) throw e
+      throw parseError(e)
+    }
+  }
+
+  // The live set of table-function names (lowercase), unioned with the static
+  // fallback; the fallback alone if the engine can't answer.
+  #snapshotTableFunctions() {
+    try {
+      const names = String(this.#session.query('SELECT lower(name) FROM system.table_functions', 'CSV'))
+        .split('\n')
+        .map((l) => l.trim().replace(/^"|"$/g, ''))
+        .filter(Boolean)
+      return new Set([...names, ...FALLBACK_KNOWN_TABLE_FUNCTIONS])
+    } catch {
+      return FALLBACK_KNOWN_TABLE_FUNCTIONS
     }
   }
 
@@ -197,11 +252,26 @@ export class ChDBTool {
     return new QueryResult(rows, truncated, cols, stats.elapsed ?? null, stats.bytes_read ?? null)
   }
 
+  // With a fileAllowlist set, every non-safe table-function call in the SQL
+  // must carry a literal source argument inside the allowlist. The scan runs
+  // over masked SQL (string literals/comments blanked, quoted function names
+  // matched), against the table functions this engine actually exposes — so a
+  // call with a computed/concatenated source, or any external source function
+  // outside the allowlist, is rejected rather than slipping through a
+  // literal-only regex. readonly=2 remains the write backstop; OS sandboxing
+  // the filesystem backstop. No allowlist configured -> no restriction.
   #enforceAllowlist(sql) {
     if (!this.fileAllowlist) return
-    for (const [, path] of scanFilePaths(sql)) {
-      if (!pathAllowed(path, this.fileAllowlist)) {
-        throw new ChDBError(`source path not in file_allowlist: ${JSON.stringify(path)}`, {
+    const known = this.#knownTableFunctions || FALLBACK_KNOWN_TABLE_FUNCTIONS
+    for (const [fn, arg] of findSourceCalls(sql, known)) {
+      if (arg === null) {
+        throw new ChDBError(
+          `table function ${JSON.stringify(fn)} without a literal source argument is not allowed when file_allowlist is set`,
+          { type: 'ACCESS_DENIED' },
+        )
+      }
+      if (!pathAllowed(arg, this.fileAllowlist)) {
+        throw new ChDBError(`source path not in file_allowlist: ${JSON.stringify(arg)}`, {
           type: 'ACCESS_DENIED',
         })
       }

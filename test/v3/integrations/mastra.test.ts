@@ -25,12 +25,16 @@ beforeEach(() => {
 
 describe('chdb/mastra', () => {
   it('builds the canonical toolset with createTool ids', () => {
+    // caller-provided sessions must already match the declared read-only mode
+    db.query('SET readonly=2')
     const tools = chdbTools({ session: db }) as any
     expect(Object.keys(tools).sort()).toEqual(CANON)
     expect(tools.run_select_query.id).toBe('chdb-run-select-query')
   })
 
   it('run_select_query executes and returns an ok envelope', async () => {
+    // caller-provided sessions must already match the declared read-only mode
+    db.query('SET readonly=2')
     const { run_select_query } = chdbTools({ session: db }) as any
     const out = await run_select_query.execute({ sql: 'SELECT id, name FROM t' })
     expect(out.ok).toBe(true)
@@ -47,6 +51,8 @@ describe('chdb/mastra', () => {
   })
 
   it('chdbQueryTool returns a single tool', () => {
+    // caller-provided sessions must already match the declared read-only mode
+    db.query('SET readonly=2')
     expect(chdbQueryTool({ session: db }).id).toBe('chdb-run-select-query')
   })
 
