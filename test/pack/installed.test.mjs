@@ -13,6 +13,9 @@
 
 import { describe, it, expect } from 'vitest'
 import { query, queryAsync, Session, version } from 'chdb'
+// The Layer 3 fluent surface (registerArrowTable / selectFrom / chTable) is
+// reached through the default export in ESM — see the index.mjs comment.
+import chdb from 'chdb'
 
 // Run cases sequentially. The suite mixes the standalone default connection
 // (`version()`, `query()`, `queryAsync()`) with a `Session` that binds its
@@ -35,6 +38,30 @@ describe.sequential('installed chdb package', () => {
   it('runs an async query and parses rows', async () => {
     const r = await queryAsync("SELECT number FROM numbers(3)", { format: 'JSONEachRow' })
     expect(r.text().trim().split('\n')).toHaveLength(3)
+  })
+
+  it('round-trips Arrow C Data Interface input (native ArrowRegisterColumns)', async () => {
+    // Guards the addon's export surface, not just its loadability: the
+    // installed binary comes from the @chdb/lib-* subpackage, which is
+    // versioned independently of this package — a stale subpackage loads
+    // and queries fine but lacks the Arrow registration natives.
+    const t = chdb.registerArrowTable('installed_arrow', [
+      { name: 'id', type: 'Int32', data: new Int32Array([1, 2, 3]) },
+      { name: 'tag', type: 'String', data: ['a', 'b', 'c'] },
+    ])
+    try {
+      const rows = await chdb.selectFrom(chdb.chTable.arrowstream('installed_arrow').as('t'))
+        .select(['id', 'tag'])
+        .orderBy('id')
+        .execute()
+      expect(rows).toEqual([
+        { id: 1, tag: 'a' },
+        { id: 2, tag: 'b' },
+        { id: 3, tag: 'c' },
+      ])
+    } finally {
+      t.close()
+    }
   })
 
   it('creates a Session and round-trips an insert + query + stream', async () => {
