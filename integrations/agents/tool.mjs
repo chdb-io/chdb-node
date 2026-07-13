@@ -18,8 +18,30 @@
 // outside the cross-language base (see CONTRACT.md).
 
 import { Session } from '../../index.mjs'
+import { toolSpecs } from './descriptors.mjs'
 import { ChDBError, ChDBReadOnlyError, parseError } from './errors.mjs'
-import { pathAllowed, quoteIdent, quoteString, scanFilePaths } from './safety.mjs'
+import {
+  FALLBACK_KNOWN_TABLE_FUNCTIONS,
+  findSourceCalls,
+  pathAllowed,
+  quoteIdent,
+  quoteString,
+} from './safety.mjs'
+
+// Coerce a numeric argument to an integer, or throw a typed INVALID_ARGUMENT.
+// A non-numeric cap must fail loudly: Number('lots') is NaN, and every NaN
+// comparison is false, so before this guard a garbage maxRows silently
+// disabled the result cap (the Python reference raises instead — same
+// behavior now, per CONTRACT.md).
+function intArg(value, name) {
+  const n = Math.floor(Number(value))
+  if (value == null || value === '' || !Number.isFinite(n)) {
+    throw new ChDBError(`${name} must be an integer, got ${JSON.stringify(value)}`, {
+      type: 'INVALID_ARGUMENT',
+    })
+  }
+  return n
+}
 
 /** Result of a query: decoded rows plus honest truncation / stat metadata. */
 export class QueryResult {
@@ -59,6 +81,7 @@ const TOOL_METHODS = {
 export class ChDBTool {
   #session
   #ownsSession
+  #knownTableFunctions
 
   /**
    * @param {{
@@ -81,10 +104,10 @@ export class ChDBTool {
     } = opts
 
     this.readOnly = Boolean(readOnly)
-    this.maxRows = Math.max(1, Math.floor(Number(maxRows) || 1000))
-    this.maxBytes = Math.max(1, Math.floor(Number(maxBytes) || 1_000_000))
+    this.maxRows = Math.max(1, intArg(maxRows, 'maxRows'))
+    this.maxBytes = Math.max(1, intArg(maxBytes, 'maxBytes'))
     this.maxExecutionTime =
-      maxExecutionTime == null ? null : Math.max(0, Math.floor(Number(maxExecutionTime)))
+      maxExecutionTime == null ? null : Math.max(0, intArg(maxExecutionTime, 'maxExecutionTime'))
     // null = no allowlist (all paths allowed); a list = only these prefixes.
     this.fileAllowlist = fileAllowlist && fileAllowlist.length ? [...fileAllowlist] : null
 
@@ -93,10 +116,30 @@ export class ChDBTool {
     this.#session =
       session ?? new Session(path === ':memory:' || path === '' || path == null ? '' : path)
 
-    // If any setup below throws (a bad attachment path, an engine SET error),
-    // the constructor never returns, so a Session we own would otherwise leak
-    // (the caller has no instance to close()). Close it before re-throwing.
+    // If any setup below throws (a readonly mismatch, a bad attachment path,
+    // an engine SET error), the constructor never returns, so a Session we own
+    // would otherwise leak (the caller has no instance to close()). Close it
+    // before re-throwing.
     try {
+      if (!this.#ownsSession) {
+        // An external session's readonly state is probed, never mutated:
+        // SET readonly=2 cannot be lowered again, so silently applying it
+        // would irreversibly lock the caller's shared session (and any other
+        // tool on it); silently skipping it would leave a tool that claims
+        // read-only but isn't. A mismatch fails construction and forces an
+        // explicit choice: let the tool own its session, pass readOnly:false,
+        // or hand in a session already at readonly=2.
+        const expected = this.readOnly ? 2 : 0
+        const actual = this.#probeReadonly()
+        if (actual !== expected) {
+          throw new ChDBError(
+            `external session has readonly=${actual} but the tool was declared ` +
+              `readOnly=${this.readOnly} (expects readonly=${expected}); pass a matching ` +
+              `session, change the readOnly flag, or omit session so the tool owns one`,
+            { type: 'CONFIG_MISMATCH' },
+          )
+        }
+      }
       // Exact 64-bit integers survive JSON as strings rather than lossy floats.
       this.#session.query('SET output_format_json_quote_64bit_integers=1', 'CSV')
       if (this.maxExecutionTime != null) {
@@ -110,12 +153,17 @@ export class ChDBTool {
         const [p, fmt] = Array.isArray(spec) ? spec : [spec, null]
         this.#createFileView(name, p, fmt)
       }
-      if (this.readOnly) {
+      if (this.readOnly && this.#ownsSession) {
         // readonly=2 (NOT 1): blocks INSERT/CREATE/ALTER/DROP while still allowing
         // SELECT and the file()/s3()/url() table functions that are chDB's whole
         // point. readonly=1 rejects those. Cannot be un-set.
+        // (An external session was verified to be there already.)
         this.#session.query('SET readonly=2', 'CSV')
       }
+      // The allowlist gate judges table functions against what THIS engine
+      // exposes, so new source functions are gated by default instead of
+      // silently allowed by a stale hand-written list.
+      this.#knownTableFunctions = this.fileAllowlist ? this.#snapshotTableFunctions() : null
     } catch (e) {
       if (this.#ownsSession && this.#session) {
         try {
@@ -126,6 +174,29 @@ export class ChDBTool {
         this.#session = null
       }
       throw e
+    }
+  }
+
+  #probeReadonly() {
+    try {
+      return parseInt(String(this.#session.query("SELECT toInt32(getSetting('readonly'))", 'CSV')).trim(), 10)
+    } catch (e) {
+      if (e instanceof ChDBError) throw e
+      throw parseError(e)
+    }
+  }
+
+  // The live set of table-function names (lowercase), unioned with the static
+  // fallback; the fallback alone if the engine can't answer.
+  #snapshotTableFunctions() {
+    try {
+      const names = String(this.#session.query('SELECT lower(name) FROM system.table_functions', 'CSV'))
+        .split('\n')
+        .map((l) => l.trim().replace(/^"|"$/g, ''))
+        .filter(Boolean)
+      return new Set([...names, ...FALLBACK_KNOWN_TABLE_FUNCTIONS])
+    } catch {
+      return FALLBACK_KNOWN_TABLE_FUNCTIONS
     }
   }
 
@@ -142,7 +213,7 @@ export class ChDBTool {
       throw new ChDBError('sql must be a non-empty string')
     }
     this.#enforceAllowlist(sql)
-    const cap = maxRows == null ? this.maxRows : Math.max(1, Math.floor(Number(maxRows)))
+    const cap = maxRows == null ? this.maxRows : Math.max(1, intArg(maxRows, 'maxRows'))
     let obj
     try {
       const hasParams = params && Object.keys(params).length > 0
@@ -163,10 +234,14 @@ export class ChDBTool {
     let rows = truncated ? data.slice(0, cap) : data
     // Secondary byte guard, applied whether or not the row cap already fired: a
     // few very large rows under maxRows must still be capped by maxBytes.
+    // Rows are measured in UTF-8 BYTES of their compact JSON encoding —
+    // String.length counts UTF-16 units ("汉" = 1) while the Python reference
+    // would count its ASCII-escaped form ("汉" = 6); UTF-8 bytes is the one
+    // measure both bindings can produce identically (CONTRACT.md P3).
     if (this.maxBytes) {
       let size = 0
       for (let i = 0; i < rows.length; i++) {
-        size += JSON.stringify(rows[i]).length
+        size += Buffer.byteLength(JSON.stringify(rows[i]), 'utf8')
         if (size > this.maxBytes) {
           rows = rows.slice(0, i)
           truncated = true
@@ -177,11 +252,26 @@ export class ChDBTool {
     return new QueryResult(rows, truncated, cols, stats.elapsed ?? null, stats.bytes_read ?? null)
   }
 
+  // With a fileAllowlist set, every non-safe table-function call in the SQL
+  // must carry a literal source argument inside the allowlist. The scan runs
+  // over masked SQL (string literals/comments blanked, quoted function names
+  // matched), against the table functions this engine actually exposes — so a
+  // call with a computed/concatenated source, or any external source function
+  // outside the allowlist, is rejected rather than slipping through a
+  // literal-only regex. readonly=2 remains the write backstop; OS sandboxing
+  // the filesystem backstop. No allowlist configured -> no restriction.
   #enforceAllowlist(sql) {
     if (!this.fileAllowlist) return
-    for (const [, path] of scanFilePaths(sql)) {
-      if (!pathAllowed(path, this.fileAllowlist)) {
-        throw new ChDBError(`source path not in file_allowlist: ${JSON.stringify(path)}`, {
+    const known = this.#knownTableFunctions || FALLBACK_KNOWN_TABLE_FUNCTIONS
+    for (const [fn, arg] of findSourceCalls(sql, known)) {
+      if (arg === null) {
+        throw new ChDBError(
+          `table function ${JSON.stringify(fn)} without a literal source argument is not allowed when file_allowlist is set`,
+          { type: 'ACCESS_DENIED' },
+        )
+      }
+      if (!pathAllowed(arg, this.fileAllowlist)) {
+        throw new ChDBError(`source path not in file_allowlist: ${JSON.stringify(arg)}`, {
           type: 'ACCESS_DENIED',
         })
       }
@@ -251,15 +341,20 @@ export class ChDBTool {
   // - otherwise target is a table identifier, backtick-quoted; with `database`
   //   each part is quoted independently as `db`.`table` (a dotted name is never
   //   mis-quoted as one identifier).
+  // `null`/`undefined` mean "not provided"; any other value (including '') is a
+  // real database argument and must be validated — an empty string flows into
+  // quoteIdent() and is rejected rather than silently treated as unqualified
+  // (a falsy check here once made '' skip qualification; the Python reference
+  // rejects it).
   #qualify(target, database = null) {
     if (target.includes('(')) {
-      if (database) {
+      if (database != null) {
         throw new ChDBError('database qualifier is not valid for a table-function target')
       }
       return target
     }
     const ident = quoteIdent(target)
-    return database ? `${quoteIdent(database)}.${ident}` : ident
+    return database != null ? `${quoteIdent(database)}.${ident}` : ident
   }
 
   /**
@@ -279,7 +374,7 @@ export class ChDBTool {
 
   async getSampleData(target, { database = null, limit = 5 } = {}) {
     const ref = this.#qualify(target, database)
-    const n = Math.floor(Number(limit))
+    const n = intArg(limit, 'limit')
     return this.query(`SELECT * FROM ${ref} LIMIT {n:UInt32}`, {
       params: { n },
       maxRows: n,
@@ -287,7 +382,7 @@ export class ChDBTool {
   }
 
   async listFunctions({ like = null, limit = 200 } = {}) {
-    const n = Math.floor(Number(limit))
+    const n = intArg(limit, 'limit')
     let rows
     if (like) {
       const sql =
@@ -302,50 +397,13 @@ export class ChDBTool {
 
   // ---- agent integration ------------------------------------------------
 
-  /** JSON-schema tool definitions for auto-registration into any framework. */
-  toolSpecs() {
-    const s = (properties) => ({ type: 'object', properties })
-    return [
-      {
-        name: 'run_select_query',
-        description: 'Run a read-only ClickHouse SQL query via chDB and return rows.',
-        input_schema: s({ sql: { type: 'string' }, params: { type: 'object' } }),
-      },
-      { name: 'list_databases', description: 'List databases.', input_schema: s({}) },
-      {
-        name: 'list_tables',
-        description: 'List tables in a database (current if omitted).',
-        input_schema: s({ database: { type: 'string' } }),
-      },
-      {
-        name: 'describe_table',
-        description: 'Describe a table (optionally database-qualified) or table function.',
-        input_schema: s({ target: { type: 'string' }, database: { type: 'string' } }),
-      },
-      {
-        name: 'get_sample_data',
-        description: 'Return a few sample rows from a table or table function.',
-        input_schema: s({
-          target: { type: 'string' },
-          database: { type: 'string' },
-          limit: { type: 'integer' },
-        }),
-      },
-      {
-        name: 'list_functions',
-        description: 'List available SQL functions.',
-        input_schema: s({ like: { type: 'string' }, limit: { type: 'integer' } }),
-      },
-      {
-        name: 'attach_file',
-        description: 'Register a local file as a queryable named table (writable tools only).',
-        input_schema: s({
-          name: { type: 'string' },
-          path: { type: 'string' },
-          format: { type: 'string' },
-        }),
-      },
-    ]
+  /**
+   * Tool definitions for auto-registration into any framework, generated from
+   * descriptors.json (the single source of the model-visible surface).
+   * @param {'anthropic'|'openai'|'mcp'} [dialect] selects the shape
+   */
+  toolSpecs(dialect = 'anthropic') {
+    return toolSpecs(dialect)
   }
 
   /**
@@ -354,11 +412,25 @@ export class ChDBTool {
    * @returns {Promise<{ok: true, result: any} | {ok: false, error: {code:number, type:string, message:string}}>}
    */
   async call(name, args = {}) {
-    const a = { ...(args || {}) }
     const methodName = TOOL_METHODS[name]
     if (!methodName) {
       return { ok: false, error: { code: 0, type: 'UNKNOWN_TOOL', message: 'unknown tool: ' + name } }
     }
+    // Caller mistakes on the dispatch path never throw (P4): a non-object
+    // arguments payload comes back as an envelope, same as an unknown tool.
+    // (Spreading a string would silently produce {0: 'S', 1: 'E', ...} garbage,
+    // and the Python reference would raise on dict("...").)
+    if (args != null && (typeof args !== 'object' || Array.isArray(args))) {
+      return {
+        ok: false,
+        error: {
+          code: 0,
+          type: 'INVALID_ARGUMENT',
+          message: 'arguments must be an object, got ' + (Array.isArray(args) ? 'array' : typeof args),
+        },
+      }
+    }
+    const a = { ...(args || {}) }
     try {
       let result
       if (methodName === 'query') {

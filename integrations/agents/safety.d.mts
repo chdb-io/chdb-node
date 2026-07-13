@@ -7,5 +7,15 @@ export function quoteIdent(name: string): string
 export function quoteString(value: unknown): string
 /** True if `path` starts with one of the allowlist prefixes (empty allowlist -> true). */
 export function pathAllowed(path: string, allowlist: string[] | null | undefined): boolean
-/** Best-effort scan of file()/s3()/url() literal path arguments in SQL. */
+/** Table functions that never reach outside the process (lowercase). */
+export const SAFE_TABLE_FUNCTIONS: Set<string>
+/** Static fallback set of external source table functions (lowercase). */
+export const FALLBACK_KNOWN_TABLE_FUNCTIONS: Set<string>
+/**
+ * Every non-safe table-function call in `sql` (masked scan: string literals and
+ * comments blanked, quoted function names matched) whose lowercase name is in
+ * `known`, with its unescaped leading string-literal argument or null.
+ */
+export function findSourceCalls(sql: string, known: Set<string>): Array<[string, string | null]>
+/** Source table-function calls carrying a literal argument (compat wrapper). */
 export function scanFilePaths(sql: string): Array<[string, string]>

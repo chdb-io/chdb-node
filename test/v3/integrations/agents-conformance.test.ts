@@ -6,6 +6,8 @@ import { dirname, resolve } from 'node:path'
 import { ChDBTool } from '../../../integrations/agents/tool.mjs'
 // @ts-ignore
 import { ChDBError } from '../../../integrations/agents/errors.mjs'
+// @ts-ignore
+import { CONTRACT_VERSION, capabilities } from '../../../integrations/agents/descriptors.mjs'
 
 // Runs the language-neutral agent-tool conformance fixture
 // (integrations/agents/conformance/cases.jsonl) against ChDBTool. This is the
@@ -18,16 +20,31 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const CONF = resolve(HERE, '../../../integrations/agents/conformance')
 const FIXTURES = resolve(CONF, 'fixtures')
 
-const cases = readFileSync(resolve(CONF, 'cases.jsonl'), 'utf8')
+const records = readFileSync(resolve(CONF, 'cases.jsonl'), 'utf8')
   .split('\n')
   .map((l) => l.trim())
   .filter(Boolean)
   .map((l) => JSON.parse(l))
+// The FIRST record must be the fixture header (no "id") and every later record
+// must be a case (with "id") — anything else is a malformed fixture and fails
+// loudly instead of being silently reclassified (a case that lost its "id"
+// must not vanish by being mistaken for a second header).
+const [header, ...cases] = records
+if (!header || header.id !== undefined) {
+  throw new Error('cases.jsonl must start with a header record (no "id")')
+}
+for (const r of cases) {
+  if (r.id === undefined) {
+    throw new Error('cases.jsonl has a non-header record without an "id": ' + JSON.stringify(r))
+  }
+}
 
-// Replace the {{fixtures}} token in any string, recursively through objects.
+// Replace the {{fixtures}} token in any string, recursively through objects
+// and arrays (tool configs carry arrays, e.g. file_allowlist).
 function sub(v: any): any {
   if (typeof v === 'string') return v.replaceAll('{{fixtures}}', FIXTURES)
-  if (v && typeof v === 'object' && !Array.isArray(v)) {
+  if (Array.isArray(v)) return v.map(sub)
+  if (v && typeof v === 'object') {
     const out: any = {}
     for (const [k, val] of Object.entries(v)) out[k] = sub(val)
     return out
@@ -73,7 +90,15 @@ async function invoke(tool: any, c: any): Promise<any> {
 describe('agents conformance (CONTRACT.md / cases.jsonl)', () => {
   expect(cases.length).toBeGreaterThan(0)
 
+  it('fixture header matches this binding contract version', () => {
+    expect(header, 'cases.jsonl must start with a header record').toBeDefined()
+    expect(header.contract_version).toBe(CONTRACT_VERSION)
+  })
+
+  const features = capabilities().features
   for (const c of cases) {
+    // capability-gated cases run only where the binding has the feature
+    if (c.requires && !features[c.requires]) continue
     it(`${c.id} [${c.pillar}]`, async () => {
       // A case may declare its own tool config; otherwise use a read-only tool.
       const tool = c.tool ? toolFrom(c.tool) : new ChDBTool({ readOnly: true })
