@@ -48,6 +48,14 @@ jobs:
       - run: npm install --ignore-scripts
       - run: npm run libchdb
       - run: npm run build
+      - name: Exercise the freshly built addon (not the published prebuilt)
+        # The loader prefers the installed @chdb/lib-<platform> subpackage over
+        # a local build (see dist/loader.js). npm install pulls the PREVIOUS
+        # published subpackage via optionalDependencies, whose addon lags the
+        # in-repo native source — so without this, test:all exercises the old
+        # binary instead of the one this run is about to package and publish.
+        shell: bash
+        run: rm -rf node_modules/@chdb/lib-*
       - run: npm run test:all
       - name: Derive subpackage version from update_libchdb.sh
         run: |

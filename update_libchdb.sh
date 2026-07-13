@@ -16,15 +16,17 @@ set -e
 LATEST_RELEASE=v26.5.1-rc.1
 
 # Version published for the @chdb/lib-<platform> native subpackages on npm.
-# DECOUPLED from LATEST_RELEASE on purpose: chdb-core has no 26.5.2 release, but
-# the previously published subpackage versions (26.5.0, 26.5.1-rc.1) shipped a
-# non-relocatable Linux binary (chdb-io/chdb-node#50). npm forbids republishing
-# over an existing version, so the relocatability fix needs a NEW version — a
-# formal packaging revision — while the bundled libchdb stays LATEST_RELEASE
-# above (the only build carrying the #73/#15 C-ABI the binding requires). The
-# publish + cleanroom workflows read CHDB_LIB_VERSION from here, and the main
-# package's optionalDependencies pin this exact value.
-LIBCHDB_NPM_VERSION=26.5.2
+# DECOUPLED from LATEST_RELEASE on purpose: chdb-core has no 26.5.x releases
+# past 26.5.1-rc.1, but the subpackage also ships the N-API addon, so any
+# change to the addon's export surface needs a NEW subpackage version — npm
+# forbids republishing over an existing one. 26.5.2 was the relocatability
+# packaging revision (chdb-io/chdb-node#50); 26.5.3 adds the Arrow C Data
+# Interface exports (ArrowRegisterColumns/…) the Layer 3 arrow-input path
+# requires. The bundled libchdb stays LATEST_RELEASE above (the only build
+# carrying the #73/#15 C-ABI the binding requires). The publish + cleanroom
+# workflows read CHDB_LIB_VERSION from here, and the main package's
+# optionalDependencies pin this exact value.
+LIBCHDB_NPM_VERSION=26.5.3
 
 # Download the correct version based on the platform
 case "$(uname -s)" in
