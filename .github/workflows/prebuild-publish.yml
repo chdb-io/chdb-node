@@ -48,6 +48,16 @@ jobs:
       - run: npm install --ignore-scripts
       - run: npm run libchdb
       - run: npm run build
+      - name: Drop the installed @chdb/lib-* so tests exercise the just-built addon
+        # The loader prefers an installed @chdb/lib-<platform> subpackage over the
+        # local build (src/loader.ts). npm install pulls the PREVIOUSLY published
+        # subpackage via optionalDependencies, which lags behind the native source
+        # being released here — so test:all would validate the wrong binary (red on
+        # every new native export, e.g. v3.2.0 / #72). Mirror chdb-node-test.yml:
+        # remove it so loadNative() falls through to build/Release/chdb_node.node,
+        # the exact binary this job is about to package and publish.
+        shell: bash
+        run: rm -rf node_modules/@chdb/lib-*
       - run: npm run test:all
       - name: Derive subpackage version from update_libchdb.sh
         run: |
