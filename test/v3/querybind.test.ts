@@ -27,6 +27,40 @@ describe('queryBind path A (server-side chdb_query_with_params)', () => {
     expect(row.m).toEqual({ abc: [1, 2, 3] })
   })
 
+  it('binds Tuple and Array(Tuple) params via a TupleParam-shaped value', () => {
+    // @clickhouse/client-common's TupleParam { values }, reproduced by shape so
+    // the test needs no dependency (serializeValue matches it structurally).
+    class TupleParam {
+      constructor(readonly values: unknown[]) {}
+    }
+    expect(
+      t('SELECT ({pair:Tuple(String, String)}).1', {
+        pair: new TupleParam(['main*', '^main.*$']),
+      }),
+    ).toBe('main*')
+    // The Array(Tuple(String, String)) case from the trunk check-branch-patterns
+    // query — previously failed with "cannot be parsed as Array(Tuple(...))".
+    const rows = queryBind(
+      `SELECT pair.1 AS glob, pair.2 AS re
+       FROM (SELECT arrayJoin({pairs:Array(Tuple(String, String))}) AS pair)
+       ORDER BY glob`,
+      {
+        pairs: [
+          new TupleParam(['dev*', '^dev.*$']),
+          new TupleParam(['main*', '^main.*$']),
+        ],
+      },
+      'JSONEachRow',
+    )
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l))
+    expect(rows).toEqual([
+      { glob: 'dev*', re: '^dev.*$' },
+      { glob: 'main*', re: '^main.*$' },
+    ])
+  })
+
   it('treats injection payloads as inert bound data (no interpolation)', () => {
     const payloads = ["'; DROP TABLE x; --", 'a\\b', "a' OR 1=1 --", 'tab\tend']
     for (const p of payloads) {
