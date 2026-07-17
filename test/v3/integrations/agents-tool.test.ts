@@ -3,7 +3,9 @@ import { Session } from '../../../index.js'
 // @ts-ignore - .mjs base resolved at runtime
 import { ChDBTool } from '../../../integrations/agents/tool.mjs'
 // @ts-ignore
-import { ChDBError } from '../../../integrations/agents/errors.mjs'
+import { ChDBError, ChDBResourceError, RESOURCE_HINT } from '../../../integrations/agents/errors.mjs'
+// @ts-ignore
+import { TRUNCATION_HINT } from '../../../integrations/agents/tool.mjs'
 // @ts-ignore
 import { chdbTools } from '../../../integrations/ai-sdk.mjs'
 // @ts-ignore
@@ -17,7 +19,7 @@ import { AGENT_TOOL_DESCRIPTORS } from '../../../integrations/agents/framework.m
 
 describe('ChDBTool resource lifetime', () => {
   it('closes an owned session when constructor setup throws (no leak)', () => {
-    // A bad attachment under a fileAllowlist throws ACCESS_DENIED during setup;
+    // A bad attachment under a fileAllowlist throws ALLOWLIST_DENIED during setup;
     // the Session the tool just created must be closed before the rethrow.
     expect(
       () =>
@@ -187,6 +189,142 @@ describe('argument validation (CONTRACT.md P3)', () => {
       }
     } finally {
       t.close()
+    }
+  })
+})
+
+describe('resource caps and hints (CONTRACT.md P3/P5, contract 0.3.0)', () => {
+  it('classifies an engine resource limit as ChDBResourceError carrying the recovery hint', async () => {
+    // DEDICATED tool: a query-level SETTINGS clause persists for the session on
+    // a chdb session (engine quirk documented in CONTRACT.md), so this must
+    // never run on a shared tool instance.
+    const t = new ChDBTool({ readOnly: true })
+    try {
+      let err: any
+      try {
+        await t.query(
+          "SELECT number FROM numbers(100) SETTINGS max_result_rows = 10, result_overflow_mode = 'throw'",
+        )
+      } catch (e) {
+        err = e
+      }
+      expect(err).toBeInstanceOf(ChDBResourceError)
+      expect(err.type).toBe('TOO_MANY_ROWS_OR_BYTES')
+      expect(err.hint).toBe(RESOURCE_HINT)
+      expect(err.toObject().hint).toBe(RESOURCE_HINT)
+    } finally {
+      t.close()
+    }
+  })
+
+  it('clamps a per-call maxRows above the constructor cap (engine bound fixed at construction)', async () => {
+    const t = new ChDBTool({ readOnly: true, maxRows: 5 })
+    try {
+      const r = await t.query('SELECT toInt32(number) AS n FROM numbers(10)', { maxRows: 50 })
+      expect(r.rowCount).toBe(5)
+      expect(r.truncated).toBe(true)
+    } finally {
+      t.close()
+    }
+  })
+
+  it('adds the truncation hint to a truncated envelope result (and only then)', async () => {
+    const t = new ChDBTool({ readOnly: true, maxRows: 3 })
+    try {
+      const truncated = (await t.query('SELECT toInt32(number) AS n FROM numbers(10)')).toObject()
+      expect(truncated.truncated).toBe(true)
+      expect(truncated.hint).toBe(TRUNCATION_HINT)
+      const full = (await t.query('SELECT 1 AS x')).toObject()
+      expect(full.truncated).toBe(false)
+      expect('hint' in full).toBe(false)
+    } finally {
+      t.close()
+    }
+  })
+
+  it('validates maxMemoryUsage / maxResultBytes as typed INVALID_ARGUMENT', () => {
+    for (const opts of [{ maxMemoryUsage: 'lots' }, { maxResultBytes: 'lots' }]) {
+      let err: any
+      try {
+        new ChDBTool(opts as any)
+      } catch (e) {
+        err = e
+      }
+      expect(err).toBeInstanceOf(ChDBError)
+      expect(err.type).toBe('INVALID_ARGUMENT')
+    }
+  })
+})
+
+describe('network watchdog (CONTRACT.md P5, contract 0.3.0)', () => {
+  // Stands in for an engine call blocked on a firewalled endpoint (the real
+  // black hole is not portable); sync query() serves the constructor probe/SETs.
+  function slowSession() {
+    return {
+      query(sql: string) {
+        return sql.includes("getSetting('readonly')") ? '0' : ''
+      },
+      queryAsync() {
+        return new Promise((resolve) =>
+          setTimeout(() => resolve({ json: () => ({ data: [] }) }), 2500),
+        )
+      },
+    }
+  }
+
+  it('deadline fires with NETWORK_TIMEOUT + hint, poisons the tool, close() stays safe', async () => {
+    const tool = new ChDBTool({ session: slowSession() as any, readOnly: false, networkTimeout: 1 })
+    const t0 = Date.now()
+    let err: any
+    try {
+      await tool.query("SELECT count() FROM url('https://example.invalid/x.csv', 'CSV')")
+    } catch (e) {
+      err = e
+    }
+    expect(err).toBeInstanceOf(ChDBError)
+    expect(err.type).toBe('NETWORK_TIMEOUT')
+    expect(err.hint).toBeTruthy()
+    expect(Date.now() - t0).toBeLessThan(2000)
+    // poisoned: even a local query must fail with TOOL_ERROR
+    let err2: any
+    try {
+      await tool.query('SELECT 1')
+    } catch (e) {
+      err2 = e
+    }
+    expect(err2).toBeInstanceOf(ChDBError)
+    expect(err2.type).toBe('TOOL_ERROR')
+    // close() must drop the reference without freeing the parked session
+    expect(() => tool.close()).not.toThrow()
+  })
+
+  it('envelope path carries NETWORK_TIMEOUT type + hint', async () => {
+    const tool = new ChDBTool({ session: slowSession() as any, readOnly: false, networkTimeout: 1 })
+    const out: any = await tool.call('run_select_query', {
+      sql: "SELECT 1 FROM s3('https://example.invalid/x.parquet')",
+    })
+    expect(out.ok).toBe(false)
+    expect(out.error.type).toBe('NETWORK_TIMEOUT')
+    expect(out.error.hint).toBeTruthy()
+    tool.close()
+  })
+
+  it('local queries bypass the watchdog', async () => {
+    const tool = new ChDBTool({ networkTimeout: 1 })
+    try {
+      const r = await tool.query('SELECT toInt32(1) AS x')
+      expect(r.rows).toEqual([{ x: 1 }])
+    } finally {
+      tool.close()
+    }
+  })
+
+  it('networkTimeout: null disables the watchdog', () => {
+    const tool = new ChDBTool({ networkTimeout: null })
+    try {
+      expect(tool.networkTimeout).toBeNull()
+    } finally {
+      tool.close()
     }
   })
 })

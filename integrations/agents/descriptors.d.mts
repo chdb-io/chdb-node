@@ -29,6 +29,8 @@ export interface Capabilities {
     attachments: boolean
     file_allowlist: boolean
     max_execution_time: boolean
+    resource_caps: boolean
+    network_watchdog: boolean
     async: boolean
     streaming: boolean
     [feature: string]: boolean

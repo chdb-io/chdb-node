@@ -168,6 +168,38 @@ export const FALLBACK_KNOWN_TABLE_FUNCTIONS = new Set([
   'prometheusqueryrange',
 ])
 
+// Table functions reached over the network; drives the watchdog (CONTRACT P5).
+// file()/sqlite and the *local* lake variants are deliberately absent.
+export const NETWORK_TABLE_FUNCTIONS = new Set([
+  'url',
+  'urlcluster',
+  'urlwithheaders',
+  's3',
+  's3cluster',
+  'gcs',
+  'azureblobstorage',
+  'azureblobstoragecluster',
+  'remote',
+  'remotesecure',
+  'hdfs',
+  'hdfscluster',
+  'mongodb',
+  'postgresql',
+  'mysql',
+  'redis',
+  'odbc',
+  'jdbc',
+  'icebergs3',
+  'icebergs3cluster',
+  'icebergazure',
+  'icebergazurecluster',
+  'iceberghdfs',
+  'iceberghdfscluster',
+  'deltalake',
+  'deltalakeazure',
+  'hudi',
+])
+
 // Single pass over the SQL: a token is either a string literal, a line comment,
 // or a block comment. Left-to-right alternation guarantees that once a construct
 // opens, its body is consumed up to the matching close before any other rule can

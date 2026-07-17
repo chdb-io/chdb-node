@@ -10,6 +10,7 @@ export { CONTRACT_VERSION, capabilities, loadDescriptors, toolSpecs } from './de
 export {
   ChDBError,
   ChDBReadOnlyError,
+  ChDBResourceError,
   ChDBSyntaxError,
   ChDBUnknownObjectError,
   parseError,

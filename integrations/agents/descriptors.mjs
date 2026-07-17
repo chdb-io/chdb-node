@@ -20,7 +20,7 @@ import { ChDBError } from './errors.mjs'
 // The agent-tool contract version (semver). Bumped whenever descriptors.json,
 // conformance/cases.jsonl, or normative CONTRACT.md text changes. Tests assert
 // it equals the contract_version field of both data files.
-export const CONTRACT_VERSION = '0.2.0'
+export const CONTRACT_VERSION = '0.3.0'
 
 const DESCRIPTORS_PATH = join(dirname(fileURLToPath(import.meta.url)), 'descriptors.json')
 let cache = null
@@ -123,6 +123,12 @@ export function capabilities() {
       attachments: true,
       file_allowlist: true,
       max_execution_time: true,
+      // engine-enforced result/memory bounds + typed resource errors with
+      // a recovery hint (contract 0.3.0)
+      resource_caps: true,
+      // binding-side deadline for network-source queries + engine-side
+      // fast-fail baseline (contract 0.3.0)
+      network_watchdog: true,
       async: true,
       streaming: false,
     },

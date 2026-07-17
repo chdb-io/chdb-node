@@ -15,17 +15,24 @@
 // message body stays in the message and the real trailing type wins.
 const ERR_RE = /Code:\s*(\d+)\.\s*DB::Exception:\s*([\s\S]*)\(([A-Z0-9_]+)\)/
 
+// Base error. `code`/`type`/`message` are always populated; `hint` is an
+// optional model-facing recovery instruction (set for resource-limit errors,
+// where the model must learn "narrow the query" rather than "give up" or
+// "retry unchanged").
 export class ChDBError extends Error {
-  constructor(message, { code = 0, type = 'UNKNOWN' } = {}) {
+  constructor(message, { code = 0, type = 'UNKNOWN', hint = null } = {}) {
     super(message)
     this.name = 'ChDBError'
     this.code = code
     this.type = type
     this.message = message
+    this.hint = hint
   }
 
   toObject() {
-    return { code: this.code, type: this.type, message: this.message }
+    const d = { code: this.code, type: this.type, message: this.message }
+    if (this.hint) d.hint = this.hint
+    return d
   }
 }
 
@@ -34,6 +41,20 @@ export class ChDBReadOnlyError extends ChDBError {
   constructor(message, opts) {
     super(message, opts)
     this.name = 'ChDBReadOnlyError'
+  }
+}
+
+/**
+ * The query hit an engine resource limit (rows / bytes / time / memory).
+ *
+ * Distinct from a logic error: the SQL is valid, the result was just too big
+ * or too slow. Carries a `hint` telling the model how to shrink the query, so
+ * an agent distinguishes "narrow and retry" from "abandon".
+ */
+export class ChDBResourceError extends ChDBError {
+  constructor(message, opts) {
+    super(message, opts)
+    this.name = 'ChDBResourceError'
   }
 }
 
@@ -53,6 +74,13 @@ export class ChDBUnknownObjectError extends ChDBError {
   }
 }
 
+// Hint on NETWORK_TIMEOUT: the model must switch strategy, not wait or retry.
+export const NETWORK_HINT =
+  'The query referenced a remote source (url()/s3()/...) and did not return ' +
+  'within the network deadline. Network egress may be disabled or firewalled ' +
+  'in this environment. Use file() on data already available locally, or ask ' +
+  'the operator to enable egress. Do not retry the same query unchanged.'
+
 // ClickHouse error code -> ChDBError subclass. Kept small and explicit; the
 // CONTRACT lists exactly these so other languages classify identically.
 const CODE_TO_CLASS = {
@@ -63,7 +91,21 @@ const CODE_TO_CLASS = {
   60: ChDBUnknownObjectError, // UNKNOWN_TABLE
   81: ChDBUnknownObjectError, // UNKNOWN_DATABASE
   115: ChDBUnknownObjectError, // UNKNOWN_SETTING
+  158: ChDBResourceError, // TOO_MANY_ROWS
+  159: ChDBResourceError, // TIMEOUT_EXCEEDED
+  241: ChDBResourceError, // MEMORY_LIMIT_EXCEEDED
+  307: ChDBResourceError, // TOO_MANY_BYTES
+  396: ChDBResourceError, // TOO_MANY_ROWS_OR_BYTES (max_result_rows/bytes)
 }
+
+// The recovery instruction attached to every resource-limit error. Wording is
+// model-facing: name the fix (filter / project / aggregate / limit) and forbid
+// the two failure loops (verbatim retry, silent abandonment).
+export const RESOURCE_HINT =
+  'The query exceeded a resource limit; the SQL itself is valid. ' +
+  'Narrow it and retry: add a WHERE filter, select fewer columns, ' +
+  'aggregate before returning, or add/lower LIMIT. ' +
+  'Do not retry the same query unchanged.'
 
 const TYPE_TO_CLASS = {
   READONLY: ChDBReadOnlyError,
@@ -86,5 +128,6 @@ export function parseError(excOrMessage) {
   // greedy msg keeps the trailing ". " that precedes the (TYPE); trim it
   const msg = m[2].trim().replace(/\.+$/, '').trim()
   const Cls = CODE_TO_CLASS[code] || TYPE_TO_CLASS[type] || ChDBError
-  return new Cls(msg, { code, type })
+  const hint = Cls === ChDBResourceError ? RESOURCE_HINT : null
+  return new Cls(msg, { code, type, hint })
 }
