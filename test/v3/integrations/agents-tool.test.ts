@@ -420,3 +420,15 @@ describe('adapter toolset close()', () => {
     s.close()
   })
 })
+
+describe('networkTimeout validation (contract 0.3.0)', () => {
+  it('null and 0 disable; empty string is INVALID_ARGUMENT, not silent-disable', async () => {
+    const a = new ChDBTool({ networkTimeout: null })
+    expect(a.networkTimeout).toBeNull()
+    a.close()
+    const b = new ChDBTool({ networkTimeout: 0 })
+    expect(b.networkTimeout).toBeNull()
+    b.close()
+    expect(() => new ChDBTool({ networkTimeout: '' })).toThrowError(/must be an integer|INVALID_ARGUMENT/)
+  })
+})

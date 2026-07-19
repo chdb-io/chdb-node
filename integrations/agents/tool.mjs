@@ -132,7 +132,12 @@ export class ChDBTool {
     // Binding-side deadline (seconds) for NETWORK_TABLE_FUNCTIONS queries: a
     // firewalled endpoint can hang the engine past every engine-side timeout.
     // null/0 disables.
-    this.networkTimeout = !networkTimeout ? null : Math.max(1, intArg(networkTimeout, 'networkTimeout'))
+    // Only null/undefined/0 disable the watchdog; anything else (including '')
+    // must validate instead of silently disabling a guardrail.
+    this.networkTimeout =
+      networkTimeout == null || networkTimeout === 0
+        ? null
+        : Math.max(1, intArg(networkTimeout, 'networkTimeout'))
     // Engine-side memory bound for the whole query (bytes). Exceeding it
     // raises MEMORY_LIMIT_EXCEEDED (loud, typed) — the primary OOM guard in
     // memory-tight deployments (sandboxes). Off by default.
