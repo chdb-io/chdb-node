@@ -30,7 +30,7 @@ import {
 } from './safety.mjs'
 
 // Sessions abandoned by the network watchdog: the native call is still in
-// flight inside them, so freeing them is UB — parked for process lifetime.
+// flight inside them, so freeing them is UB — parked until that call settles.
 const ABANDONED_SESSIONS = []
 
 // Coerce a numeric argument to an integer, or throw a typed INVALID_ARGUMENT.
@@ -201,11 +201,13 @@ export class ChDBTool {
         this.#session.query(`SET max_execution_time=${this.maxExecutionTime}`, 'CSV')
       }
       if (this.networkTimeout != null) {
-        // Engine-side fast-fail baseline: one attempt, no HEAD probe, small
-        // connect timeout. The watchdog in query() is the backstop.
-        this.#session.query(`SET http_connection_timeout=${Math.min(this.networkTimeout, 10)}`, 'CSV')
-        this.#session.query(`SET http_receive_timeout=${this.networkTimeout}`, 'CSV')
-        this.#session.query(`SET http_send_timeout=${this.networkTimeout}`, 'CSV')
+        // Fast-fail baseline: one attempt, no HEAD probe. The TLS handshake honors
+        // max(send, receive) — not connection_timeout — and one attempt costs ~4-5x
+        // the setting (verified against chdb-core main), so keep all three small.
+        const capS = Math.min(this.networkTimeout, 10)
+        this.#session.query(`SET http_connection_timeout=${capS}`, 'CSV')
+        this.#session.query(`SET http_receive_timeout=${capS}`, 'CSV')
+        this.#session.query(`SET http_send_timeout=${capS}`, 'CSV')
         this.#session.query('SET http_max_tries=1', 'CSV')
         this.#session.query('SET http_make_head_request=0', 'CSV')
       }
@@ -336,6 +338,8 @@ export class ChDBTool {
 
   // Network watchdog (CONTRACT P5). The in-flight native call cannot be
   // cancelled, so on expiry the tool is poisoned and the session parked.
+  // NB: the abandoned native op keeps the process alive until it settles
+  // (pending napi work refs the event loop) — exit is delayed, not hung forever.
   async #raceNetworkDeadline(engine) {
     let timer
     const deadline = new Promise((_, reject) => {
@@ -353,11 +357,32 @@ export class ChDBTool {
     } catch (e) {
       if (e instanceof ChDBError && e.type === 'NETWORK_TIMEOUT') {
         this.#poisoned = true
-        ABANDONED_SESSIONS.push(this.#session)
-        // the abandoned promise must never surface as an unhandled rejection
-        engine.catch(() => {})
+        const session = this.#session
+        const owned = this.#ownsSession
+        ABANDONED_SESSIONS.push(session)
+        // Swallow the abandoned rejection; once the native call settles, close
+        // an owned parked session — chdb-node binds ONE data directory per
+        // process, so leaving it live would block every future Session/tool.
+        engine.then(() => {}, () => {}).then(() => {
+          const i = ABANDONED_SESSIONS.indexOf(session)
+          if (i !== -1) ABANDONED_SESSIONS.splice(i, 1)
+          if (owned) {
+            try {
+              session.close()
+            } catch {
+              /* best effort */
+            }
+          }
+        })
+        throw e
       }
-      throw e
+      const err = e instanceof ChDBError ? e : parseError(e)
+      // An engine-side timeout on a network source (Poco::TimeoutException,
+      // code 1001) deserves the same guidance as a watchdog expiry.
+      if (err.hint == null && String(err.message).includes('Poco::TimeoutException')) {
+        err.hint = NETWORK_HINT
+      }
+      throw err
     } finally {
       clearTimeout(timer)
     }

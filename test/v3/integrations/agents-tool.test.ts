@@ -1,3 +1,4 @@
+import net from 'node:net'
 import { describe, it, expect } from 'vitest'
 import { Session } from '../../../index.js'
 // @ts-ignore - .mjs base resolved at runtime
@@ -327,6 +328,84 @@ describe('network watchdog (CONTRACT.md P5, contract 0.3.0)', () => {
       tool.close()
     }
   })
+
+  it('attaches the network hint to an engine-side Poco timeout (code 1001)', async () => {
+    // the engine rejects on its own (baseline socket timeouts fired) before the
+    // watchdog: the parsed error must carry the same recovery hint
+    const session = {
+      query(sql: string) {
+        return sql.includes("getSetting('readonly')") ? '0' : ''
+      },
+      queryAsync() {
+        return Promise.reject(
+          new Error('Code: 1001. DB::Exception: Poco::TimeoutException: Timeout. (STD_EXCEPTION)'),
+        )
+      },
+    }
+    const tool = new ChDBTool({ session: session as any, readOnly: false, networkTimeout: 30 })
+    try {
+      let err: any
+      try {
+        await tool.query("SELECT 1 FROM url('https://example.invalid/x.csv', 'CSV')")
+      } catch (e) {
+        err = e
+      }
+      expect(err).toBeInstanceOf(ChDBError)
+      expect(err.code).toBe(1001)
+      expect(err.hint).toBeTruthy()
+    } finally {
+      tool.close()
+    }
+  })
+
+  it('real black-holed endpoint: watchdog fires, a fresh tool works after the abandoned call settles', async () => {
+    // Real url() against a local server that accepts and never answers: the TLS
+    // handshake blocks inside the engine until its socket timeouts fire (~4-7x
+    // the 2s baseline), so the 2s watchdog must win the race.
+    const held: net.Socket[] = []
+    const srv = net.createServer((sock) => {
+      held.push(sock) // keep referenced: a GC'd socket sends RST and errors fast
+    })
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r))
+    const port = (srv.address() as net.AddressInfo).port
+    try {
+      const tool = new ChDBTool({ networkTimeout: 2 })
+      const t0 = Date.now()
+      let err: any
+      try {
+        await tool.query(`SELECT count() FROM url('https://127.0.0.1:${port}/x.csv', 'LineAsString')`)
+      } catch (e) {
+        err = e
+      }
+      expect(err).toBeInstanceOf(ChDBError)
+      expect(err.type).toBe('NETWORK_TIMEOUT')
+      expect(err.hint).toBeTruthy()
+      expect(Date.now() - t0).toBeLessThan(10_000)
+      tool.close()
+
+      // One data directory per process: a fresh tool becomes constructible only
+      // once the abandoned native call settles and its parked session is closed.
+      let fresh: any = null
+      const deadline = Date.now() + 40_000
+      while (fresh == null && Date.now() < deadline) {
+        try {
+          fresh = new ChDBTool({ networkTimeout: 2 })
+        } catch {
+          await new Promise((r) => setTimeout(r, 250))
+        }
+      }
+      expect(fresh, 'fresh tool once the abandoned call settled').toBeTruthy()
+      try {
+        const r = await fresh.query('SELECT toInt32(42) AS x')
+        expect(r.rows).toEqual([{ x: 42 }])
+      } finally {
+        fresh.close()
+      }
+    } finally {
+      srv.close()
+      for (const c of held) c.destroy()
+    }
+  }, 60_000)
 })
 
 describe('adapter toolset close()', () => {
