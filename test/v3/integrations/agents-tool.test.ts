@@ -2,11 +2,9 @@ import net from 'node:net'
 import { describe, it, expect } from 'vitest'
 import { Session } from '../../../index.js'
 // @ts-ignore - .mjs base resolved at runtime
-import { ChDBTool } from '../../../integrations/agents/tool.mjs'
+import { ChDBTool, TRUNCATION_HINT } from '../../../integrations/agents/tool.mjs'
 // @ts-ignore
 import { ChDBError, ChDBResourceError, RESOURCE_HINT } from '../../../integrations/agents/errors.mjs'
-// @ts-ignore
-import { TRUNCATION_HINT } from '../../../integrations/agents/tool.mjs'
 // @ts-ignore
 import { chdbTools } from '../../../integrations/ai-sdk.mjs'
 // @ts-ignore
