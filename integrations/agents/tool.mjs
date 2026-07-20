@@ -19,14 +19,19 @@
 
 import { Session } from '../../index.mjs'
 import { toolSpecs } from './descriptors.mjs'
-import { ChDBError, ChDBReadOnlyError, parseError } from './errors.mjs'
+import { ChDBError, ChDBReadOnlyError, NETWORK_HINT, parseError } from './errors.mjs'
 import {
   FALLBACK_KNOWN_TABLE_FUNCTIONS,
+  NETWORK_TABLE_FUNCTIONS,
   findSourceCalls,
   pathAllowed,
   quoteIdent,
   quoteString,
 } from './safety.mjs'
+
+// Sessions abandoned by the network watchdog: the native call is still in
+// flight inside them, so freeing them is UB — parked until that call settles.
+const ABANDONED_SESSIONS = []
 
 // Coerce a numeric argument to an integer, or throw a typed INVALID_ARGUMENT.
 // A non-numeric cap must fail loudly: Number('lots') is NaN, and every NaN
@@ -43,6 +48,14 @@ function intArg(value, name) {
   return n
 }
 
+// Model-facing recovery instruction attached to a truncated result on the
+// envelope path. A bare `truncated: true` teaches nothing; the model must learn
+// that the full result exists and how to get the part it needs.
+export const TRUNCATION_HINT =
+  'Result truncated at the row/byte cap; more rows exist. ' +
+  'If you need them, aggregate, filter with WHERE, or select fewer columns ' +
+  'instead of re-running the same query.'
+
 /** Result of a query: decoded rows plus honest truncation / stat metadata. */
 export class QueryResult {
   constructor(rows, truncated, columnNames, elapsedS = null, bytesRead = null) {
@@ -55,7 +68,7 @@ export class QueryResult {
   }
 
   toObject() {
-    return {
+    const d = {
       rows: this.rows,
       rowCount: this.rowCount,
       truncated: this.truncated,
@@ -63,6 +76,8 @@ export class QueryResult {
       elapsedS: this.elapsedS,
       bytesRead: this.bytesRead,
     }
+    if (this.truncated) d.hint = TRUNCATION_HINT
+    return d
   }
 }
 
@@ -82,11 +97,14 @@ export class ChDBTool {
   #session
   #ownsSession
   #knownTableFunctions
+  #poisoned = false
 
   /**
    * @param {{
    *   path?: string, readOnly?: boolean, maxRows?: number, maxBytes?: number,
-   *   maxExecutionTime?: number|null, fileAllowlist?: string[]|null,
+   *   maxExecutionTime?: number|null, networkTimeout?: number|null,
+   *   maxMemoryUsage?: number|null,
+   *   maxResultBytes?: number|null, fileAllowlist?: string[]|null,
    *   attachments?: Record<string, string|[string, string]>|null,
    *   session?: import('../../index.mjs').Session|null
    * }} [opts]
@@ -98,6 +116,9 @@ export class ChDBTool {
       maxRows = 1000,
       maxBytes = 1_000_000,
       maxExecutionTime = null,
+      networkTimeout = 60,
+      maxMemoryUsage = null,
+      maxResultBytes = null,
       fileAllowlist = null,
       attachments = null,
       session = null,
@@ -108,6 +129,26 @@ export class ChDBTool {
     this.maxBytes = Math.max(1, intArg(maxBytes, 'maxBytes'))
     this.maxExecutionTime =
       maxExecutionTime == null ? null : Math.max(0, intArg(maxExecutionTime, 'maxExecutionTime'))
+    // Binding-side deadline (seconds) for NETWORK_TABLE_FUNCTIONS queries: a
+    // firewalled endpoint can hang the engine past every engine-side timeout.
+    // null/0 disables.
+    // Only null/undefined/0 disable the watchdog; anything else (including '')
+    // must validate instead of silently disabling a guardrail.
+    this.networkTimeout =
+      networkTimeout == null || networkTimeout === 0
+        ? null
+        : Math.max(1, intArg(networkTimeout, 'networkTimeout'))
+    // Engine-side memory bound for the whole query (bytes). Exceeding it
+    // raises MEMORY_LIMIT_EXCEEDED (loud, typed) — the primary OOM guard in
+    // memory-tight deployments (sandboxes). Off by default.
+    this.maxMemoryUsage =
+      maxMemoryUsage == null ? null : Math.max(1, intArg(maxMemoryUsage, 'maxMemoryUsage'))
+    // Engine-side bound on the result set's size (bytes). With the break
+    // overflow mode this truncates at block granularity WITHOUT a flag, so
+    // it is a coarse backstop, not the honest cap: set it well above
+    // maxBytes so the flagged client-side cap fires first. Off by default.
+    this.maxResultBytes =
+      maxResultBytes == null ? null : Math.max(1, intArg(maxResultBytes, 'maxResultBytes'))
     // null = no allowlist (all paths allowed); a list = only these prefixes.
     this.fileAllowlist = fileAllowlist && fileAllowlist.length ? [...fileAllowlist] : null
 
@@ -142,9 +183,38 @@ export class ChDBTool {
       }
       // Exact 64-bit integers survive JSON as strings rather than lossy floats.
       this.#session.query('SET output_format_json_quote_64bit_integers=1', 'CSV')
+      // Engine-side result bound. The decode path buffers the engine's whole
+      // JSON payload before the client-side row/byte trim, so without this an
+      // unbounded SELECT materializes everything in memory before maxRows
+      // ever applies — in a 512MB sandbox that is an OOM, not a truncation.
+      // max_result_rows is the row cap + 1 under result_overflow_mode='break':
+      // the engine stops producing at block granularity, and the one extra row
+      // is what keeps the truncated flag exact (data.length > cap). The per-call
+      // maxRows is clamped to the constructor cap for the same reason.
+      this.#session.query('SET max_block_size=8192', 'CSV')
+      this.#session.query("SET result_overflow_mode='break'", 'CSV')
+      this.#session.query(`SET max_result_rows=${this.maxRows + 1}`, 'CSV')
+      if (this.maxResultBytes != null) {
+        this.#session.query(`SET max_result_bytes=${this.maxResultBytes}`, 'CSV')
+      }
+      if (this.maxMemoryUsage != null) {
+        // loud engine OOM guard: exceeding raises MEMORY_LIMIT_EXCEEDED
+        this.#session.query(`SET max_memory_usage=${this.maxMemoryUsage}`, 'CSV')
+      }
       if (this.maxExecutionTime != null) {
         // engine-side wall-clock bound; a runaway query raises TIMEOUT_EXCEEDED
         this.#session.query(`SET max_execution_time=${this.maxExecutionTime}`, 'CSV')
+      }
+      if (this.networkTimeout != null) {
+        // Fast-fail baseline: one attempt, no HEAD probe. The TLS handshake honors
+        // max(send, receive) — not connection_timeout — and one attempt costs ~4-5x
+        // the setting (verified against chdb-core main), so keep all three small.
+        const capS = Math.min(this.networkTimeout, 10)
+        this.#session.query(`SET http_connection_timeout=${capS}`, 'CSV')
+        this.#session.query(`SET http_receive_timeout=${capS}`, 'CSV')
+        this.#session.query(`SET http_send_timeout=${capS}`, 'CSV')
+        this.#session.query('SET http_max_tries=1', 'CSV')
+        this.#session.query('SET http_make_head_request=0', 'CSV')
       }
       // Attachments must be materialized BEFORE the read-only lock, because
       // CREATE VIEW is a write that readonly=2 rejects. This is why read-only
@@ -212,16 +282,35 @@ export class ChDBTool {
     if (typeof sql !== 'string' || sql.trim() === '') {
       throw new ChDBError('sql must be a non-empty string')
     }
+    if (this.#poisoned) {
+      throw new ChDBError(
+        'a previous network-source query was abandoned after its deadline; ' +
+          "this tool's engine session may be blocked — create a new ChDBTool",
+        { type: 'TOOL_ERROR' },
+      )
+    }
     this.#enforceAllowlist(sql)
-    const cap = maxRows == null ? this.maxRows : Math.max(1, intArg(maxRows, 'maxRows'))
+    // The constructor cap is the ceiling: the engine-side max_result_rows was
+    // fixed at construction, so honoring a larger per-call cap is impossible —
+    // clamping keeps the truncated flag honest instead of silently under-filling.
+    const cap =
+      maxRows == null
+        ? this.maxRows
+        : Math.min(Math.max(1, intArg(maxRows, 'maxRows')), this.maxRows)
     let obj
     try {
       const hasParams = params && Object.keys(params).length > 0
-      const res = hasParams
-        ? await this.#session.queryBindAsync(sql, params, { format: 'JSON' })
-        : await this.#session.queryAsync(sql, { format: 'JSON' })
+      const engine = hasParams
+        ? this.#session.queryBindAsync(sql, params, { format: 'JSON' })
+        : this.#session.queryAsync(sql, { format: 'JSON' })
+      const res =
+        this.networkTimeout && findSourceCalls(sql, NETWORK_TABLE_FUNCTIONS).length > 0
+          ? await this.#raceNetworkDeadline(engine)
+          : await engine
       obj = res.json() || {}
     } catch (e) {
+      // watchdog/typed errors pass through, never re-wrapped
+      if (e instanceof ChDBError) throw e
       // Malformed / non-JSON engine output and engine errors alike become a
       // typed ChDBError rather than a bare error leaking to the caller.
       throw parseError(e)
@@ -252,6 +341,58 @@ export class ChDBTool {
     return new QueryResult(rows, truncated, cols, stats.elapsed ?? null, stats.bytes_read ?? null)
   }
 
+  // Network watchdog (CONTRACT P5). The in-flight native call cannot be
+  // cancelled, so on expiry the tool is poisoned and the session parked.
+  // NB: the abandoned native op keeps the process alive until it settles
+  // (pending napi work refs the event loop) — exit is delayed, not hung forever.
+  async #raceNetworkDeadline(engine) {
+    let timer
+    const deadline = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new ChDBError(`network-source query did not return within ${this.networkTimeout}s`, {
+            type: 'NETWORK_TIMEOUT',
+            hint: NETWORK_HINT,
+          }),
+        )
+      }, this.networkTimeout * 1000)
+    })
+    try {
+      return await Promise.race([engine, deadline])
+    } catch (e) {
+      if (e instanceof ChDBError && e.type === 'NETWORK_TIMEOUT') {
+        this.#poisoned = true
+        const session = this.#session
+        const owned = this.#ownsSession
+        ABANDONED_SESSIONS.push(session)
+        // Swallow the abandoned rejection; once the native call settles, close
+        // an owned parked session — chdb-node binds ONE data directory per
+        // process, so leaving it live would block every future Session/tool.
+        engine.then(() => {}, () => {}).then(() => {
+          const i = ABANDONED_SESSIONS.indexOf(session)
+          if (i !== -1) ABANDONED_SESSIONS.splice(i, 1)
+          if (owned) {
+            try {
+              session.close()
+            } catch {
+              /* best effort */
+            }
+          }
+        })
+        throw e
+      }
+      const err = e instanceof ChDBError ? e : parseError(e)
+      // An engine-side timeout on a network source (Poco::TimeoutException,
+      // code 1001) deserves the same guidance as a watchdog expiry.
+      if (err.hint == null && String(err.message).includes('Poco::TimeoutException')) {
+        err.hint = NETWORK_HINT
+      }
+      throw err
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   // With a fileAllowlist set, every non-safe table-function call in the SQL
   // must carry a literal source argument inside the allowlist. The scan runs
   // over masked SQL (string literals/comments blanked, quoted function names
@@ -267,12 +408,12 @@ export class ChDBTool {
       if (arg === null) {
         throw new ChDBError(
           `table function ${JSON.stringify(fn)} without a literal source argument is not allowed when file_allowlist is set`,
-          { type: 'ACCESS_DENIED' },
+          { type: 'ALLOWLIST_DENIED' },
         )
       }
       if (!pathAllowed(arg, this.fileAllowlist)) {
         throw new ChDBError(`source path not in file_allowlist: ${JSON.stringify(arg)}`, {
-          type: 'ACCESS_DENIED',
+          type: 'ALLOWLIST_DENIED',
         })
       }
     }
@@ -283,7 +424,7 @@ export class ChDBTool {
   #createFileView(name, path, format = null) {
     if (this.fileAllowlist && !pathAllowed(path, this.fileAllowlist)) {
       throw new ChDBError(`attach path not in file_allowlist: ${JSON.stringify(path)}`, {
-        type: 'ACCESS_DENIED',
+        type: 'ALLOWLIST_DENIED',
       })
     }
     let src = `file(${quoteString(path)}`
@@ -457,6 +598,11 @@ export class ChDBTool {
   }
 
   close() {
+    if (this.#poisoned) {
+      // session is parked in ABANDONED_SESSIONS; freeing it mid-call is UB
+      this.#session = null
+      return
+    }
     if (this.#ownsSession && this.#session) {
       try {
         this.#session.close()

@@ -11,6 +11,8 @@ export function pathAllowed(path: string, allowlist: string[] | null | undefined
 export const SAFE_TABLE_FUNCTIONS: Set<string>
 /** Static fallback set of external source table functions (lowercase). */
 export const FALLBACK_KNOWN_TABLE_FUNCTIONS: Set<string>
+/** Table functions whose source is reached over the network (lowercase); drives the network watchdog. */
+export const NETWORK_TABLE_FUNCTIONS: Set<string>
 /**
  * Every non-safe table-function call in `sql` (masked scan: string literals and
  * comments blanked, quoted function names matched) whose lowercase name is in

@@ -8,7 +8,12 @@ export interface QueryResultObject {
   columnNames: string[]
   elapsedS: number | null
   bytesRead: number | null
+  /** Model-facing recovery instruction (present when `truncated` is true). */
+  hint?: string
 }
+
+/** The recovery instruction attached to a truncated envelope result (binding-identical wording). */
+export declare const TRUNCATION_HINT: string
 
 /** Result of a query: decoded rows plus honest truncation / stat metadata. */
 export class QueryResult {
@@ -44,6 +49,15 @@ export interface ChDBToolOptions {
   maxBytes?: number
   /** Optional engine wall-clock bound in seconds; a runaway query raises TIMEOUT_EXCEEDED. */
   maxExecutionTime?: number | null
+  /**
+   * Deadline in seconds for network-source queries (default 60; null/0 disables).
+   * On expiry the query fails NETWORK_TIMEOUT and the tool is poisoned (CONTRACT.md P5).
+   */
+  networkTimeout?: number | null
+  /** Optional engine memory bound in bytes; exceeding it raises MEMORY_LIMIT_EXCEEDED. */
+  maxMemoryUsage?: number | null
+  /** Optional engine-side result-bytes backstop (truncates unflagged; set well above maxBytes). */
+  maxResultBytes?: number | null
   /** Optional allowlist of path prefixes for file()/s3()/url() and attachments. */
   fileAllowlist?: string[] | null
   /** Files to register as views before the read-only lock: { name: path | [path, format] }. */
@@ -64,6 +78,9 @@ export class ChDBTool {
   readonly maxRows: number
   readonly maxBytes: number
   readonly maxExecutionTime: number | null
+  readonly networkTimeout: number | null
+  readonly maxMemoryUsage: number | null
+  readonly maxResultBytes: number | null
   readonly fileAllowlist: string[] | null
   query(sql: string, opts?: { params?: Record<string, unknown> | null; maxRows?: number | null }): Promise<QueryResult>
   listDatabases(): Promise<string[]>

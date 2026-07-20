@@ -60,6 +60,11 @@ function toolFrom(cfg: any): any {
     maxRows: c.max_rows,
     maxBytes: c.max_bytes,
     maxExecutionTime: c.max_execution_time ?? null,
+    // absent -> undefined -> the binding's default (60); an explicit JSON
+    // null/0 must stay disabled, so no ?? fallback here
+    networkTimeout: c.network_timeout,
+    maxMemoryUsage: c.max_memory_usage ?? null,
+    maxResultBytes: c.max_result_bytes ?? null,
     fileAllowlist: c.file_allowlist ?? null,
     attachments: c.attachments ?? null,
   })
@@ -123,6 +128,12 @@ describe('agents conformance (CONTRACT.md / cases.jsonl)', () => {
         if (exp.envelope_ok !== undefined) {
           expect(result.ok).toBe(exp.envelope_ok)
           if (exp.error_type) expect(result.error.type).toBe(exp.error_type)
+          if (exp.result_has_hint !== undefined) {
+            expect(Boolean(result.result?.hint)).toBe(exp.result_has_hint)
+          }
+          if (exp.error_has_hint !== undefined) {
+            expect(Boolean(result.error?.hint)).toBe(exp.error_has_hint)
+          }
           return
         }
         if (exp.rows !== undefined) expect(result.rows).toEqual(exp.rows)
