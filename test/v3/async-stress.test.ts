@@ -11,10 +11,12 @@ const HEAVY = (n: number) => `SELECT count() FROM numbers(${n})`
 
 // The storm/race cases below run dozens of heavy queries in sequence and take
 // ~15-30s on a fast runner. Give them a generous timeout so a slow/loaded CI
-// runner never hits the 30s default and kills a test mid-flight — an abandoned
-// in-flight native op (plain queryAsync is not tracked for drain) would collide
-// with the next test on the single in-process engine and abort it (code 236),
-// cascading failures into every later file.
+// runner never hits the 30s default and kills a test mid-flight — a test killed
+// at its timeout is torn down without the global afterEach draining its in-flight
+// native op, which then collides with the next test on the single in-process
+// engine and aborts it (code 236), cascading failures into every later file.
+// (Plain queryAsync is tracked for drain; withAbortTimeout tracks every async
+// query. This comment used to claim it was not.)
 const STRESS_TIMEOUT_MS = 120_000
 
 describe('async concurrency — correctness & no deadlock', () => {

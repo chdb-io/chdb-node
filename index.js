@@ -345,6 +345,7 @@ class ChdbQueryStream {
     this._format = format;
     this._signal = signal;
     this._closed = false;
+    this._inflight = null; // the fetch currently on a libuv thread, if any
   }
 
   get closed() { return this._closed; }
@@ -352,15 +353,26 @@ class ChdbQueryStream {
   async *[Symbol.asyncIterator]() {
     try {
       while (true) {
+        // cancel() may have landed while the previous fetch was in flight. Issuing
+        // another one would race the destroy it deferred onto that fetch.
+        if (this._closed) break;
         if (this._signal && this._signal.aborted) {
           throw new ChdbAbortError('Stream aborted');
         }
         let raw;
         try {
-          raw = await chdbNode.StreamFetch(this._handle);
+          // Tracked like every other native op (see withAbortTimeout): a fetch
+          // runs on a libuv thread against this stream's connection, so a
+          // Session.close() or a teardown that does not wait for it destroys the
+          // connection mid-op and aborts the engine for the whole process.
+          // Streaming was the one path that skipped tracking.
+          this._inflight = trackNative(chdbNode.StreamFetch(this._handle));
+          raw = await this._inflight;
         } catch (e) {
           this._closed = true;
           throw new ChdbStreamError(asQueryError(e).message, { cause: e });
+        } finally {
+          this._inflight = null;
         }
         if (raw.done) { this._closed = true; break; }
         yield new StreamChunk(raw.bytes, raw.numRows, this._format);
@@ -386,7 +398,20 @@ class ChdbQueryStream {
   cancel() {
     if (this._closed) return;
     this._closed = true;
-    try { chdbNode.StreamCancel(this._handle); } catch (_) { /* best effort */ }
+    const destroy = () => {
+      try { chdbNode.StreamCancel(this._handle); } catch (_) { /* best effort */ }
+    };
+    // StreamCancel destroys the stream handle synchronously, and the fetch worker
+    // reads that handle without holding a lock. Destroying it while a fetch is
+    // executing pulls it out from under the worker. Wait for the fetch, and
+    // register the wait so a Session.close() defers behind the destroy too.
+    if (this._inflight) {
+      const deferred = this._inflight.then(destroy, destroy);
+      pendingNativeOps.add(deferred);
+      deferred.finally(() => pendingNativeOps.delete(deferred));
+    } else {
+      destroy();
+    }
   }
 }
 
@@ -656,6 +681,17 @@ class Session {
       for (const sig of SESSION_SIGNALS) process.removeListener(sig, this.#signalHandler);
       this.#signalHandler = null;
     }
+    // Release a stream still open on this connection before the connection goes.
+    // Its handle points into the connection, so the stream's own finally would
+    // later call StreamCancel against a connection that no longer exists. Doing
+    // it here also orders the two teardowns correctly: a cancel that has to wait
+    // for an in-flight fetch registers that wait in pendingNativeOps, which the
+    // deferral below then waits for, so the stream handle is always destroyed
+    // before the connection it lives in.
+    if (this._activeStream && !this._activeStream.closed) {
+      try { this._activeStream.cancel(); } catch (_) { /* best effort */ }
+    }
+    this._activeStream = null;
     const conn = this.connection;
     this.connection = null;
     const teardown = () => {
