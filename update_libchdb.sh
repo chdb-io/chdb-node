@@ -13,7 +13,11 @@ set -e
 
 # Pre-release engine for the 3.1.0-rc.1 test line (carries the written-rows
 # accessors the raw/streaming insert needs; absent in the v26.5.0 stable line).
-LATEST_RELEASE=v26.5.1-rc.1
+#
+# CHDB_ENGINE_VERSION overrides it, which is how the release-check workflow runs
+# the suite against an engine this repository has not adopted yet. It is a
+# different thing from CHDB_LIB_VERSION below, which names the npm subpackage.
+LATEST_RELEASE="${CHDB_ENGINE_VERSION:-v26.5.1-rc.1}"
 
 # Version published for the @chdb/lib-<platform> native subpackages on npm.
 # DECOUPLED from LATEST_RELEASE on purpose: chdb-core has no 26.5.2/26.5.3
