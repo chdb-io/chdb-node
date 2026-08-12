@@ -9,6 +9,14 @@ import { queryAsync, queryBindAsync, Session } from '../../index.js'
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const HEAVY = (n: number) => `SELECT count() FROM numbers(${n})`
 
+// HEAVY is not heavy: the engine answers count() over numbers() from the range
+// itself, so HEAVY(60_000_000) returns in about 5ms — less than the sleeps below
+// it. Any case that needs a query to still be running when the next line
+// executes has to force per-row work, or it tests nothing on a fast machine and
+// only sometimes tests anything on a slow one. ~120ms, comfortably longer than
+// the 0-3ms sleeps.
+const SLOW = 'SELECT max(sipHash64(number)) FROM numbers(20000000)'
+
 // The storm/race cases below run dozens of heavy queries in sequence and take
 // ~15-30s on a fast runner. Give them a generous timeout so a slow/loaded CI
 // runner never hits the 30s default and kills a test mid-flight — a test killed
@@ -118,17 +126,36 @@ describe('lifecycle race: close / registry mutation during an in-flight query', 
     }
   }, STRESS_TIMEOUT_MS)
 
-  it('opening a new session while a default-conn query is in flight is safe (60x)', async () => {
-    for (let i = 0; i < 60; i++) {
-      const p = queryAsync(HEAVY(60_000_000), { format: 'CSV' }).then((r) => r.text().trim(), () => 'err')
+  // This used to assert that opening a session mid-query was safe. It is not:
+  // the session takes the process's one data directory, which destroys the
+  // default connection the query is running on, and the engine does not survive
+  // that. It aborts for the rest of the process, and on macOS the worker can
+  // stay blocked inside libchdb so the query's promise never settles — which
+  // surfaced far away, as the suite-wide afterEach drain timing out at 30s and
+  // every later test in the file reporting "a session is active".
+  //
+  // The constructor is synchronous and cannot wait for the query, so it refuses.
+  // An error naming what to await is worth more than a wait nobody asked for.
+  it('refuses to open a session while a default-conn query is in flight, and opens once it drains (12x)', async () => {
+    for (let i = 0; i < 12; i++) {
+      const p = queryAsync(SLOW, { format: 'CSV' })
       await sleep(i % 4)
-      const s = new Session()
+
+      let opened: Session | null = null
       try {
-        const r = await p
-        expect(r === '60000000' || r === 'err').toBe(true)
+        opened = new Session()
+      } catch (e) {
+        expect((e as Error).message).toMatch(/still running on the default connection/)
       } finally {
-        s.close() // close even if the assertion throws, or the session leaks into the next test
+        opened?.close() // if it did open, do not leak it into the next test
       }
+      expect(opened).toBeNull() // the refusal is the contract, not best-effort
+
+      // The query itself is untouched by the refusal, and the session opens as
+      // soon as it has drained — no lingering state, no retry backoff needed.
+      expect((await p).text().trim()).toMatch(/^\d+$/)
+      const s = new Session()
+      s.close()
     }
   }, STRESS_TIMEOUT_MS)
 })

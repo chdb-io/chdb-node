@@ -439,11 +439,28 @@ function queryBind(query, args = {}, format = "CSV") {
   }
 }
 
+// Ops running on the shared default connection, counted separately from
+// pendingNativeOps. Opening a Session destroys that connection — libchdb binds
+// one data directory per process, so the in-memory default has to yield — and
+// destroying it mid-op is what leaves a worker blocked inside libchdb with its
+// promise never settling. new Session() consults this to refuse instead.
+//
+// A counter, and decremented from a handler attached before any caller's, so a
+// caller that awaits its own query sees zero on the next line rather than
+// racing the bookkeeping.
+let pendingDefaultOps = 0;
+const releaseDefaultOp = () => { pendingDefaultOps--; };
+function trackDefault(nativePromise) {
+  pendingDefaultOps++;
+  nativePromise.then(releaseDefaultOp, releaseDefaultOp);
+  return nativePromise;
+}
+
 // v3 async (non-blocking) standalone query. opts: { format?, signal?, timeout? }
 function queryAsync(query, opts = {}) {
   if (!query) return Promise.resolve(emptyResult());
   const { sql, format } = prepArrow(query, opts, "CSV");
-  return withAbortTimeout(chdbNode.QueryAsync(sql, format), opts);
+  return withAbortTimeout(trackDefault(chdbNode.QueryAsync(sql, format)), opts);
 }
 
 function queryBindAsync(query, params = {}, opts = {}) {
@@ -451,7 +468,7 @@ function queryBindAsync(query, params = {}, opts = {}) {
   const { sql, format } = prepArrow(query, opts, "CSV");
   let bound;
   try { bound = formatParams(params); } catch (e) { return Promise.reject(e); }
-  return runExclusiveParam(globalParamChain, () => chdbNode.QueryAsync(sql, format, bound), opts);
+  return runExclusiveParam(globalParamChain, () => trackDefault(chdbNode.QueryAsync(sql, format, bound)), opts);
 }
 
 // v3 insert (default connection). Dispatches on the shape of `values`:
@@ -459,8 +476,8 @@ function queryBindAsync(query, params = {}, opts = {}) {
 // passthrough; Readable/AsyncIterable + format -> backpressured stream insert.
 function insert(opts) {
   return dispatchInsert(
-    (sql) => chdbNode.QueryAsync(sql, "CSV"),
-    (prefix, buf, countLines) => chdbNode.InsertRawAsync(prefix, buf, countLines),
+    (sql) => trackDefault(chdbNode.QueryAsync(sql, "CSV")),
+    (prefix, buf, countLines) => trackDefault(chdbNode.InsertRawAsync(prefix, buf, countLines)),
     opts || {});
 }
 
@@ -533,6 +550,21 @@ class Session {
   #signalHandler = null; // opt-in signal handler, deregistered on close()
 
   constructor(path = "", opts = {}) {
+    // Opening a session destroys the shared default connection: libchdb binds
+    // one data directory per process, so the in-memory default has to yield.
+    // Destroying it while a query is still running on it is not survivable —
+    // the engine aborts for the rest of the process, and on macOS the worker
+    // can stay blocked inside libchdb so its promise never settles, which turns
+    // into an unexplained hang somewhere later. The constructor is synchronous
+    // and cannot wait, so it refuses and says what to await instead.
+    if (pendingDefaultOps > 0) {
+      throw new ChdbConnectionError(
+        `Cannot open a session while ${pendingDefaultOps} standalone ` +
+        `${pendingDefaultOps === 1 ? 'operation is' : 'operations are'} still running on the ` +
+        `default connection. Await them first: opening a session closes that ` +
+        `connection, and closing it mid-operation aborts the engine for the ` +
+        `whole process.`);
+    }
     if (path === "") {
       // Create a temporary directory
       this.path = mkdtempSync(join(os.tmpdir(), TMP_PREFIX));
