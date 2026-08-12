@@ -354,6 +354,27 @@ export class Session {
 }
 
 /**
+ * Wait until nothing native is outstanding: queries and inserts still running on
+ * a libuv thread, and connections that `close()` deferred destroying behind them.
+ *
+ * Needed in the two cases where awaiting your own promise is not enough. An
+ * aborted or timed-out call rejects immediately while the engine keeps
+ * computing, so there is no promise left to wait on. And `close()` returns
+ * before the connection is really gone when an operation is still using it. In
+ * both cases `new Session()` refuses until this resolves.
+ *
+ * ```js
+ * const ac = new AbortController()
+ * const p = queryAsync(sql, { signal: ac.signal })
+ * ac.abort()
+ * await p.catch(() => {})   // rejects at once; the engine is still computing
+ * await drainPending()      // now the default connection is actually free
+ * const s = new Session('./data')
+ * ```
+ */
+export function drainPending(): Promise<void>;
+
+/**
  * Diagnostic version information for the package, the loaded libchdb, and the
  * current runtime.
  */

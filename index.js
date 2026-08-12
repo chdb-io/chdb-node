@@ -510,12 +510,33 @@ function trackNative(nativePromise) {
   return nativePromise;
 }
 
-// Wait for every native op started before now to fully settle. Internal helper
-// for test teardown: drained in the global afterEach before sessions are closed
-// so an early-settled (aborted/timed-out) op stays local to the test that
-// started it instead of poisoning the shared single-connection engine.
+// Connections that close() has released logically but not yet destroyed,
+// because ops were still running on them. The engine still counts them against
+// the one-data-directory limit, so a session at a different path cannot open
+// until they finish — and the error the engine gives for that says "close the
+// current session", which the caller already did.
+let pendingTeardowns = 0;
+
+// Wait until nothing native is outstanding: queries and inserts still running on
+// a libuv thread, and connections whose destruction close() deferred behind them.
+//
+// Two situations need this and cannot be handled by awaiting your own promise.
+// An aborted or timed-out call rejects immediately while the engine keeps
+// computing — there is no promise left to wait on. And close() returns before
+// the connection is actually gone when an op is still using it. In both cases
+// the next `new Session()` refuses, and this is the wait that clears it.
+//
+// Loops rather than snapshotting: a deferred teardown can be registered while
+// the drain is already running, and it has to be waited for too.
+async function drainPending() {
+  while (pendingNativeOps.size > 0) {
+    await Promise.allSettled([...pendingNativeOps]);
+  }
+}
+
+// Same thing under the name the test harness has always used.
 function _drainPendingOps() {
-  return Promise.allSettled([...pendingNativeOps]);
+  return drainPending();
 }
 
 // Force-close every session still open in this process. Internal helper for
@@ -561,9 +582,23 @@ class Session {
       throw new ChdbConnectionError(
         `Cannot open a session while ${pendingDefaultOps} standalone ` +
         `${pendingDefaultOps === 1 ? 'operation is' : 'operations are'} still running on the ` +
-        `default connection. Await them first: opening a session closes that ` +
-        `connection, and closing it mid-operation aborts the engine for the ` +
-        `whole process.`);
+        `default connection. Opening a session closes that connection, and closing ` +
+        `it mid-operation aborts the engine for the whole process. Await the ` +
+        `operation, or \`await drainPending()\` — an aborted or timed-out call ` +
+        `rejects straight away but the engine keeps computing, so there may be no ` +
+        `promise left to await.`);
+    }
+    // A session that close() could not destroy yet still holds the process's one
+    // data directory. Left to the engine this surfaces as "only one active data
+    // directory per process; close the current session", which is misleading
+    // advice for a caller who did exactly that.
+    if (pendingTeardowns > 0) {
+      throw new ChdbConnectionError(
+        `Cannot open a session yet: ${pendingTeardowns} closed ` +
+        `${pendingTeardowns === 1 ? 'session is' : 'sessions are'} still releasing ` +
+        `${pendingTeardowns === 1 ? 'its' : 'their'} connection, because operations ` +
+        `were running when close() was called. close() does not destroy a connection ` +
+        `out from under a running operation. \`await drainPending()\` first.`);
     }
     if (path === "") {
       // Create a temporary directory
@@ -738,7 +773,14 @@ class Session {
     // deferred closes too, so a new session is never created before the prior
     // connection is fully released.
     if (conn && pendingNativeOps.size > 0) {
-      const deferred = Promise.allSettled([...pendingNativeOps]).then(teardown);
+      pendingTeardowns++;
+      // Decremented in the same tick as the teardown it guards, not in a later
+      // .finally: the count exists to answer "is this connection still alive",
+      // and a caller that resumes between the two would be told yes about a
+      // connection that is already gone.
+      const deferred = Promise.allSettled([...pendingNativeOps]).then(() => {
+        try { teardown(); } finally { pendingTeardowns--; }
+      });
       pendingNativeOps.add(deferred);
       deferred.finally(() => pendingNativeOps.delete(deferred));
     } else {
@@ -826,7 +868,7 @@ function _arrowUnregister(connection, tableName) {
 
 module.exports = {
   query, queryBind, queryAsync, queryBindAsync, insert,
-  Session, version,
+  Session, version, drainPending,
   _closeAllSessions, _drainPendingOps,
   _arrowRegisterColumns, _arrowUnregister,
 };
