@@ -512,10 +512,22 @@ function trackNative(nativePromise) {
 
 // Connections that close() has released logically but not yet destroyed,
 // because ops were still running on them. The engine still counts them against
-// the one-data-directory limit, so a session at a different path cannot open
+// the one-data-directory limit, so a session at a DIFFERENT path cannot open
 // until they finish — and the error the engine gives for that says "close the
 // current session", which the caller already did.
-let pendingTeardowns = 0;
+//
+// Keyed by normalized data directory, because same-path sessions coexist: a
+// teardown pending on one of them is no reason to refuse another at that path.
+// Counted per key since several connections can share a directory.
+const pendingTeardownPaths = new Map();
+function addPendingTeardown(key) {
+  pendingTeardownPaths.set(key, (pendingTeardownPaths.get(key) || 0) + 1);
+}
+function removePendingTeardown(key) {
+  const n = pendingTeardownPaths.get(key);
+  if (n === undefined) return;
+  if (n <= 1) pendingTeardownPaths.delete(key); else pendingTeardownPaths.set(key, n - 1);
+}
 
 // Wait until nothing native is outstanding: queries and inserts still running on
 // a libuv thread, and connections whose destruction close() deferred behind them.
@@ -589,16 +601,28 @@ class Session {
         `promise left to await.`);
     }
     // A session that close() could not destroy yet still holds the process's one
-    // data directory. Left to the engine this surfaces as "only one active data
-    // directory per process; close the current session", which is misleading
-    // advice for a caller who did exactly that.
-    if (pendingTeardowns > 0) {
-      throw new ChdbConnectionError(
-        `Cannot open a session yet: ${pendingTeardowns} closed ` +
-        `${pendingTeardowns === 1 ? 'session is' : 'sessions are'} still releasing ` +
-        `${pendingTeardowns === 1 ? 'its' : 'their'} connection, because operations ` +
-        `were running when close() was called. close() does not destroy a connection ` +
-        `out from under a running operation. \`await drainPending()\` first.`);
+    // data directory, so a session at a DIFFERENT directory cannot open until it
+    // lands. Left to the engine that surfaces as "only one active data directory
+    // per process; close the current session" — misleading advice for a caller
+    // who did exactly that.
+    //
+    // Same directory is unaffected: those connections coexist by design, and the
+    // deferred teardown releases one connection, not the directory. A blanket
+    // refusal here would reject a supported pattern.
+    if (pendingTeardownPaths.size > 0) {
+      // "" is never a real key, so a fresh temp directory always counts as
+      // different — which it is.
+      const requested = path === "" ? "" : resolvePath(path);
+      const blocking = [...pendingTeardownPaths.keys()].filter((k) => k !== requested);
+      if (blocking.length > 0) {
+        throw new ChdbConnectionError(
+          `Cannot open a session at ${requested || "a new temporary directory"} yet: ` +
+          `a closed session at ${blocking[0]} is still releasing its connection, ` +
+          `because operations were running when close() was called. close() does ` +
+          `not destroy a connection out from under a running operation, and the ` +
+          `engine binds one data directory per process. \`await drainPending()\` ` +
+          `first, or open at the same path, which is allowed.`);
+      }
     }
     if (path === "") {
       // Create a temporary directory
@@ -619,6 +643,7 @@ class Session {
     // this.path is left as the caller passed it (public surface).
     try {
       const key = this.path ? resolvePath(this.path) : this.path;
+      this._key = key; // normalized directory, for the deferred-teardown bookkeeping
       this.connection = chdbNode.CreateConnection(key);
     } catch (e) {
       if (this.isTemp) { try { this.#removeTempDir(); } catch (_) {} }
@@ -773,13 +798,14 @@ class Session {
     // deferred closes too, so a new session is never created before the prior
     // connection is fully released.
     if (conn && pendingNativeOps.size > 0) {
-      pendingTeardowns++;
-      // Decremented in the same tick as the teardown it guards, not in a later
-      // .finally: the count exists to answer "is this connection still alive",
+      const key = this._key;
+      addPendingTeardown(key);
+      // Removed in the same tick as the teardown it guards, not in a later
+      // .finally: the entry exists to answer "is this connection still alive",
       // and a caller that resumes between the two would be told yes about a
       // connection that is already gone.
       const deferred = Promise.allSettled([...pendingNativeOps]).then(() => {
-        try { teardown(); } finally { pendingTeardowns--; }
+        try { teardown(); } finally { removePendingTeardown(key); }
       });
       pendingNativeOps.add(deferred);
       deferred.finally(() => pendingNativeOps.delete(deferred));

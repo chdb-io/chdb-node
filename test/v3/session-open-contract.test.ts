@@ -32,6 +32,20 @@ describe('new Session() while the default connection is busy', () => {
     s.close()
   }, 60_000)
 
+  // The bookkeeping is a counter, so its accuracy is entirely a question of when
+  // it is decremented: a tick late and a caller who has awaited their own query
+  // is refused for a connection that is already free. The release is registered
+  // ahead of any caller's handler for that reason, and extra microtask hops here
+  // would catch a change that moved it behind one.
+  it('never refuses after the await, however many microtasks are in between', async () => {
+    for (const hops of [0, 1, 3, 8]) {
+      await queryAsync(SLOW, { format: 'CSV' })
+      for (let i = 0; i < hops; i++) await Promise.resolve()
+      const s = new Session()
+      s.close()
+    }
+  }, 60_000)
+
   it('refuses after an abort, where there is no promise left to await', async () => {
     const ac = new AbortController()
     const p = queryAsync(SLOW, { format: 'CSV', signal: ac.signal })
@@ -65,5 +79,22 @@ describe('new Session() at a different path while a close is still landing', () 
     await drainPending()
     const second = new Session(b)
     second.close()
+  }, 60_000)
+
+  it('allows the same path, which needs no wait at all', async () => {
+    const a = tmpDir('same')
+
+    const first = new Session(a)
+    const q = first.queryAsync(SLOW, { format: 'CSV' })
+    first.close() // deferred, exactly as above
+
+    // Connections to one directory coexist by design, and the deferred teardown
+    // releases a connection rather than the directory. Refusing here would
+    // reject a supported pattern for no reason.
+    const alongside = new Session(a)
+    alongside.close()
+
+    await q.catch(() => {})
+    await drainPending()
   }, 60_000)
 })
