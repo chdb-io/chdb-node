@@ -63,6 +63,48 @@ Errors are typed (`ChdbSyntaxError`, `ChdbQueryError`, `ChdbConnectionError`,
 `ChdbAbortError`, `ChdbTimeoutError`, …), each carrying `.code`, the ClickHouse
 `.clickhouseCode`, and `.cause`.
 
+### One data directory at a time
+
+libchdb binds a single data directory per process, so opening a `Session` takes
+the slot the stateless `query`/`queryAsync` calls were using and closes their
+connection. A connection closed while an operation is still running on it aborts
+the engine for the rest of the process, so `new Session()` refuses instead:
+
+```js
+const { queryAsync, Session, drainPending } = require("chdb");
+
+const p = queryAsync("SELECT max(sipHash64(number)) FROM numbers(20000000)");
+new Session();   // throws: 1 standalone operation is still running
+await p;
+new Session();   // fine
+```
+
+Awaiting your own promise is not always enough. An aborted or timed-out call
+rejects immediately while the engine keeps computing, and `close()` returns
+before the connection is really gone when an operation is still using it.
+`drainPending()` waits for both:
+
+```js
+const ac = new AbortController();
+const p = queryAsync("SELECT max(sipHash64(number)) FROM numbers(20000000)", {
+  signal: ac.signal,
+});
+ac.abort();
+await p.catch(() => {});   // rejected, but the engine is still computing
+await drainPending();      // now the connection is actually free
+const s = new Session("./data");
+```
+
+Moving between directories works the same way: after `session.close()`, wait with
+`drainPending()` before opening one at a different path. Opening another session
+at the *same* path needs no wait — those connections coexist by design.
+
+**Behaviour change.** Earlier versions did not refuse — they closed the busy
+connection, which usually aborted the engine and on macOS could leave a query
+whose promise never settled. Code that opened a session without awaiting its
+standalone queries now gets an error at the call site instead of a failure
+somewhere later.
+
 ### Feature matrix
 
 | Capability | Status |

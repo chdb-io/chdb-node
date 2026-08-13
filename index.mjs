@@ -15,6 +15,7 @@ export const queryBindAsync = mod.queryBindAsync
 export const insert = mod.insert
 export const Session = mod.Session
 export const version = mod.version
+export const drainPending = mod.drainPending
 
 // Layer 3: ChdbCompileError is the only net-new error class; export it as a
 // named ESM binding so it is catchable by class. The fluent builder surface
