@@ -143,7 +143,8 @@ function serializeNumber(value: number): string {
  *  - string                  -> escaped single-quoted literal
  *  - Date                    -> 'YYYY-MM-DD HH:MM:SS' (UTC)
  *  - Array / TypedArray      -> [a, b, c]
- *  - Map                     -> {k: v, ...}  (keys escaped as string literals)
+ *  - TupleParam              -> (a, b, c)    (tuple literal, elements quoted)
+ *  - Map                     -> {k: v, ...}  (keys serialized by JS type)
  *  - plain object            -> {k: v, ...}  (keys escaped as string literals)
  *
  * @throws ChdbBindError on non-finite numbers, invalid Dates, or unsupported types.
@@ -174,10 +175,15 @@ export function serializeValue(value: unknown): string {
 
   if (Array.isArray(value)) return serializeArray(value)
 
+  if (isTupleParam(value)) return serializeTuple(value.values)
+
   if (value instanceof Map) {
     const parts: string[] = []
     for (const [k, v] of value) {
-      parts.push(`${escapeStringLiteral(String(k))}:${serializeValue(v)}`)
+      // Serialize the key by its JS type, not force-quoted: a numeric key binds
+      // as `42` (an `{'42':…}` string-quoted key is rejected for `Map(Int32,…)`),
+      // a string key as `'k'`. Matches @clickhouse/client-common formatting.
+      parts.push(`${serializeValue(k)}:${serializeValue(v)}`)
     }
     return `{${parts.join(',')}}`
   }
@@ -203,6 +209,30 @@ export function serializeValue(value: unknown): string {
 // here.
 function serializeArray(arr: ReadonlyArray<unknown>): string {
   return `[${arr.map((x) => serializeValue(x)).join(',')}]`
+}
+
+function serializeTuple(values: ReadonlyArray<unknown>): string {
+  return `(${values.map((x) => serializeValue(x)).join(',')})`
+}
+
+/**
+ * Detect `@clickhouse/client-common`'s `TupleParam` (members in `.values`, binds
+ * as the tuple literal `(a,b,c)` — not the `{k:v}` form the generic-object
+ * branch would otherwise produce).
+ *
+ * Matched by shape, not `instanceof`: the instance a caller passes originates
+ * from their own `@clickhouse/client(-common)` copy, which pnpm (or any nested
+ * install) may resolve to a different module instance than ours, so an
+ * `instanceof` against our imported class would spuriously miss it. The class is
+ * shipped un-minified with its name intact, so the constructor-name check is
+ * reliable for real instances while staying a private, non-`TupleParam` object
+ * (which keeps the `{k:v}` map form) untouched.
+ */
+function isTupleParam(value: object): value is { values: ReadonlyArray<unknown> } {
+  return (
+    value.constructor?.name === 'TupleParam' &&
+    Array.isArray((value as { values?: unknown }).values)
+  )
 }
 
 /**

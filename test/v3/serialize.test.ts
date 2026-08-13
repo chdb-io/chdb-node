@@ -96,8 +96,28 @@ describe('serializeValue (string assertions)', () => {
     expect(serializeValue(['a', "b'c"])).toBe("['a','b\\'c']")
     expect(serializeValue(new Int32Array([1, 2]))).toBe('[1,2]')
     expect(serializeValue(new Map<string, unknown>([['k', 1]]))).toBe("{'k':1}")
+    // Numeric Map key binds unquoted (Map(Int32, …)), string key stays quoted.
+    expect(serializeValue(new Map<number, unknown>([[42, 'v']]))).toBe("{42:'v'}")
     expect(serializeValue({ a: 1, b: 'x' })).toBe("{'a':1,'b':'x'}")
     expect(serializeValue([[1, 2], [3]])).toBe('[[1,2],[3]]')
+  })
+
+  it('serializes a TupleParam as a tuple literal, not an object', () => {
+    // @clickhouse/client-common's TupleParam { values }. Reproduce its shape
+    // (matched structurally, not by instanceof) so the test needs no dependency.
+    class TupleParam {
+      constructor(readonly values: unknown[]) {}
+    }
+    expect(serializeValue(new TupleParam(['main*', '^main.*$']))).toBe(
+      "('main*','^main.*$')",
+    )
+    expect(serializeValue(new TupleParam([42, 'foo', null]))).toBe("(42,'foo',NULL)")
+    // Nested inside an Array — the Array(Tuple(...)) param case.
+    expect(
+      serializeValue([new TupleParam(['a', 'b']), new TupleParam(['c', 'd'])]),
+    ).toBe("[('a','b'),('c','d')]")
+    // A private object literally named-differently keeps the {k:v} map form.
+    expect(serializeValue({ values: ['a', 'b'] })).toBe("{'values':['a','b']}")
   })
 })
 

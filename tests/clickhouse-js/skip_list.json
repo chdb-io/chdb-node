@@ -226,41 +226,6 @@
       "file": "packages/client-node/__tests__/integration/node_streaming_e2e.test.ts",
       "test": "[Node.js] streaming e2e > should stream a Parquet file",
       "reason": "Streams a Parquet file into chdb via `INSERT FORMAT Parquet`; chdb's `ParquetV3BlockInputFormat` rejects this specific fixture with `apache::thrift::protocol::TProtocolException: invalid TType`. The server's older Parquet input format accepts it. Engine-version divergence in Parquet decoder."
-    },
-    {
-      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
-      "test": "select with query binding > handles tuples in a parametrized query",
-      "reason": "chdb's `queryBindAsync` serializes Tuple parameter values using `{'field':value}` map-literal form. The engine's parser expects `(value1, value2, ...)` positional form. Real chdb-engine parameter-binding gap for compound types."
-    },
-    {
-      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
-      "test": "select with query binding > handles arrays of tuples in a parametrized query",
-      "reason": "Same chdb parameter-binding gap for Tuple — applies to Array(Tuple(...))."
-    },
-    {
-      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
-      "test": "select with query binding > handles maps with tuples in a parametrized query",
-      "reason": "Same chdb parameter-binding gap for Tuple — applies to Map(K, Tuple(...))."
-    },
-    {
-      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
-      "test": "select with query binding > handles maps with nested arrays in a parametrized query",
-      "reason": "chdb parameter-binding for Map(K, Array(...)) generates a serialization the engine parser rejects."
-    },
-    {
-      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
-      "test": "select with query binding > handles maps with nullable values in a parametrized query",
-      "reason": "chdb parameter-binding for Map(K, Nullable(V)) generates a serialization the engine parser rejects."
-    },
-    {
-      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
-      "test": "select with query binding > Nested boolean types > handles boolean in a tuple",
-      "reason": "Boolean inside Tuple parameter binding hits the same Tuple-serialization divergence above."
-    },
-    {
-      "file": "packages/client-common/__tests__/integration/select_query_binding.test.ts",
-      "test": "select with query binding > Nested boolean types > handles boolean in a mixed nested structure",
-      "reason": "Boolean inside nested Tuple/Map parameter binding — same root cause."
     }
   ]
 }
