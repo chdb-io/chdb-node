@@ -16,7 +16,7 @@ set -e
 #
 # Keep the pin on its own line and literal: the release check greps for it when
 # it proposes a bump.
-CHDB_ENGINE_PIN=v26.5.1-rc.1
+CHDB_ENGINE_PIN=v26.7.0
 
 # CHDB_ENGINE_VERSION overrides the pin, which is how the release check runs the
 # suite against an engine this repository has not adopted yet. It is a different
