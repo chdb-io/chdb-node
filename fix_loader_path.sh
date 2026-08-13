@@ -1,8 +1,43 @@
 #!/bin/bash
 
 cd "$(dirname "$0")"
+set -o pipefail
 
+# Point the addon at the libchdb.so that ships beside it, instead of whatever the
+# linker recorded.
+#
+# Which name the linker records comes from the engine's install_name, and that is
+# not stable: chdb-core shipped `libchdb.so` through v26.5.x and `@rpath/libchdb.so`
+# from v26.7.0. `install_name_tool -change` silently succeeds when the old name
+# matches nothing, so a script that knew only one spelling left the addon pointing
+# at `@rpath/libchdb.so` with no LC_RPATH to resolve it — and the failure surfaced
+# far away, as ERR_DLOPEN_FAILED when the loader tried to require the addon.
+#
+# Hence: rewrite every spelling we have seen, then verify. A dependency this script
+# cannot resolve is a build failure, not something to discover at runtime.
 if [[ $(uname -s) == "Darwin" ]]; then
-    install_name_tool -change libchdb.so @loader_path/../../libchdb.so build/Release/chdb_node.node
-    otool -L build/Release/chdb_node.node
+    ADDON=build/Release/chdb_node.node
+    TARGET=@loader_path/../../libchdb.so
+
+    for old in libchdb.so @rpath/libchdb.so; do
+        install_name_tool -change "$old" "$TARGET" "$ADDON" 2>/dev/null || true
+    done
+
+    otool -L "$ADDON"
+
+    # Assert what the dependency IS, rather than grepping for what it is not. That
+    # covers otool failing on a missing or unreadable addon (no output), an addon
+    # with no libchdb dependency at all, more than one of them, and a path that
+    # merely resembles the target — a `grep "$TARGET"` would accept
+    # @loader_path/ab/cd/libchdb.so, since the dots are wildcards.
+    dep=$(otool -L "$ADDON" | awk '/libchdb\.so/ { print $1 }')
+    if [ "$dep" != "$TARGET" ]; then
+        echo "fix_loader_path.sh: expected $ADDON to depend on exactly" >&2
+        echo "  $TARGET" >&2
+        echo "and it depends on:" >&2
+        echo "  ${dep:-<nothing, or otool failed>}" >&2
+        echo "If that is a new install_name spelling from the engine, add it to the" >&2
+        echo "loop above. Left alone, dlopen fails at runtime." >&2
+        exit 1
+    fi
 fi
