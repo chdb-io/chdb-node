@@ -16,26 +16,35 @@ set -e
 #
 # Keep the pin on its own line and literal: the release check greps for it when
 # it proposes a bump.
-CHDB_ENGINE_PIN=v26.5.1-rc.1
+CHDB_ENGINE_PIN=v26.7.0
 
 # CHDB_ENGINE_VERSION overrides the pin, which is how the release check runs the
 # suite against an engine this repository has not adopted yet. It is a different
 # thing from CHDB_LIB_VERSION below, which names the npm subpackage.
 LATEST_RELEASE="${CHDB_ENGINE_VERSION:-$CHDB_ENGINE_PIN}"
 
-# Version published for the @chdb/lib-<platform> native subpackages on npm.
-# DECOUPLED from LATEST_RELEASE on purpose: chdb-core has no 26.5.2/26.5.3
-# release. 26.5.2 was a packaging revision for the non-relocatable Linux binary
-# (chdb-io/chdb-node#50); 26.5.3 is another one: the native addon source gained
-# the Layer 3 Arrow C Data Interface exports (ArrowRegisterColumns, 98d81b6) and
-# .stream() server-side parameter binding (f6457ee) AFTER 26.5.2 was published,
-# and npm forbids republishing over an existing version — without a bump the
-# release pipeline "skips already-published" and the new native code never ships
-# (chdb-io/chdb-node#72). The bundled libchdb stays LATEST_RELEASE above (the
-# only build carrying the #73/#15 C-ABI the binding requires). The publish +
-# cleanroom workflows read CHDB_LIB_VERSION from here, and the main package's
-# optionalDependencies pin this exact value.
-LIBCHDB_NPM_VERSION=26.5.3
+# Version published for the @chdb/lib-<platform> native subpackages on npm. It
+# says which engine is inside, then counts repackagings of that same engine:
+#
+#   engine v26.7.2        ->  26.7.2-stable.1, .2, ...
+#   engine v26.7.3-rc.1   ->  26.7.3-rc.1.1, .2, ...
+#
+# The counter exists because npm forbids republishing a version, so an addon-only
+# change needs a new number even though the engine has not moved. That used to be
+# done by inventing patch releases chdb-core never made — 26.5.2 for the
+# non-relocatable Linux binary (chdb-io/chdb-node#50), 26.5.3 for the Layer 3
+# Arrow exports and .stream() parameter binding that landed after it
+# (chdb-io/chdb-node#72) — which read as engine versions and were not.
+#
+# scripts/check-version-scheme.mjs derives the expected value from
+# CHDB_ENGINE_PIN and fails the build if this or the main package's
+# optionalDependencies disagree. They have to match exactly: the -suffix makes
+# this a semver prerelease, which no range matches, and because those deps are
+# optional npm would skip them without an error — the user would meet it as
+# ERR_DLOPEN_FAILED instead.
+#
+# The publish and cleanroom workflows read CHDB_LIB_VERSION from here.
+LIBCHDB_NPM_VERSION=26.7.0-stable.1
 
 # Download the correct version based on the platform
 case "$(uname -s)" in
