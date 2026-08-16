@@ -59,6 +59,14 @@ jobs:
         shell: bash
         run: rm -rf node_modules/@chdb/lib-*
       - run: npm run test:all
+      - name: The subpackage version has to name the engine it carries
+        # Run here and not only in pull request CI, because CI is not the last
+        # gate: this workflow fires on a tag, and a tag can be pushed to a commit
+        # no pull request ever checked. An npm version cannot be republished, so a
+        # subpackage published under a version that does not match its engine is
+        # permanent.
+        run: node scripts/check-version-scheme.mjs
+
       - name: Derive subpackage version from update_libchdb.sh
         run: |
           echo "CHDB_LIB_VERSION=$(grep -E '^LIBCHDB_NPM_VERSION=' update_libchdb.sh | cut -d= -f2)" >> "$GITHUB_ENV"
@@ -69,11 +77,27 @@ jobs:
         run: |
           NAME=$(node -p "require('./package.json').name")
           VER=$(node -p "require('./package.json').version")
+
+          # Which dist-tag this lands on, decided by what the version says about
+          # the engine inside it. A subpackage built from a chdb-core release
+          # candidate must not become what `npm install @chdb/lib-<platform>` or
+          # `npm view` reports, or a candidate engine turns into the default one.
+          #
+          # Keyed on -rc. rather than on "is a prerelease", because every version
+          # this scheme produces is a prerelease to semver — 26.7.0-stable.1 has a
+          # prerelease part too. Deciding by the hyphen would keep the stable
+          # subpackages off latest forever.
+          case "$VER" in
+          *-rc.*) DIST_TAG=rc ;;
+          *) DIST_TAG=latest ;;
+          esac
+          echo "publishing $NAME@$VER to the '$DIST_TAG' dist-tag"
+
           if npm view "$NAME@$VER" version >/dev/null 2>&1; then
             echo "$NAME@$VER already published; skipping (lets a re-run finish a partially-published release)."
             exit 0
           fi
-          if out=$(npm publish --access public 2>&1); then
+          if out=$(npm publish --access public --tag "$DIST_TAG" 2>&1); then
             echo "$out"
           else
             echo "$out"
