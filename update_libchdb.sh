@@ -16,7 +16,7 @@ set -e
 #
 # Keep the pin on its own line and literal: the release check greps for it when
 # it proposes a bump.
-CHDB_ENGINE_PIN=v26.7.0
+CHDB_ENGINE_PIN=v26.7.1-rc.1
 
 # CHDB_ENGINE_VERSION overrides the pin, which is how the release check runs the
 # suite against an engine this repository has not adopted yet. It is a different
@@ -44,7 +44,7 @@ LATEST_RELEASE="${CHDB_ENGINE_VERSION:-$CHDB_ENGINE_PIN}"
 # ERR_DLOPEN_FAILED instead.
 #
 # The publish and cleanroom workflows read CHDB_LIB_VERSION from here.
-LIBCHDB_NPM_VERSION=26.7.0-stable.1
+LIBCHDB_NPM_VERSION=26.7.1-rc.1.1
 
 # Download the correct version based on the platform
 case "$(uname -s)" in
