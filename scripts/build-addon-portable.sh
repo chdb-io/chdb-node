@@ -63,11 +63,11 @@ echo "build-addon-portable: re-linking in $BUILDER_IMAGE via $RUNTIME"
   "$BUILDER_IMAGE" bash -euo pipefail -c '
     dnf -y --setopt=retries=5 install "${TOOLSET}-gcc-c++" make >/dev/null
     export PATH="/opt/rh/${TOOLSET}/root/usr/bin:$PATH"
-    # No pipe: under pipefail, a reader that closes after one line sends
-    # SIGPIPE upstream and the whole script dies with 141. It is a race, so it
-    # passed locally and killed the runner.
-    v=$(g++ --version); echo "${v%%$'\n'*}"
-    v=$(ldd --version); echo "${v%%$'\n'*}"
+    # Printed whole rather than piped through head: under pipefail a reader that
+    # closes after one line SIGPIPEs the writer and takes the script with it, and
+    # no single quotes can appear here either — this whole command is one.
+    g++ --version
+    ldd --version
     # Force a real recompile: make would otherwise consider the object the host
     # produced up to date and only the link step would change hosts.
     rm -rf build/Release/obj.target build/Release/chdb_node.node
