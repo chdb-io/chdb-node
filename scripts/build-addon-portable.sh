@@ -47,7 +47,7 @@ for c in docker podman; do command -v "$c" >/dev/null && { RUNTIME="$c"; break; 
 # node-gyp puts them outside the repository by default. Read the path out of the
 # Makefile rather than guessing where node-gyp cached them, and mount it at the
 # same location so the recorded -I flags still resolve.
-HDR=$(grep -ohE -- '-I[^ ]*/include/node' build/*.mk 2>/dev/null | head -1 | sed 's/^-I//' || true)
+HDR=$(grep -ohE -- '-I[^ ]*/include/node' build/*.mk 2>/dev/null | sed -n '1s/^-I//p' || true)
 [ -n "$HDR" ] || { echo "build-addon-portable: no node header include found in build/*.mk" >&2; exit 1; }
 HDR_ROOT=$(cd "$HDR/../../.." && pwd)
 
@@ -63,8 +63,11 @@ echo "build-addon-portable: re-linking in $BUILDER_IMAGE via $RUNTIME"
   "$BUILDER_IMAGE" bash -euo pipefail -c '
     dnf -y --setopt=retries=5 install "${TOOLSET}-gcc-c++" make >/dev/null
     export PATH="/opt/rh/${TOOLSET}/root/usr/bin:$PATH"
-    g++ --version | head -1
-    ldd --version | head -1
+    # No pipe: under pipefail, a reader that closes after one line sends
+    # SIGPIPE upstream and the whole script dies with 141. It is a race, so it
+    # passed locally and killed the runner.
+    v=$(g++ --version); echo "${v%%$'\n'*}"
+    v=$(ldd --version); echo "${v%%$'\n'*}"
     # Force a real recompile: make would otherwise consider the object the host
     # produced up to date and only the link step would change hosts.
     rm -rf build/Release/obj.target build/Release/chdb_node.node
