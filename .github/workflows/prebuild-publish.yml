@@ -93,16 +93,40 @@ jobs:
           esac
           echo "publishing $NAME@$VER to the '$DIST_TAG' dist-tag"
 
+          # Publishing is skipped when the version is already there, but the
+          # dist-tag is not: --tag only applies to a publish that happens, so a
+          # version published before this job knew about dist-tags keeps whatever
+          # it was given then. A subpackage published with no --tag took 'latest'
+          # — that is the state this is here to correct, and skipping past it
+          # would leave a candidate engine as the default one indefinitely.
+          #
+          # Not paired with removing 'latest' when publishing a candidate. A
+          # package with no 'latest' cannot be installed by name at all, which is
+          # worse than the problem; a candidate simply does not touch it. If
+          # 'latest' is wrong, the stable release that follows sets it right.
+          reconcile_dist_tag() {
+            if [ "$(npm view "$NAME@$DIST_TAG" version 2>/dev/null)" = "$VER" ]; then
+              echo "'$DIST_TAG' already points at $VER"
+              return 0
+            fi
+            echo "moving '$DIST_TAG' to $VER"
+            npm dist-tag add "$NAME@$VER" "$DIST_TAG"
+          }
+
           if npm view "$NAME@$VER" version >/dev/null 2>&1; then
             echo "$NAME@$VER already published; skipping (lets a re-run finish a partially-published release)."
+            reconcile_dist_tag
             exit 0
           fi
           if out=$(npm publish --access public --tag "$DIST_TAG" 2>&1); then
             echo "$out"
           else
             echo "$out"
+            # Same reasoning as the skip above: the version is on the registry and
+            # this publish applied no tag to it, so the tag still has to be set.
             echo "$out" | grep -qiE "cannot publish over|previously published|EPUBLISHCONFLICT|403" \
               && echo "$NAME@$VER already on the registry (publish conflict); treating as success." \
+              && reconcile_dist_tag \
               || exit 1
           fi
         env:
