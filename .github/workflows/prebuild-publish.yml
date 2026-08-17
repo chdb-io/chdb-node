@@ -12,8 +12,12 @@ name: prebuild-publish
 #      installed location, and the subpath exports. (This is the gate that #50 needed:
 #      a binary with the build machine's absolute rpath passed the in-tree build test
 #      but failed on every clean host.)
-#   4. promote — only after verify is green on every leg, move 'latest' to the new
-#      version. If verify fails, users on 'latest' never see the broken release.
+#   3b. verify-old-distro — the same installed-package tests inside Debian bookworm,
+#      which is older than any GitHub runner image and is what `node:22` actually
+#      gives people. Catches a binary that only loads on a modern runtime.
+#   4. promote — only after both verify jobs are green on every leg, move 'latest'
+#      to the new version. If either fails, users on 'latest' never see the
+#      broken release.
 #
 # Gated on update_libchdb.sh pointing at a libchdb release that includes the required
 # C ABI (chdb_query_with_params, chdb_query_arrow).
@@ -48,6 +52,15 @@ jobs:
       - run: npm install --ignore-scripts
       - run: npm run libchdb
       - run: npm run build
+      - name: Re-link the addon against an old glibc so it loads off the runner
+        # The runner's GCC and glibc decide which symbol versions end up in the
+        # binary, and this one is newer than most machines that will install it:
+        # a straight ubuntu-24.04 build only loads on ubuntu-24.04-era systems
+        # and dies at require() on Debian bookworm, the base of the node:22 /
+        # node:20 / node:lts images. Nothing about the source can lower that
+        # floor, so the link happens in a container that is old enough.
+        if: runner.os == 'Linux'
+        run: bash scripts/build-addon-portable.sh
       - name: Drop the installed @chdb/lib-* so tests exercise the just-built addon
         # The loader prefers an installed @chdb/lib-<platform> subpackage over the
         # local build (src/loader.ts). npm install pulls the PREVIOUSLY published
@@ -205,8 +218,43 @@ jobs:
           node -e "console.log('verifying installed chdb', require('chdb/package.json').version, 'on', process.version, process.platform, process.arch)"
           npx vitest run test
 
+  verify-old-distro:
+    # Every leg of `verify` runs on a GitHub runner image, and all four of them
+    # carry a glibc and libstdc++ newer than what users have — which is why an
+    # addon needing GLIBCXX_3.4.32 passed the whole matrix and then failed on
+    # `docker run node:22 npm i chdb`. This job is the counterexample: Debian
+    # bookworm, the base of the node:22 / node:20 / node:lts images, is the
+    # oldest runtime in common use, so if the published binary loads here the
+    # symbol floor is genuinely low. Two Linux legs against twelve — the
+    # cheapest kind of leg there is, and they run alongside the rest.
+    needs: main
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    container: node:22-bookworm
+    steps:
+      - uses: actions/checkout@v4   # only to obtain the installed-package tests
+      - name: Install the PUBLISHED chdb inside bookworm and run the installed-package tests
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          echo "distro: $(. /etc/os-release; echo "$PRETTY_NAME"), glibc $(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
+          work="$(mktemp -d)"
+          cp -R "$GITHUB_WORKSPACE/test/pack" "$work/test"
+          cd "$work"
+          npm init -y >/dev/null
+          ok=
+          for i in 1 2 3 4 5 6; do
+            if npm install "chdb@$VER" vitest@2 >/tmp/i.log 2>&1; then ok=1; break; fi
+            echo "install attempt $i failed (registry propagation?); retry in 15s"; sleep 15
+          done
+          [ -n "$ok" ] || { echo "could not install chdb@$VER"; tail -20 /tmp/i.log; exit 1; }
+          npx vitest run test
+
   promote:
-    needs: verify
+    needs: [verify, verify-old-distro]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-node@v4

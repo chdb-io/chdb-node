@@ -53,6 +53,13 @@ fi
 # even on the build runner where a stale absolute path still resolves.
 bash scripts/assert-relocatable.sh "$PKG/chdb_node.node"
 
+# Guard against shipping a binary that only loads on distributions as new as the
+# build machine: assert it demands no libstdc++ and no glibc symbol above the
+# supported floor. Kept apart from the relocatability assert because it fails for
+# an unrelated reason and is fixed elsewhere — a stale path is a packaging bug,
+# a symbol version is a choice of build host (scripts/build-addon-portable.sh).
+bash scripts/assert-runtime-baseline.sh "$PKG/chdb_node.node"
+
 echo "module.exports = require('./chdb_node.node');" > "$PKG/index.js"
 
 LIBC_FIELD=""

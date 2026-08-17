@@ -118,6 +118,13 @@ jobs:
           cache: npm
       - run: sudo apt-get update && sudo apt-get install -y patchelf binutils
       - run: npm install --ignore-scripts && npm run libchdb && npm run build
+      - name: Re-link the addon against an old glibc
+        # Same step the publish workflow runs, for the same reason: a binary
+        # linked on ubuntu-24.04 records that runner's symbol versions and will
+        # not load on anything older. Doing it here means a pull request that
+        # raises the floor goes red now, instead of at tag time when the npm
+        # version is already unrecallable.
+        run: bash scripts/build-addon-portable.sh
       - name: Pack main + platform subpackage
         run: |
           # Stamp the subpackage with the SAME version main pins in
@@ -154,3 +161,9 @@ jobs:
           # passes on the build runner even when the binary is unshippable.
           rm -f "$GITHUB_WORKSPACE/libchdb.so"
           node smoke-e2e.mjs
+      - name: The same install has to run on Debian bookworm
+        # The symbol assert reads the binary; this runs it. bookworm is older
+        # than every GitHub runner image and is the base of the node:22 /
+        # node:20 / node:lts images, so it is where users first meet a binary
+        # that demands a newer libstdc++ or glibc than they have.
+        run: docker run --rm -v /tmp/cleanroom:/w -w /w node:22-bookworm node smoke-e2e.mjs
