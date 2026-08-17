@@ -26,6 +26,22 @@
           # an old-glibc container (scripts/build-addon-portable.sh), and
           # scripts/assert-runtime-baseline.sh checks what comes out.
           "ldflags": [ "-static-libstdc++", "-static-libgcc" ]
+        }],
+        ["OS=='mac'", {
+          # The same failure mode as the Linux branch above, by a different
+          # mechanism: without this, the deployment target is whatever the build
+          # machine's SDK defaults to, and it becomes a hard floor — a binary
+          # built on a macos-15 runner refuses to load on anything older. The
+          # published subpackages happen to sit at 11.0 today, which is right,
+          # but only because no runner has moved yet.
+          #
+          # 11.0 rather than lower: libchdb.so is itself built for 11.0 on arm64,
+          # and Node's own macOS binaries require 11.0 from Node 20 on, so
+          # nothing that can run this can be older. scripts/assert-runtime-baseline.sh
+          # checks the result.
+          "xcode_settings": {
+            "MACOSX_DEPLOYMENT_TARGET": "11.0"
+          }
         }]
       ]
     }

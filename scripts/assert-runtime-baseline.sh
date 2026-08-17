@@ -30,20 +30,42 @@
 #      the addon in an old-glibc container (scripts/build-addon-portable.sh) —
 #      a build on the ubuntu-24.04 runner lands at 2.38 and fails here.
 #
-# macOS has no ELF symbol versioning; the check is skipped there.
+#   3. On macOS, no deployment target above 11.0. A Mach-O records the oldest OS
+#      it will load on and that number comes from the build machine's SDK, so the
+#      same bug arrives by a different mechanism: a binary built on a newer runner
+#      quietly stops loading on older macOS. 11.0 because libchdb.so is itself
+#      built for 11.0 on arm64 and Node's own macOS builds require 11.0 from Node
+#      20 on, so nothing that can run this is older. The published subpackages sit
+#      at 11.0 today only because no runner has moved yet — binding.gyp now says
+#      it and this checks it.
 #
 # Usage: assert-runtime-baseline.sh <path-to-chdb_node.node>
 set -euo pipefail
 
 MAX_GLIBC=2.28
+MAX_MACOS=11.0
 
 NODE_FILE="${1:?usage: assert-runtime-baseline.sh <chdb_node.node>}"
 [ -f "$NODE_FILE" ] || { echo "assert-runtime-baseline: no such file: $NODE_FILE" >&2; exit 1; }
 
 fail() { echo "assert-runtime-baseline: FAIL — $1" >&2; exit 1; }
 
+if [ "$(uname -s)" = "Darwin" ]; then
+  command -v otool >/dev/null || fail "otool not found (needs the Xcode command line tools)"
+
+  minos=$(otool -l "$NODE_FILE" | awk '/LC_BUILD_VERSION/ { seen = 1 } seen && $1 == "minos" { print $2; exit }')
+  [ -n "$minos" ] || fail "$NODE_FILE has no LC_BUILD_VERSION, so it declares no floor to check"
+
+  if [ "$(printf '%s\n%s\n' "$MAX_MACOS" "$minos" | sort -V | tail -1)" != "$MAX_MACOS" ]; then
+    fail $'the addon refuses to load below macOS '"$minos"', and the baseline is '"$MAX_MACOS"$'.\nThe deployment target came from the build machine rather than from binding.gyp.\nCheck that MACOSX_DEPLOYMENT_TARGET is still set there and that the build used it.'
+  fi
+
+  echo "assert-runtime-baseline: OK — $(basename "$NODE_FILE") loads on macOS $minos and up (baseline $MAX_MACOS)"
+  exit 0
+fi
+
 if [ "$(uname -s)" != "Linux" ]; then
-  echo "assert-runtime-baseline: skipped on $(uname -s) (ELF symbol versioning is Linux-only)"
+  echo "assert-runtime-baseline: skipped on $(uname -s) — nothing known about its runtime floors"
   exit 0
 fi
 
