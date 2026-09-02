@@ -21,9 +21,11 @@ Run SQL you have, or anything ClickHouse-specific?   -> raw SQL  (query / sql``)
 Build queries programmatically, type-safe + bound?   -> fluent   (selectFrom / insertInto)  [src/layer3/AGENTS.md]
 Read/JOIN external sources (S3/Postgres/…)?          -> connect({ url })                     [src/layer3/AGENTS.md]
 Migrating from @clickhouse/client (drop-in)?         -> chdb/connection                      [src/connection/AGENTS.md]
+Need the database to survive losing the machine?     -> chdb/durable   (experimental)        [docs/design/durable-control-plane.md]
 ```
 
-All four sit on the same engine. Default to raw SQL for one-off analytics; use the fluent
+The first four sit on the same engine; `chdb/durable` sits *above* it and loads no native
+code of its own — the caller injects the engine. Default to raw SQL for one-off analytics; use the fluent
 builder when an app or LLM assembles queries from parts (it binds every value server-side).
 
 ## Minimal examples
