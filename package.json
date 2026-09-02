@@ -18,6 +18,16 @@
       "require": "./dist/connection/index.js",
       "default": "./dist/connection/index.js"
     },
+    "./durable": {
+      "types": "./dist/durable/index.d.ts",
+      "require": "./dist/durable/index.js",
+      "default": "./dist/durable/index.js"
+    },
+    "./libchdb": {
+      "types": "./dist/libchdb/index.d.ts",
+      "require": "./dist/libchdb/index.js",
+      "default": "./dist/libchdb/index.js"
+    },
     "./agents": {
       "types": "./integrations/agents/index.d.mts",
       "import": "./integrations/agents/index.mjs"
@@ -52,7 +62,9 @@
     "build": "node-gyp configure build --verbose && npm run fixloaderpath && npm run build:ts",
     "build:ts": "rm -rf dist && tsc -p tsconfig.build.json",
     "prepack": "npm run build:ts",
-    "install": "node -e \"\""
+    "install": "node -e \"\"",
+    "test:durable": "npm run build:ts && vitest run --config vitest.durable.config.ts",
+    "test:durable:e2e": "bun test test/durable/libchdb-e2e.bun.test.ts"
   },
   "author": {
     "name": "chdb",
