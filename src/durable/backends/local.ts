@@ -435,12 +435,26 @@ export class LocalDurableBackend implements DurableBackend {
     return latest
   }
 
+  /**
+   * Whether a version has been published.
+   *
+   * Only `ENOENT` means no. Anything else — `EIO`, `EACCES` — means the answer
+   * is unknown, and this answer decides which version is current: swallowing
+   * the error would hand back the version below the failure as though the
+   * chain ended there, and every operation after it would run against a state
+   * that is not the object's. An unreadable directory is a backend failure,
+   * not an empty one.
+   */
   private async versionExists(version: number): Promise<boolean> {
     try {
       await lstat(join(this.root, VERSIONS_DIR, `${version}.json`))
       return true
-    } catch {
-      return false
+    } catch (e) {
+      if (errno(e) === 'ENOENT') return false
+      throw new DurableBackendError(
+        `durable: failed to determine whether version ${version} exists in ${this.describe}`,
+        { cause: e },
+      )
     }
   }
 

@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { existsSync } from 'fs'
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -716,6 +716,23 @@ describe('local backend conditional operations', () => {
     for (const key of ['../escape', 'a/../../x', '/abs']) {
       await expect(be.getBytes(key), key).rejects.toThrow(/invalid key|escapes/)
     }
+  })
+
+  it('surfaces an unreadable version chain instead of serving a stale version', async () => {
+    // The probe's answer decides which version is current. Treating an I/O or
+    // permission failure as "absent" would hand back the version below it and
+    // run every later operation against a state that is not the object's.
+    const be = await backend()
+    await chained(be)
+    const versions = join(be.root, '.head-versions')
+    await chmod(versions, 0o000)
+    try {
+      await expect(be.getBytesWithEtag('head.json')).rejects.toThrow(/failed to determine/)
+    } finally {
+      await chmod(versions, 0o755)
+    }
+    // Readable again, and the chain is intact.
+    expect((await be.getBytesWithEtag('head.json'))!.etag).toBe('v1')
   })
 
   it('accepts the same keys the lexical validator does', async () => {
