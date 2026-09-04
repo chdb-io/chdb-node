@@ -204,7 +204,12 @@ export class LocalDurableBackend implements DurableBackend {
     }
     const full = resolve(this.root, key)
     const rel = relative(this.root, full)
-    if (rel === '' || rel.startsWith('..') || isAbsolute(rel) || rel.split(sep).includes('..')) {
+    // Compare path *segments*, not a string prefix. `rel.startsWith('..')`
+    // also rejects an ordinary name that happens to begin with two dots —
+    // `..metadata` is a legal key, since the protocol forbids `.` and `..`
+    // only as whole components — and refusing it would make an object the
+    // format allows unreadable here while `isValidObjectKey` accepted it.
+    if (rel === '' || isAbsolute(rel) || rel.split(sep).includes('..')) {
       throw new DurableBackendError(`durable: key ${JSON.stringify(key)} escapes the object prefix`)
     }
     return full

@@ -713,7 +713,21 @@ describe('local backend conditional operations', () => {
 
   it('refuses a key that would escape the object prefix', async () => {
     const be = await backend()
-    await expect(be.getBytes('../escape')).rejects.toThrow(/invalid key|escapes/)
+    for (const key of ['../escape', 'a/../../x', '/abs']) {
+      await expect(be.getBytes(key), key).rejects.toThrow(/invalid key|escapes/)
+    }
+  })
+
+  it('accepts the same keys the lexical validator does', async () => {
+    // The two checks have to agree, or the format allows an object this
+    // backend cannot touch. A name beginning with two dots is not traversal:
+    // the protocol forbids `.` and `..` only as whole components.
+    const be = await backend()
+    for (const key of ['..metadata', 'dir/..cache', '...x', 'wal/..a.jsonl']) {
+      expect(isValidObjectKey(key), key).toBe(true)
+      // Reaching a missing key rather than a rejection is the point.
+      expect(await be.getBytes(key), key).toBeUndefined()
+    }
   })
 
   it('reports a missing key rather than throwing', async () => {
