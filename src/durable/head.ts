@@ -41,6 +41,20 @@ function corrupt(what: string): never {
   throw new DurableCorruptError(`durable: head.json ${what}`)
 }
 
+/**
+ * Read a field that must be present.
+ *
+ * `value['x'] ?? fallback` cannot tell an absent property from an explicit
+ * `null`, and for this document that distinction carries meaning: a released
+ * lease is *explicitly* three nulls, while a lease missing those keys is a
+ * truncated write. Treating the second as the first hands the object to a new
+ * writer on the strength of a corrupt head.
+ */
+function required(obj: Record<string, unknown>, key: string, where: string): unknown {
+  if (!(key in obj)) corrupt(`${where} is required`)
+  return obj[key]
+}
+
 function safeInt(value: unknown, where: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
     corrupt(`${where} must be a non-negative safe integer`)
@@ -86,10 +100,20 @@ function parseProtocol(value: unknown): DurableProtocol {
     return { version: PROTOCOL_VERSION, reader_features: [], writer_features: [] }
   }
   if (!isPlainObject(value)) corrupt('protocol must be an object')
+  // An absent key takes the documented default; a key that is present takes
+  // its value, including an explicit null, which then fails validation. The
+  // defaults exist for older documents, not as a way to launder bad data.
+  const absent = (k: string): boolean => !(k in value)
   return {
-    version: safeInt(value['version'] ?? PROTOCOL_VERSION, 'protocol.version'),
-    reader_features: stringArray(value['reader_features'] ?? [], 'protocol.reader_features'),
-    writer_features: stringArray(value['writer_features'] ?? [], 'protocol.writer_features'),
+    version: safeInt(absent('version') ? PROTOCOL_VERSION : value['version'], 'protocol.version'),
+    reader_features: stringArray(
+      absent('reader_features') ? [] : value['reader_features'],
+      'protocol.reader_features',
+    ),
+    writer_features: stringArray(
+      absent('writer_features') ? [] : value['writer_features'],
+      'protocol.writer_features',
+    ),
   }
 }
 
@@ -110,12 +134,19 @@ function parseProtocol(value: unknown): DurableProtocol {
  */
 function parseEngine(value: unknown): DurableEngineIdentity {
   if (!isPlainObject(value)) corrupt('engine must be an object')
-  const version = nonEmptyString(value['version'], 'engine.version')
+  const version = nonEmptyString(required(value, 'version', 'engine.version'), 'engine.version')
+  const absent = (k: string): boolean => !(k in value)
   return {
-    name: nonEmptyString(value['name'], 'engine.name'),
+    name: nonEmptyString(required(value, 'name', 'engine.name'), 'engine.name'),
     version,
-    backup_format: safeInt(value['backup_format'] ?? BACKUP_FORMAT_BASELINE, 'engine.backup_format'),
-    min_reader: nonEmptyString(value['min_reader'] ?? version, 'engine.min_reader'),
+    backup_format: safeInt(
+      absent('backup_format') ? BACKUP_FORMAT_BASELINE : value['backup_format'],
+      'engine.backup_format',
+    ),
+    min_reader: nonEmptyString(
+      absent('min_reader') ? version : value['min_reader'],
+      'engine.min_reader',
+    ),
   }
 }
 
@@ -128,10 +159,11 @@ function parseEngine(value: unknown): DurableEngineIdentity {
  */
 function parseLease(value: unknown): DurableLease {
   if (!isPlainObject(value)) corrupt('lease must be an object')
-  const generation = safeInt(value['generation'], 'lease.generation')
-  const owner = value['owner'] ?? null
-  const instance = value['instance'] ?? null
-  const expiresAt = value['expires_at'] ?? null
+  const generation = safeInt(required(value, 'generation', 'lease.generation'), 'lease.generation')
+  // All three must be present. A half-written lease is corrupt, not free.
+  const owner = required(value, 'owner', 'lease.owner')
+  const instance = required(value, 'instance', 'lease.instance')
+  const expiresAt = required(value, 'expires_at', 'lease.expires_at')
 
   const released = owner === null && instance === null && expiresAt === null
   if (released) return { generation, owner: null, instance: null, expires_at: null }
@@ -148,14 +180,17 @@ function parseLease(value: unknown): DurableLease {
 
 function parseManifest(value: unknown): DurableManifest {
   if (!isPlainObject(value)) corrupt('manifest must be an object')
-  const base = value['base'] ?? null
-  const wal = value['wal'] ?? []
+  // `base` is the only one the protocol allows to be null; the rest are
+  // required and may not be null, so an absent or nulled `wal` is corrupt
+  // rather than an empty replay list.
+  const base = required(value, 'base', 'manifest.base')
+  const wal = required(value, 'wal', 'manifest.wal')
   if (!Array.isArray(wal)) corrupt('manifest.wal must be an array')
   return {
-    db: nonEmptyString(value['db'], 'manifest.db'),
+    db: nonEmptyString(required(value, 'db', 'manifest.db'), 'manifest.db'),
     base: base === null ? null : parseRef(base, 'manifest.base'),
     wal: wal.map((ref, i) => parseRef(ref, `manifest.wal[${i}]`)),
-    seq: safeInt(value['seq'], 'manifest.seq'),
+    seq: safeInt(required(value, 'seq', 'manifest.seq'), 'manifest.seq'),
   }
 }
 
@@ -169,7 +204,12 @@ export function parseHead(bytes: Uint8Array): { head: DurableHead; raw: Record<s
   }
   let raw: unknown
   try {
-    raw = JSON.parse(Buffer.from(bytes).toString('utf8'))
+    // Fatal decoding, not the lenient default. `Buffer.toString('utf8')`
+    // replaces malformed bytes with U+FFFD, which would let invalid data
+    // inside an *unknown* field parse cleanly and then be written back
+    // mangled — silently corrupting the one thing round-tripping exists to
+    // protect. The protocol says UTF-8; bytes that are not UTF-8 are corrupt.
+    raw = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
   } catch (e) {
     throw new DurableCorruptError(`durable: head.json is not valid UTF-8 JSON`, { cause: e })
   }

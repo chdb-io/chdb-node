@@ -496,6 +496,18 @@ export class DurableObject {
 
   static async open(deps: DurableObjectDeps, options: DurableOpenOptions = {}): Promise<DurableObject> {
     const tuning: DurableTuning = { ...DEFAULT_TUNING, ...options.tuning }
+    // Every one of these ends up in arithmetic that decides whether this
+    // process still owns the object. A NaN TTL propagates to `expires_at`,
+    // which JSON renders as null, producing a lease with an owner and no
+    // expiry: nobody can take it over and this writer never self-fences,
+    // because every comparison against NaN is false.
+    for (const [name, value] of Object.entries(tuning)) {
+      if (!Number.isFinite(value) || value <= 0) {
+        throw new RangeError(
+          `durable: tuning.${name} must be a finite positive number, got ${String(value)}`,
+        )
+      }
+    }
     if (tuning.heartbeatIntervalMs > tuning.leaseTtlMs / 3) {
       throw new RangeError(
         `durable: heartbeatIntervalMs (${tuning.heartbeatIntervalMs}) must be at most a third of ` +
@@ -588,7 +600,10 @@ export class DurableObject {
         etag: leaseTaken.etag,
         raw: leaseTaken.raw,
       })
-      object.leaseDeadlineMs = nowMs() + tuning.leaseTtlMs
+      object.leaseDeadlineMs = Math.min(
+        (leaseTaken.head.lease.expires_at ?? 0) * 1000,
+        nowMs() + tuning.leaseTtlMs,
+      )
 
       // Restore can outlast a lease. Confirming ownership before the handle
       // escapes is what stops a writer from starting work on a database
@@ -658,6 +673,10 @@ export class DurableObject {
     const ref: DurableObjectRef = { key, size: digest.size, sha256: digest.sha256 }
 
     await this.publishBytes(ref, bytes)
+    // The upload is network I/O and can outlast the lease. Checking only at
+    // entry would let a writer that was required to self-fence mid-upload go
+    // on to commit the manifest anyway.
+    this.assertWriter()
     await this.commitHead({
       build: (current) => ({
         ...current,
@@ -697,6 +716,10 @@ export class DurableObject {
       const ref: DurableObjectRef = { key, size: digest.size, sha256: digest.sha256 }
 
       await this.publishFile(ref, archive)
+      // A full backup plus its upload is the longest thing this object does,
+      // easily longer than a lease TTL. Ownership was checked before it
+      // started; it has to hold now, when the commit actually happens.
+      this.assertWriter()
       const covered = this.walBuffer.length
       await this.commitHead({
         build: (current) => ({
@@ -794,16 +817,31 @@ export class DurableObject {
   /** One heartbeat: extend the expiry, leaving generation and seq untouched. */
   private async renewLease(): Promise<void> {
     if (this.readOnly || this.fenced || this.status === 'closed') return
-    const expiresAt = (nowMs() + this.tuning.leaseTtlMs) / 1000
+
+    // The expiry has to be computed inside the lock, not before waiting for
+    // it. Computed early and then delayed behind a long checkpoint commit,
+    // the value written could already be in the past — while the local
+    // deadline below was refreshed from the current clock. The object would
+    // then keep writing under a lease other writers are entitled to take.
+    let written = 0
     await this.commitHead({
-      build: (current) => ({ ...current, lease: { ...current.lease, expires_at: expiresAt } }),
+      build: (current) => {
+        written = (nowMs() + this.tuning.leaseTtlMs) / 1000
+        return { ...current, lease: { ...current.lease, expires_at: written } }
+      },
       committed: (observed) =>
         observed.lease.instance === this.instance &&
         observed.lease.expires_at !== null &&
-        observed.lease.expires_at >= expiresAt,
+        observed.lease.expires_at >= written,
       key: HEAD_KEY,
     })
-    this.leaseDeadlineMs = nowMs() + this.tuning.leaseTtlMs
+
+    // Believe what is actually stored, not what a fresh clock would allow.
+    // Reconciliation can settle on a head written by an earlier attempt whose
+    // expiry is older than this one's.
+    const persisted = this.head.lease.expires_at
+    this.leaseDeadlineMs =
+      persisted === null ? 0 : Math.min(persisted * 1000, nowMs() + this.tuning.leaseTtlMs)
   }
 
   // ------------------------------------------------------- immutable publish

@@ -111,6 +111,12 @@ export function decodeWalSegment(bytes: Uint8Array, key: string): string[] {
         `durable: WAL segment ${key} line ${i + 1} has no string "sql" field`,
       )
     }
+    // The per-statement ceiling is part of the frozen format, so it binds the
+    // reader as well. A conforming writer cannot produce a larger statement,
+    // and replaying one from a segment that somehow contains it would run SQL
+    // the limit exists to prevent — the segment ceiling alone leaves room for
+    // a single statement twice the allowed size.
+    assertStatementWithinLimit(sql)
     out.push(sql)
   }
   return out

@@ -830,6 +830,68 @@ describe('observability', () => {
   })
 })
 
+describe('review regressions: lease timing', () => {
+  it('rejects tuning values that are not finite and positive', async () => {
+    // NaN was the dangerous one: it reaches expires_at, JSON renders it null,
+    // and the result is a lease with an owner and no expiry — untakeable by
+    // anyone else and never self-fencing here, since every comparison against
+    // NaN is false.
+    const h = await harness()
+    for (const bad of [
+      { leaseTtlMs: NaN },
+      { leaseTtlMs: Infinity },
+      { heartbeatIntervalMs: 0 },
+      { commitDeadlineMs: -1 },
+      { maxCommitAttempts: NaN },
+      { clockSkewAllowanceMs: NaN },
+    ]) {
+      const e = await catchError(() => h.ns.open('obj', { database: 'mem', tuning: { ...FAST, ...bad } }))
+      expect(e, JSON.stringify(bad)).toBeInstanceOf(RangeError)
+    }
+  })
+
+  it('refuses to commit a flush whose lease lapsed during the upload', async () => {
+    // Checking only at entry let a writer that was required to self-fence
+    // mid-upload go on to publish the manifest anyway.
+    const h = await harness({ fault: true })
+    const o = await track(
+      h.ns.open('obj', { database: 'mem', tuning: { ...FAST, leaseTtlMs: 400, heartbeatIntervalMs: 120 } }),
+    )
+    await o.execute('INSERT INTO t VALUES (1)')
+    // No heartbeat can land from here on, so the lease lapses while the
+    // segment is being uploaded.
+    for (let i = 0; i < 40; i++) h.faults[0]!.inject({ on: 'replace', result: 'throw' })
+    await new Promise((r) => setTimeout(r, 600))
+
+    expect(isDurableErrorOf(await catchError(() => o.flush()), 'lease_fenced')).toBe(true)
+    expect(o.manifest.wal).toEqual([])
+  })
+
+  it('refuses to commit a checkpoint whose lease lapsed during the backup', async () => {
+    const h = await harness({ fault: true })
+    const o = await track(
+      h.ns.open('obj', { database: 'mem', tuning: { ...FAST, leaseTtlMs: 400, heartbeatIntervalMs: 120 } }),
+    )
+    await o.execute('INSERT INTO t VALUES (1)')
+    for (let i = 0; i < 40; i++) h.faults[0]!.inject({ on: 'replace', result: 'throw' })
+    await new Promise((r) => setTimeout(r, 600))
+
+    expect(isDurableErrorOf(await catchError(() => o.checkpoint()), 'lease_fenced')).toBe(true)
+    expect(o.manifest.base).toBeNull()
+  })
+
+  it('never believes a deadline the stored lease does not support', async () => {
+    // The local deadline is bounded by what actually persisted, so a renewal
+    // that reconciles onto an older head cannot extend the window past it.
+    const h = await harness()
+    const o = await track(h.ns.open('obj', { database: 'mem' }))
+    const stats = o.stats
+    expect(stats.leaseExpiresAt).toBeInstanceOf(Date)
+    const stored = JSON.parse(await readFile(join(h.objectDir, 'head.json'), 'utf8'))
+    expect(stats.leaseExpiresAt!.getTime()).toBeLessThanOrEqual(stored.lease.expires_at * 1000 + 1)
+  })
+})
+
 describe('write barriers', () => {
   it('coalesces concurrent waiters onto a single head commit', async () => {
     const h = await harness()

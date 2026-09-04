@@ -58,7 +58,18 @@
  */
 
 import { createReadStream } from 'fs'
-import { copyFile, link, lstat, mkdir, readFile, readlink, rename, symlink, unlink, writeFile } from 'fs/promises'
+import {
+  copyFile,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readlink,
+  rename,
+  symlink,
+  unlink,
+} from 'fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'path'
 import type { Readable } from 'stream'
 import { randomUUID } from 'crypto'
@@ -67,7 +78,14 @@ import { sha256Hex } from '../digest'
 import { isValidObjectKey } from '../keys'
 import type { DurableBackend, GetWithEtag, PutOutcome, ReplaceOutcome } from '../backend'
 
-/** Where the mutable-key version chain lives, relative to the object prefix. */
+/**
+ * Where the mutable-key version chain lives, relative to the object prefix.
+ *
+ * One directory, because V1 has exactly one mutable key. Everything else in an
+ * object is immutable and never enters the chain — which is also why
+ * {@link LocalDurableBackend.currentVersion} must not consult this directory
+ * for a key that is not a chain: it is not per-key.
+ */
 const VERSIONS_DIR = '.head-versions'
 /** Scratch for partially written files, relative to the object prefix. */
 const TMP_DIR = '.tmp'
@@ -76,6 +94,47 @@ const VERSION_TARGET = /^\.head-versions\/(\d+)\.json$/
 
 function errno(e: unknown): string | undefined {
   return typeof e === 'object' && e !== null ? (e as NodeJS.ErrnoException).code : undefined
+}
+
+/**
+ * Write a file and make it survive power loss before returning.
+ *
+ * `writeFile` alone does not: it returns once the data reaches the page cache,
+ * so a crash can lose bytes the caller has already been told were written. For
+ * a version file that is about to be reported as a committed head, that is the
+ * difference between a durable object and one that quietly rolls back.
+ */
+async function writeFileDurably(path: string, bytes: Uint8Array): Promise<void> {
+  const handle = await open(path, 'w')
+  try {
+    await handle.writeFile(bytes)
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+}
+
+/**
+ * Flush a directory entry, so a create or rename inside it survives too.
+ *
+ * Syncing a file persists its contents; the *name* lives in the parent
+ * directory and needs its own barrier. Best-effort on platforms that refuse to
+ * open a directory for this, where the guarantee is simply not available.
+ */
+async function fsyncDir(path: string): Promise<void> {
+  let handle
+  try {
+    handle = await open(path, 'r')
+  } catch {
+    return
+  }
+  try {
+    await handle.sync()
+  } catch {
+    /* not supported here; nothing further to do */
+  } finally {
+    await handle.close()
+  }
 }
 
 export interface LocalBackendOptions {
@@ -171,7 +230,7 @@ export class LocalDurableBackend implements DurableBackend {
   async putBytesIfAbsent(key: string, bytes: Uint8Array): Promise<PutOutcome> {
     const dest = this.pathFor(key)
     const tmp = await this.tmpPath()
-    await writeFile(tmp, bytes)
+    await writeFileDurably(tmp, bytes)
     try {
       return await this.linkIntoPlace(tmp, dest)
     } finally {
@@ -214,15 +273,18 @@ export class LocalDurableBackend implements DurableBackend {
 
     let nextVersion: number
     if (etag.startsWith('v')) {
-      const observed = await this.currentVersion(path)
       const claimed = Number(etag.slice(1))
       if (!Number.isSafeInteger(claimed) || claimed < 1) {
         throw new DurableBackendError(`durable: malformed local etag ${JSON.stringify(etag)}`)
       }
-      // A stale claim is decided by the exclusive create below, not here; this
-      // early exit only avoids pointless work when the chain has clearly moved
-      // on or vanished.
+      const observed = await this.currentVersion(path)
       if (observed === undefined) return { status: 'not-replaced' }
+      // The token must name the version that is current, not merely one that
+      // exists. Leaving this to the exclusive create below is not equivalent:
+      // a token above the current version would create a version nobody has
+      // read, skip the one in between, and publish it — a compare-and-swap
+      // succeeding against a value that was never there.
+      if (observed !== claimed) return { status: 'not-replaced' }
       nextVersion = claimed + 1
     } else if (etag.startsWith('f')) {
       const current = await readFile(path).catch((e) => {
@@ -237,22 +299,37 @@ export class LocalDurableBackend implements DurableBackend {
 
     const versionPath = join(versionsDir, `${nextVersion}.json`)
     const tmp = await this.tmpPath()
-    await writeFile(tmp, bytes)
+    await writeFileDurably(tmp, bytes)
     let claimed: PutOutcome
     try {
       claimed = await this.linkIntoPlace(tmp, versionPath)
     } finally {
       await unlink(tmp).catch(() => {})
     }
-    if (claimed !== 'created') return { status: 'not-replaced' }
+
+    if (claimed !== 'created') {
+      // Someone already won this version number. That someone may have been an
+      // earlier attempt of ours whose response was lost, so the bytes decide:
+      // identical content means our write is the one that landed, different
+      // content means a racer won it. Either way the pointer is advanced,
+      // because the version is published whether or not its author survived
+      // long enough to say so.
+      const existing = await readFile(versionPath).catch((e) => {
+        throw new DurableBackendError(
+          `durable: version ${nextVersion} of ${key} exists but cannot be read`,
+          { cause: e },
+        )
+      })
+      await this.publishPointer(path, nextVersion)
+      return Buffer.from(bytes).equals(existing)
+        ? { status: 'replaced', etag: `v${nextVersion}` }
+        : { status: 'not-replaced' }
+    }
 
     // The version is published; swapping the pointer is what makes it current.
-    const tmpLink = await this.tmpPath()
     try {
-      await symlink(`${VERSIONS_DIR}/${nextVersion}.json`, tmpLink)
-      await rename(tmpLink, path)
+      await this.publishPointer(path, nextVersion)
     } catch (e) {
-      await unlink(tmpLink).catch(() => {})
       throw new DurableBackendError(
         `durable: created version ${nextVersion} of ${key} but failed to publish the pointer`,
         { cause: e },
@@ -268,34 +345,95 @@ export class LocalDurableBackend implements DurableBackend {
     return version === undefined ? path : join(this.root, VERSIONS_DIR, `${version}.json`)
   }
 
-  /** Current chain version for a path, or `undefined` if it is not a chain. */
+  /**
+   * Current chain version for a path, or `undefined` if it is not a chain.
+   *
+   * The pointer is a hint, not the authority. Creating a version and swapping
+   * the symlink are two syscalls, and a process that dies between them leaves
+   * a version nothing points at. Trusting the symlink alone would wedge the
+   * object permanently: every later writer would hold the pointed-at token,
+   * fail to create the version above it because the orphan is already there,
+   * and report `not-replaced` forever.
+   *
+   * So the authority is the highest version that actually exists, found by
+   * stepping forward from the pointer. That costs one `stat` in the normal
+   * case, where nothing is above it, and it is bounded because each step
+   * requires a version file that some writer won an exclusive create for.
+   *
+   * The pointer is repaired opportunistically. Failing to repair it is
+   * harmless — the next reader recomputes the same answer.
+   */
   private async currentVersion(path: string): Promise<number | undefined> {
-    let target: string
+    let start: number
     try {
-      target = await readlink(path)
+      const target = await readlink(path)
+      const m = VERSION_TARGET.exec(target)
+      if (!m) {
+        throw new DurableBackendError(
+          `durable: ${path} is a symlink to ${JSON.stringify(target)}, which this backend did not write`,
+        )
+      }
+      start = Number(m[1])
     } catch (e) {
+      if (e instanceof DurableBackendError) throw e
       const code = errno(e)
-      // EINVAL: a plain file. ENOENT: nothing there yet. Both mean "no chain".
-      if (code === 'EINVAL' || code === 'ENOENT' || code === 'ENOTDIR') return undefined
-      throw new DurableBackendError(`durable: failed to inspect ${path}`, { cause: e })
+      // EINVAL: a plain file. ENOENT: nothing there yet. Either way there is
+      // no chain for this key, and there must be no look-ahead: this method
+      // serves every key, and the version directory belongs to the one mutable
+      // key. Probing it for a WAL segment or a checkpoint would resolve that
+      // key's read to the head's bytes.
+      //
+      // An adoption that created version 1 and died before the swap needs no
+      // special case here. The plain file still reads, its digest is still the
+      // ETag, and the next replaceIfMatch meets the existing version 1 through
+      // the conditional-create path below, which compares content and
+      // publishes the pointer.
+      if (code !== 'EINVAL' && code !== 'ENOENT' && code !== 'ENOTDIR') {
+        throw new DurableBackendError(`durable: failed to inspect ${path}`, { cause: e })
+      }
+      return undefined
     }
-    const m = VERSION_TARGET.exec(target)
-    if (!m) {
-      throw new DurableBackendError(
-        `durable: ${path} is a symlink to ${JSON.stringify(target)}, which this backend did not write`,
-      )
+
+    let latest = start
+    while (await this.versionExists(latest + 1)) latest++
+    if (latest !== start) await this.publishPointer(path, latest).catch(() => {})
+    return latest
+  }
+
+  private async versionExists(version: number): Promise<boolean> {
+    try {
+      await lstat(join(this.root, VERSIONS_DIR, `${version}.json`))
+      return true
+    } catch {
+      return false
     }
-    return Number(m[1])
+  }
+
+  /** Point the mutable key at a version. Atomic, and idempotent across racers. */
+  private async publishPointer(path: string, version: number): Promise<void> {
+    const tmpLink = await this.tmpPath()
+    try {
+      await symlink(`${VERSIONS_DIR}/${version}.json`, tmpLink)
+      await rename(tmpLink, path)
+      await fsyncDir(dirname(path))
+    } catch (e) {
+      await unlink(tmpLink).catch(() => {})
+      throw e
+    }
   }
 
   private async linkIntoPlace(tmp: string, dest: string): Promise<PutOutcome> {
     await mkdir(dirname(dest), { recursive: true })
     try {
       await link(tmp, dest)
-      return 'created'
     } catch (e) {
       if (errno(e) === 'EEXIST') return 'already-exists'
       throw new DurableBackendError(`durable: failed to create ${dest}`, { cause: e })
     }
+    // The name is what makes the object visible, and the name lives in the
+    // directory. An object reported as published has to still be there after a
+    // crash, or a head will reference bytes that no longer exist.
+    await fsyncDir(dirname(dest))
+    return 'created'
   }
 }

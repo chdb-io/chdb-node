@@ -483,6 +483,69 @@ describe('entry-point gates', () => {
   })
 })
 
+describe('review regressions: head parsing', () => {
+  it('refuses a truncated lease instead of reading it as released', () => {
+    // A half-written lease used to parse as the all-null released form, which
+    // would hand the object to a new writer on the strength of a corrupt head.
+    for (const lease of [
+      { generation: 7 },
+      { generation: 7, owner: 'w' },
+      { generation: 7, owner: 'w', instance: 'i' },
+      { generation: 7, owner: null, instance: null },
+    ]) {
+      expectCategory(() => parseHead(bytes(goodHead({ lease }))), 'corrupt')
+    }
+    // The released form is three explicit nulls, and still parses.
+    const ok = goodHead({ lease: { generation: 7, owner: null, instance: null, expires_at: null } })
+    expect(parseHead(bytes(ok)).head.lease.owner).toBeNull()
+  })
+
+  it('refuses required manifest fields that are absent or null', () => {
+    for (const manifest of [
+      { base: null, wal: [], seq: 0 },
+      { db: 'mem', wal: [], seq: 0 },
+      { db: 'mem', base: null, seq: 0 },
+      { db: 'mem', base: null, wal: [] },
+      { db: 'mem', base: null, wal: null, seq: 0 },
+      { db: null, base: null, wal: [], seq: 0 },
+    ]) {
+      expectCategory(() => parseHead(bytes(goodHead({ manifest }))), 'corrupt')
+    }
+  })
+
+  it('refuses an explicit null in a known field that has a default', () => {
+    // The defaults exist for documents written before a field did; they are
+    // not a way to launder a null into a valid value.
+    const p = goodHead()
+    ;(p['protocol'] as Record<string, unknown>)['version'] = null
+    expectCategory(() => parseHead(bytes(p)), 'corrupt')
+    const e = goodHead()
+    ;(e['engine'] as Record<string, unknown>)['min_reader'] = null
+    expectCategory(() => parseHead(bytes(e)), 'corrupt')
+  })
+
+  it('refuses malformed UTF-8 rather than rewriting it as replacement characters', () => {
+    // Lenient decoding turned invalid bytes in an *unknown* field into U+FFFD
+    // and wrote them back mangled, corrupting the one thing round-tripping is
+    // for.
+    const good = Buffer.from(JSON.stringify(goodHead({ vendor_extension: 'PLACEHOLDER' })))
+    const bad = Buffer.from(good)
+    bad[good.indexOf(Buffer.from('PLACEHOLDER'))] = 0x80 // lone continuation byte
+    expectCategory(() => parseHead(bad), 'corrupt')
+  })
+})
+
+describe('review regressions: WAL reader limits', () => {
+  it('refuses a decoded statement over the per-statement limit', () => {
+    // The segment ceiling is twice the statement ceiling, so a hand-built
+    // segment could carry a statement no conforming writer could produce.
+    const huge = 'x'.repeat(LIMITS.MAX_SQL_BYTES + 1)
+    const segment = Buffer.from(JSON.stringify({ sql: huge }) + '\n')
+    expect(segment.byteLength).toBeLessThan(LIMITS.MAX_WAL_SEGMENT_BYTES)
+    expectCategory(() => decodeWalSegment(segment, 'wal/x'), 'limit_exceeded')
+  })
+})
+
 describe('local backend conditional operations', () => {
   async function backend(): Promise<LocalDurableBackend> {
     const root = await mkdtemp(join(tmpdir(), 'durable-be-'))
@@ -541,6 +604,80 @@ describe('local backend conditional operations', () => {
     expect(await readFile(join(objDir, 'head.json'), 'utf8')).toBe('{"ours":true}')
     const stale = await be.replaceIfMatch('head.json', Buffer.from('{"no":true}'), read.etag)
     expect(stale.status).toBe('not-replaced')
+  })
+
+  /** Move an object into the version chain, which only happens on first replace. */
+  async function chained(be: LocalDurableBackend): Promise<string> {
+    await be.putBytesIfAbsent('head.json', Buffer.from('{"v":"plain"}'))
+    const plain = (await be.getBytesWithEtag('head.json'))!
+    await be.replaceIfMatch('head.json', Buffer.from('{"v":0}'), plain.etag)
+    return (await be.getBytesWithEtag('head.json'))!.etag
+  }
+
+  it('refuses a token that names a version which is not the current one', async () => {
+    // This used to create a version nobody had read, skip the one between, and
+    // publish it — a compare-and-swap succeeding against a value never stored.
+    const be = await backend()
+    expect(await chained(be)).toBe('v1')
+    const r = await be.replaceIfMatch('head.json', Buffer.from('{"hijacked":true}'), 'v2')
+    expect(r.status).toBe('not-replaced')
+    expect(Buffer.from((await be.getBytesWithEtag('head.json'))!.bytes).toString()).toBe('{"v":0}')
+  })
+
+  it('recovers from a crash between creating a version and publishing it', async () => {
+    // The pointer is a hint; the highest existing version is the authority.
+    // Trusting the pointer wedged the object permanently — every later writer
+    // held the pointed-at token, lost the create to the orphan, and reported
+    // not-replaced forever.
+    const be = await backend()
+    expect(await chained(be)).toBe('v1')
+    const orphan = join(be.root, '.head-versions', '2.json')
+    await writeFile(orphan, '{"v":"written by a writer that died"}')
+
+    // A reader now sees the published version, not the stale pointer.
+    const seen = (await be.getBytesWithEtag('head.json'))!
+    expect(seen.etag).toBe('v2')
+    expect(Buffer.from(seen.bytes).toString()).toContain('died')
+
+    // And the chain moves on rather than deadlocking.
+    const r = await be.replaceIfMatch('head.json', Buffer.from('{"v":3}'), seen.etag)
+    expect(r.status).toBe('replaced')
+    expect((await be.getBytesWithEtag('head.json'))!.etag).toBe('v3')
+  })
+
+  it('reports a stale token honestly and leaves recovery to the caller', async () => {
+    // A writer whose own write landed but whose response was lost still holds
+    // the old token. The backend does not try to be clever about that: the
+    // token no longer names the current version, so the answer is
+    // not-replaced. Recognising the write as one's own needs the head's
+    // contents and the lease, neither of which a backend can interpret, so it
+    // belongs to commitHead's reconciliation.
+    const be = await backend()
+    expect(await chained(be)).toBe('v1')
+    const mine = Buffer.from('{"v":"mine"}')
+    await writeFile(join(be.root, '.head-versions', '2.json'), mine)
+
+    expect(await be.replaceIfMatch('head.json', mine, 'v1')).toEqual({ status: 'not-replaced' })
+    // What the caller then rereads is its own write, which is what lets the
+    // layer above conclude the commit landed.
+    const fresh = (await be.getBytesWithEtag('head.json'))!
+    expect(fresh.etag).toBe('v2')
+    expect(Buffer.from(fresh.bytes)).toEqual(mine)
+  })
+
+  it('lets one of two concurrent writers win a version and tells the other', async () => {
+    // The path that reaches the conditional-create collision: both read the
+    // same version, both try to create the one above it.
+    const be = await backend()
+    const etag = await chained(be)
+    const [a, b] = await Promise.all([
+      be.replaceIfMatch('head.json', Buffer.from('{"w":"a"}'), etag),
+      be.replaceIfMatch('head.json', Buffer.from('{"w":"b"}'), etag),
+    ])
+    const outcomes = [a.status, b.status].sort()
+    expect(outcomes).toEqual(['not-replaced', 'replaced'])
+    // Whoever won, the pointer names their version and it is readable.
+    expect((await be.getBytesWithEtag('head.json'))!.etag).toBe('v2')
   })
 
   it('refuses a key that would escape the object prefix', async () => {
