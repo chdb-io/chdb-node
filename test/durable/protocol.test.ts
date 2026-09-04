@@ -524,6 +524,19 @@ describe('review regressions: head parsing', () => {
     expectCategory(() => parseHead(bytes(e)), 'corrupt')
   })
 
+  it('refuses to emit a head this parser would reject', () => {
+    // head.json is created with a conditional create and V1 has no destroy, so
+    // publishing an unreadable one makes the object permanently unopenable.
+    // Failing at the write is the only recoverable end.
+    expectCategory(() => serializeHead(coldHead('', '26.7.2')), 'corrupt')
+    const noVersion = coldHead('mem', '26.7.2')
+    noVersion.engine.version = ''
+    expectCategory(() => serializeHead(noVersion), 'corrupt')
+    const noFloor = coldHead('mem', '26.7.2')
+    noFloor.engine.min_reader = ''
+    expectCategory(() => serializeHead(noFloor), 'corrupt')
+  })
+
   it('refuses malformed UTF-8 rather than rewriting it as replacement characters', () => {
     // Lenient decoding turned invalid bytes in an *unknown* field into U+FFFD
     // and wrote them back mangled, corrupting the one thing round-tripping is

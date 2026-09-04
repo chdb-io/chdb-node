@@ -114,6 +114,16 @@ async function writeFileDurably(path: string, bytes: Uint8Array): Promise<void> 
   }
 }
 
+/** Flush a file's contents, addressed by path rather than by an open handle. */
+async function fsyncFile(path: string): Promise<void> {
+  const handle = await open(path, 'r')
+  try {
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+}
+
 /**
  * Flush a directory entry, so a create or rename inside it survives too.
  *
@@ -248,6 +258,13 @@ export class LocalDurableBackend implements DurableBackend {
     // forbids anyway.
     try {
       await link(localPath, dest)
+      // The fast path needs the same barriers as the staged one, and needs
+      // them more: this is how a checkpoint is published, so losing it to a
+      // power cut leaves a head naming a base that is not there. The link
+      // shares the caller's inode, so the data has to be flushed through the
+      // source, and the new name lives in the destination directory.
+      await fsyncFile(localPath)
+      await fsyncDir(dirname(dest))
       return 'created'
     } catch (e) {
       const code = errno(e)

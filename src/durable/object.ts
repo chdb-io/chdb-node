@@ -569,10 +569,18 @@ export class DurableObject {
         })
       }
 
+      // Checked before anything is published: an empty name would produce a
+      // head that fails to parse, created with a conditional create that V1
+      // gives no way to undo. A bad argument should be a bad argument, not a
+      // permanently corrupt object.
+      const database = options.database ?? 'default'
+      if (database.length === 0) {
+        throw new RangeError('durable: options.database must be a non-empty string')
+      }
       leaseTaken = existing
         ? await acquireLease(deps.backend, existing, { instance, owner, tuning, force: options.force === true })
         : await createCold(deps.backend, {
-            database: options.database ?? 'default',
+            database,
             running,
             instance,
             owner,

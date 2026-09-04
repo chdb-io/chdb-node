@@ -235,6 +235,15 @@ export function parseHead(bytes: Uint8Array): { head: DurableHead; raw: Record<s
  * reference we are rewriting would describe bytes that are no longer there.
  */
 export function serializeHead(head: DurableHead, raw?: Record<string, unknown>): Uint8Array {
+  // Refuse to emit a document this parser would reject. Writing one is worse
+  // than failing here: `head.json` is created with a conditional create and V1
+  // has no destroy, so an object published with, say, an empty `manifest.db`
+  // is corrupt on every subsequent open and cannot be removed.
+  if (head.manifest.db.length === 0) corrupt('manifest.db must be a non-empty string')
+  if (head.engine.version.length === 0) corrupt('engine.version must be a non-empty string')
+  if (head.engine.min_reader.length === 0) corrupt('engine.min_reader must be a non-empty string')
+  if (head.engine.name.length === 0) corrupt('engine.name must be a non-empty string')
+
   const base: Record<string, unknown> = raw ? structuredClone(raw) : {}
 
   const mergeInto = (key: string, known: Record<string, unknown>): void => {

@@ -129,6 +129,15 @@ describe('cold create and reopen', () => {
     expect(await o.flush()).toBeUndefined()
   })
 
+  it('refuses an empty database name before anything is published', async () => {
+    const h = await harness()
+    const e = await catchError(() => h.ns.open('obj', { database: '' }))
+    expect(e).toBeInstanceOf(RangeError)
+    // Nothing was written, so the id is still usable.
+    const o = await track(h.ns.open('obj', { database: 'mem' }))
+    expect(o.database).toBe('mem')
+  })
+
   it('refuses to create when existingOnly is set', async () => {
     const h = await harness()
     expect(isDurableErrorOf(await catchError(() => h.ns.open('obj', { existingOnly: true })), 'not_found')).toBe(true)
