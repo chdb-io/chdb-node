@@ -72,7 +72,10 @@
  *    with who can reach the filesystem.
  *  - **Losing data it said it had written.** Publishing without flushing is a
  *    correctness bug, not a security one, and a conformance baseline that can
- *    silently roll back is not a baseline.
+ *    silently roll back is not a baseline. The promise has to hold all the way
+ *    down: flushing a file and its immediate parent is worthless if the parent
+ *    is itself a fresh, unflushed entry in a directory above, so a publish that
+ *    creates directories flushes the chain it created.
  *
  * What it does not defend against is a hostile local filesystem — a symlink
  * planted in the object prefix, say, to redirect a write. Whoever can do that
@@ -486,7 +489,7 @@ export class LocalDurableBackend implements DurableBackend {
    * is the right price for not having to reason about which callers did it.
    */
   private async linkIntoPlace(source: string, dest: string): Promise<PutOutcome> {
-    await mkdir(dirname(dest), { recursive: true })
+    const firstCreated = await mkdir(dirname(dest), { recursive: true })
     await fsyncFile(source)
     try {
       await link(source, dest)
@@ -498,6 +501,22 @@ export class LocalDurableBackend implements DurableBackend {
     // directory. An object reported as published has to still be there after a
     // crash, or a head will reference bytes that no longer exist.
     await fsyncDir(dirname(dest))
+    // And when that directory is itself new, its own entry is just as
+    // unflushed — losing it would take the object with it, which would make
+    // the guarantee above false for exactly the first publish into a prefix.
+    // `mkdir` reports the topmost directory it created, so the walk happens
+    // once in an object's life and costs nothing on every publish after it.
+    if (firstCreated !== undefined) {
+      let dir = dirname(dest)
+      while (dir !== firstCreated && dir !== dirname(dir)) {
+        dir = dirname(dir)
+        await fsyncDir(dir)
+      }
+      // The topmost new directory is an entry in a directory this backend did
+      // not create, so that one is flushed too — otherwise the whole chain can
+      // still disappear.
+      await fsyncDir(dirname(firstCreated))
+    }
     return 'created'
   }
 

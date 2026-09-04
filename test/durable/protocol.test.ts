@@ -718,6 +718,22 @@ describe('local backend conditional operations', () => {
     }
   })
 
+  it('publishes into a prefix that does not exist yet, and only walks once', async () => {
+    // The first publish creates the directory chain, whose entries are as
+    // unflushed as the object itself; the walk covers them. Later publishes
+    // create nothing and must not pay for it.
+    const root = await mkdtemp(join(tmpdir(), 'durable-deep-'))
+    const be = new LocalDurableBackend({ root: join(root, 'a', 'b', 'obj') })
+
+    expect(await be.putBytesIfAbsent('checkpoints/1-1-aaaaaaaa.tar.gz', Buffer.from('first'))).toBe('created')
+    expect(Buffer.from((await be.getBytes('checkpoints/1-1-aaaaaaaa.tar.gz'))!).toString()).toBe('first')
+
+    // Second publish into the now-existing prefix still works and stays conditional.
+    expect(await be.putBytesIfAbsent('checkpoints/1-2-bbbbbbbb.tar.gz', Buffer.from('second'))).toBe('created')
+    expect(await be.putBytesIfAbsent('checkpoints/1-2-bbbbbbbb.tar.gz', Buffer.from('other'))).toBe('already-exists')
+    expect(Buffer.from((await be.getBytes('checkpoints/1-2-bbbbbbbb.tar.gz'))!).toString()).toBe('second')
+  })
+
   it('surfaces an unreadable version chain instead of serving a stale version', async () => {
     // The probe's answer decides which version is current. Treating an I/O or
     // permission failure as "absent" would hand back the version below it and
