@@ -119,6 +119,8 @@ somewhere later.
 | Arrow **scan** (`registerArrowTable`, Arrow input) | ⏳ follow-up |
 | Arrow zero-copy (M2, `{ zeroCopy: true }`) | ⏳ follow-up |
 | chDB ↔ `@clickhouse/client` integration (`chdb/connection`, **experimental**) | ✅ |
+| Durable V1 control plane (`chdb/durable`, **experimental**) | ✅ pure TS; native adapter pending |
+| Remote object storage for durable (`chdb/durable/s3`) | ✅ verified on AWS S3 and MinIO; R2 untested |
 
 ### chDB ↔ `@clickhouse/client` integration (`chdb/connection`, experimental)
 
@@ -158,11 +160,77 @@ for the full design, the `Connection` interface, the `.chdb` extension
 namespace, the `tests/clickhouse-js/skip_list.json` parity blacklist,
 and the sync policy with `@clickhouse/client`.
 
+### Remote-authoritative durability (`chdb/durable`, experimental)
+
+> **Status**: implements chDB Durable V1 as specified in
+> `CHDB_DURABLE_V1_CONTRACT.md` in the
+> [chdb](https://github.com/chdb-io/chdb) repository, which is the source of
+> truth for the protocol. The pure-TypeScript control plane is complete; a
+> default engine adapter over the native addon is still to come, so today the
+> caller supplies the engine.
+>
+> Requires an engine exporting the durable ABI — currently `26.7.2-rc.2`.
+> Compatibility is a floor rather than an equality: an object records
+> `min_reader` and `backup_format`, and any engine at or above that floor opens
+> it. An object written by `26.7.2-rc.2` stays readable on `26.7.3` and later.
+
+`chdb/durable` makes an embedded chDB database recoverable on a *different*
+machine: a full checkpoint plus a statement WAL in object storage, with a
+single `head.json` updated by compare-and-swap under a fenced writer lease.
+
+Importing it loads **no native code** — not the addon, not `libchdb`. The
+engine arrives as an `EngineAdapter` the caller provides, which is what lets a
+Bun process that already owns its own `dlopen(libchdb)` reuse the state machine
+without a second engine in the process. The companion `chdb/libchdb` subpath
+resolves where the library *is* without opening it.
+
+Recovery on another machine needs the object to live somewhere neither machine
+owns, so `chdb/durable/s3` provides an S3-compatible backend — AWS S3,
+Cloudflare R2 and MinIO through one implementation. It sits behind its own
+subpath, and `@aws-sdk/client-s3` is an optional peer dependency, so callers
+who only use the local backend never install it.
+
+```ts
+import { DurableNamespace } from 'chdb/durable'
+import 'chdb/durable/s3'   // registers the s3:// scheme
+
+const ns = new DurableNamespace('s3://my-bucket/durable?region=eu-west-1', { engineFactory })
+const obj = await ns.open('orders', { database: 'default' })
+
+const ticket = await obj.execute("INSERT INTO events VALUES (1, 'a')")
+await obj.flushThrough(ticket)   // durability barrier; execute() alone is not one
+await obj.checkpoint()
+await obj.close()                // rejects if the final flush or lease release failed
+```
+
+Writes go through ClickHouse's own parser, not a regex: `execute()` takes
+exactly one `MUTATING` statement that core can prove writes only inside this
+object's database and embeds no credential, and `query()` takes exactly one
+`READ_ONLY` statement. Method names are not the gate.
+
+`obj.stats` gives a consistent snapshot for a status endpoint or log line —
+lease generation, committed sequence, pending statements and bytes, last flush
+and checkpoint times — with no credentials or SQL in it. `onRestoreProgress`
+reports each phase of a recovery, so a slow restore is distinguishable from a
+stuck one.
+
+The conditional writes S3 needs are real preconditions on `PutObject`
+(`If-None-Match: *` and `If-Match: <etag>`), never a HEAD followed by a PUT.
+A provider counts as supported once it has passed
+`test/durable/s3-backend.test.ts`, which is parameterised for exactly that.
+AWS S3 and MinIO have; Cloudflare R2 has not been run yet.
+
+See [docs/design/durable-control-plane.md](docs/design/durable-control-plane.md)
+for the object layout, the lease and fencing rules, the ambiguous-commit
+reconcile, both backends' compare-and-swap, and what V1 deliberately leaves
+out.
+
 ### Design docs
 
 - [Layered API design](docs/design/architecture.md): the Layer 1 / Layer 2 / Layer 3 architecture, package shape, and intended user-facing surfaces.
 - [Layer 1 native binding reviewer guide](docs/design/layer1-native-binding.md): the PR #43 design and implementation map, organized by commit and review feedback.
 - [chDB ↔ `@clickhouse/client` integration (experimental)](docs/design/pluggable-connection.md): the `chdb/connection` surface, the `Connection` interface chdb-node implements, the `.chdb` extension namespace, and the parity-test sync policy.
+- [Durable V1 control plane (experimental)](docs/design/durable-control-plane.md): the `chdb/durable` and `chdb/libchdb` subpaths, the `EngineAdapter` seam, lease/fencing/reconcile behaviour, and the V1 boundary.
 
 ### Runtimes
 
