@@ -178,6 +178,19 @@ is swallowed, because reporting must not be able to fail a good recovery.
 
 ### Backends: local is for testing, S3 is for the point
 
+Which also settles what the local backend is worth hardening against. It
+defends two things, because both are real whatever the scope: keys taken out of
+`head.json`, which is untrusted input fetched from object storage and could
+name `..` or an absolute path; and losing data it has already reported as
+written, which is a correctness bug rather than a security one, and disqualifies
+a conformance baseline.
+
+It does not defend against a hostile local filesystem. Guarding against, say, a
+symlink planted inside the object prefix buys no privilege boundary — whoever
+can plant it can rewrite the objects directly — and check-then-use cannot be
+made atomic without `openat`, which Node does not expose. Anything wanting that
+property should not be on this backend.
+
 A local directory cannot be a remote authority. When the machine holding it is
 gone, so is the object — so the local backend is what conformance and
 development run on, not what makes a database recoverable somewhere else.

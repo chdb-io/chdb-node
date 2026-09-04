@@ -55,6 +55,32 @@
  * The version chain and scratch directory are dot-prefixed so they cannot
  * collide with a protocol key, and a reader that only understands plain files
  * still sees a correct `head.json` through the symlink.
+ *
+ * ## What this backend is for, and what that rules out
+ *
+ * Development and conformance. Recovery on another machine needs storage
+ * neither machine owns, which is `chdb/durable/s3`; a directory on one host
+ * cannot be a remote authority. That scope decides which hardening belongs
+ * here and which is noise.
+ *
+ * Two things it does defend, because they are real regardless of scope:
+ *
+ *  - **Keys out of `head.json`.** A head is fetched from object storage and is
+ *    therefore untrusted input. A key containing `..`, an absolute path or an
+ *    empty component would steer a read or a publish outside the object, so
+ *    {@link LocalDurableBackend.pathFor} refuses it. This has nothing to do
+ *    with who can reach the filesystem.
+ *  - **Losing data it said it had written.** Publishing without flushing is a
+ *    correctness bug, not a security one, and a conformance baseline that can
+ *    silently roll back is not a baseline.
+ *
+ * What it does not defend against is a hostile local filesystem — a symlink
+ * planted in the object prefix, say, to redirect a write. Whoever can do that
+ * can already rewrite the objects directly, so guarding it buys no privilege
+ * boundary, and check-then-use cannot be made atomic without `openat`, which
+ * Node does not expose. Adding the check would cost a syscall per publish to
+ * narrow a window that leads nowhere. A production deployment wanting that
+ * property should not be on this backend at all.
  */
 
 import { createReadStream } from 'fs'
@@ -442,7 +468,6 @@ export class LocalDurableBackend implements DurableBackend {
    */
   private async linkIntoPlace(source: string, dest: string): Promise<PutOutcome> {
     await mkdir(dirname(dest), { recursive: true })
-    await this.assertRealDirectory(dirname(dest))
     await fsyncFile(source)
     try {
       await link(source, dest)
@@ -457,28 +482,4 @@ export class LocalDurableBackend implements DurableBackend {
     return 'created'
   }
 
-  /**
-   * Refuse to operate through a directory that is a symlink.
-   *
-   * `pathFor` resolves lexically, which cannot see that `<root>/checkpoints`
-   * is a link to somewhere else entirely — a valid-looking key would then read
-   * or publish outside the object prefix with this process's privileges.
-   *
-   * This is defence in depth rather than a complete answer. Whoever can plant
-   * that link can usually write the object directly, and a check followed by a
-   * use is never perfectly atomic without `openat`, which Node does not
-   * expose. What it does buy is that a link planted once, in a shared parent
-   * such as a temp directory, does not silently redirect every later
-   * operation.
-   */
-  private async assertRealDirectory(dir: string): Promise<void> {
-    if (dir === this.root) return
-    const st = await lstat(dir).catch(() => undefined)
-    if (st?.isSymbolicLink()) {
-      throw new DurableBackendError(
-        `durable: refusing to use ${dir}, which is a symlink; an object prefix must contain ` +
-          `only real directories`,
-      )
-    }
-  }
 }

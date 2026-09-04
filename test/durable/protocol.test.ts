@@ -694,24 +694,6 @@ describe('local backend conditional operations', () => {
     expect((await be.getBytesWithEtag('head.json'))!.etag).toBe('v2')
   })
 
-  it('refuses to publish through a symlinked directory', async () => {
-    // A lexically valid key can still leave the prefix if a component is a
-    // link. Whoever plants it can usually write the object anyway, but a link
-    // planted once in a shared parent should not silently redirect every
-    // later operation.
-    const root = await mkdtemp(join(tmpdir(), 'durable-link-'))
-    const objDir = join(root, 'obj')
-    const outside = join(root, 'outside')
-    await mkdir(outside, { recursive: true })
-    await mkdir(objDir, { recursive: true })
-    await symlink(outside, join(objDir, 'checkpoints'))
-
-    const be = new LocalDurableBackend({ root: objDir })
-    await expect(
-      be.putBytesIfAbsent('checkpoints/1-1-aaaaaaaa.tar.gz', Buffer.from('x')),
-    ).rejects.toThrow(/symlink/)
-    expect(existsSync(join(outside, '1-1-aaaaaaaa.tar.gz'))).toBe(false)
-  })
 
   it('publishes a staged file with its contents flushed, on every path', async () => {
     // The barriers live in the publish primitive, so a caller cannot reach
