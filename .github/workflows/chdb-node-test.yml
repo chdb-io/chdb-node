@@ -8,9 +8,11 @@ on:
     branches: ["main"]
     paths-ignore: ["**/*.md"]
 
-# update_libchdb.sh pins the published chdb-core v26.5.0 libchdb, which ships
-# chdb_query_with_params (#73) and chdb_query_arrow (#15) across all four target
-# platforms, so the full v2 + v3 suite is expected green here.
+# update_libchdb.sh pins a published chdb-core libchdb across all four target
+# platforms, so the full v2 + v3 suite is expected green here. The pin is
+# currently the v26.7.2-rc.2 pre-release, which is the first to export the
+# Durable V1 ABI (chdb_backup_database_n / chdb_restore_database_n /
+# chdb_classify_query_n).
 
 # Harden the registry fetch so a transient reset (e.g. ECONNRESET during
 # install) retries instead of reddening the job. Combined with the per-job
@@ -34,6 +36,74 @@ jobs:
         with:
           node-version: 22.x
       - run: node scripts/check-version-scheme.mjs
+
+  # The durable control plane is pure TypeScript with no engine dependency, so it
+  # gets its own job instead of riding the matrix: no libchdb download, no addon
+  # build, seconds to run. Keeping it off the matrix also keeps one of its own
+  # assertions honest — it checks that importing chdb/durable loads nothing
+  # native, and the v3 job has the addon in the process before its first test.
+  durable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm install --ignore-scripts
+      - name: Protocol, state machine and fault matrix
+        run: npm run test:durable
+
+  # Provider conformance for the S3 backend. Separate from the job above so a
+  # flaky container cannot redden the engine-free suite, and because this is the
+  # only automated check that conditional create and compare-and-swap work
+  # against a real object store rather than a filesystem. MinIO needs no
+  # credentials, so it runs on every PR; AWS S3 and R2 stay manual.
+  durable-s3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm install --ignore-scripts
+      - name: Start MinIO
+        # Not a `services:` container: GitHub offers no way to pass a command to
+        # one, and this image needs `server /data` to start at all.
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:latest server /data
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null; then
+              echo "MinIO ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "MinIO did not become healthy" >&2
+          docker logs minio >&2
+          exit 1
+      - name: Create the test bucket
+        run: |
+          node -e "
+            const { S3Client, CreateBucketCommand } = require('@aws-sdk/client-s3')
+            const c = new S3Client({ region: 'us-east-1', endpoint: 'http://127.0.0.1:9000',
+              forcePathStyle: true,
+              credentials: { accessKeyId: 'minioadmin', secretAccessKey: 'minioadmin' } })
+            c.send(new CreateBucketCommand({ Bucket: 'durable-test' }))
+              .then(() => console.log('bucket created'))
+              .catch(e => { console.error(e.name); process.exit(1) })
+          "
+      - name: S3 provider conformance
+        env:
+          CHDB_DURABLE_S3_BUCKET: durable-test
+          CHDB_DURABLE_S3_ENDPOINT: http://127.0.0.1:9000
+          CHDB_DURABLE_S3_REGION: us-east-1
+          CHDB_DURABLE_S3_FORCE_PATH_STYLE: "true"
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+        run: npm run test:durable:s3
 
   test:
     runs-on: ${{ matrix.os }}
