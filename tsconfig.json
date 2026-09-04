@@ -14,5 +14,10 @@
     "checkJs": false,
     "types": ["node"]
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  // The Bun-only durable files import `bun:ffi` and `bun:test`, which have no
+  // declarations under @types/node. They are checked by `bun test`, which
+  // transpiles them directly; pulling in @types/bun here would put a second set
+  // of global declarations alongside @types/node for every other file.
+  "exclude": ["test/durable/libchdb-ffi.ts", "test/durable/*.bun.test.ts"]
 }
