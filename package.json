@@ -18,6 +18,21 @@
       "require": "./dist/connection/index.js",
       "default": "./dist/connection/index.js"
     },
+    "./durable": {
+      "types": "./dist/durable/index.d.ts",
+      "require": "./dist/durable/index.js",
+      "default": "./dist/durable/index.js"
+    },
+    "./durable/s3": {
+      "types": "./dist/durable/backends/s3.d.ts",
+      "require": "./dist/durable/backends/s3.js",
+      "default": "./dist/durable/backends/s3.js"
+    },
+    "./libchdb": {
+      "types": "./dist/libchdb/index.d.ts",
+      "require": "./dist/libchdb/index.js",
+      "default": "./dist/libchdb/index.js"
+    },
     "./agents": {
       "types": "./integrations/agents/index.d.mts",
       "import": "./integrations/agents/index.mjs"
@@ -52,7 +67,11 @@
     "build": "node-gyp configure build --verbose && npm run fixloaderpath && npm run build:ts",
     "build:ts": "rm -rf dist && tsc -p tsconfig.build.json",
     "prepack": "npm run build:ts",
-    "install": "node -e \"\""
+    "install": "node -e \"\"",
+    "test:durable": "npm run build:ts && vitest run --config vitest.durable.config.ts",
+    "test:durable:e2e": "bun test --timeout 120000 test/durable/libchdb-e2e.bun.test.ts",
+    "test:durable:s3": "vitest run --config vitest.durable.config.ts test/durable/s3-backend.test.ts",
+    "test:durable:stack": "bun test --timeout 300000 test/durable/full-stack.bun.test.ts"
   },
   "author": {
     "name": "chdb",
@@ -75,6 +94,7 @@
     "integrations"
   ],
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1125.0",
     "@hypequery/clickhouse": "^2.1.2",
     "@mastra/core": "^1.47.0",
     "@types/node": "^20.14.0",
@@ -93,10 +113,10 @@
     "node-gyp-build": "^4.6.0"
   },
   "optionalDependencies": {
-    "@chdb/lib-darwin-arm64": "26.7.0-stable.1",
-    "@chdb/lib-darwin-x64": "26.7.0-stable.1",
-    "@chdb/lib-linux-arm64-gnu": "26.7.0-stable.1",
-    "@chdb/lib-linux-x64-gnu": "26.7.0-stable.1"
+    "@chdb/lib-darwin-arm64": "26.7.2-rc.2.1",
+    "@chdb/lib-darwin-x64": "26.7.2-rc.2.1",
+    "@chdb/lib-linux-arm64-gnu": "26.7.2-rc.2.1",
+    "@chdb/lib-linux-x64-gnu": "26.7.2-rc.2.1"
   },
   "peerDependencies": {
     "@clickhouse/client": ">=1.23.0",
@@ -104,7 +124,8 @@
     "@mastra/core": ">=0.10",
     "ai": ">=5",
     "apache-arrow": ">=14",
-    "zod": ">=3"
+    "zod": ">=3",
+    "@aws-sdk/client-s3": ">=3"
   },
   "peerDependenciesMeta": {
     "@clickhouse/client": {
@@ -123,6 +144,9 @@
       "optional": true
     },
     "@hypequery/clickhouse": {
+      "optional": true
+    },
+    "@aws-sdk/client-s3": {
       "optional": true
     }
   },

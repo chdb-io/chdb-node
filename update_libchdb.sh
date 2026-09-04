@@ -11,12 +11,20 @@ cd "$(dirname "$0")"
 # Fail fast so a bad download never silently leaves a stale/partial libchdb.
 set -e
 
-# Pre-release engine for the 3.1.0-rc.1 test line (carries the written-rows
-# accessors the raw/streaming insert needs; absent in the v26.5.0 stable line).
+# Pre-release engine carrying the Durable V1 ABI: chdb_backup_database_n,
+# chdb_restore_database_n and the chdb_classify_query_n that reports statement
+# count and target-database proof. chdb/durable's engine adapter cannot be built
+# without them, and no stable release exports them yet.
+#
+# Note chdb_version() on this build returns the full "26.7.2-rc.2", suffix and
+# all. Durable records that string in head.engine.version and opens only on an
+# exact match, so an object written against this RC is not readable by the
+# eventual 26.7.2 stable. That is the contract working as designed (V1 pins the
+# engine exactly), but it means RC-era objects are throwaway.
 #
 # Keep the pin on its own line and literal: the release check greps for it when
 # it proposes a bump.
-CHDB_ENGINE_PIN=v26.7.0
+CHDB_ENGINE_PIN=v26.7.2-rc.2
 
 # CHDB_ENGINE_VERSION overrides the pin, which is how the release check runs the
 # suite against an engine this repository has not adopted yet. It is a different
@@ -44,7 +52,7 @@ LATEST_RELEASE="${CHDB_ENGINE_VERSION:-$CHDB_ENGINE_PIN}"
 # ERR_DLOPEN_FAILED instead.
 #
 # The publish and cleanroom workflows read CHDB_LIB_VERSION from here.
-LIBCHDB_NPM_VERSION=26.7.0-stable.1
+LIBCHDB_NPM_VERSION=26.7.2-rc.2.1
 
 # Download the correct version based on the platform
 case "$(uname -s)" in
