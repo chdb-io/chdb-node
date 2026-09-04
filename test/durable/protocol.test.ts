@@ -9,7 +9,8 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, writeFile } from 'fs/promises'
+import { existsSync } from 'fs'
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -691,6 +692,41 @@ describe('local backend conditional operations', () => {
     expect(outcomes).toEqual(['not-replaced', 'replaced'])
     // Whoever won, the pointer names their version and it is readable.
     expect((await be.getBytesWithEtag('head.json'))!.etag).toBe('v2')
+  })
+
+  it('refuses to publish through a symlinked directory', async () => {
+    // A lexically valid key can still leave the prefix if a component is a
+    // link. Whoever plants it can usually write the object anyway, but a link
+    // planted once in a shared parent should not silently redirect every
+    // later operation.
+    const root = await mkdtemp(join(tmpdir(), 'durable-link-'))
+    const objDir = join(root, 'obj')
+    const outside = join(root, 'outside')
+    await mkdir(outside, { recursive: true })
+    await mkdir(objDir, { recursive: true })
+    await symlink(outside, join(objDir, 'checkpoints'))
+
+    const be = new LocalDurableBackend({ root: objDir })
+    await expect(
+      be.putBytesIfAbsent('checkpoints/1-1-aaaaaaaa.tar.gz', Buffer.from('x')),
+    ).rejects.toThrow(/symlink/)
+    expect(existsSync(join(outside, '1-1-aaaaaaaa.tar.gz'))).toBe(false)
+  })
+
+  it('publishes a staged file with its contents flushed, on every path', async () => {
+    // The barriers live in the publish primitive, so a caller cannot reach
+    // publication without them. This checks the observable half: the object is
+    // there and correct however it got staged.
+    const be = await backend()
+    const dir = await mkdtemp(join(tmpdir(), 'durable-src-'))
+    const src = join(dir, 'checkpoint.tar.gz')
+    const payload = Buffer.from('archive bytes')
+    await writeFile(src, payload)
+
+    expect(await be.putFileIfAbsent('checkpoints/1-1-bbbbbbbb.tar.gz', src)).toBe('created')
+    expect(Buffer.from((await be.getBytes('checkpoints/1-1-bbbbbbbb.tar.gz'))!)).toEqual(payload)
+    // And it stays a conditional create.
+    expect(await be.putFileIfAbsent('checkpoints/1-1-bbbbbbbb.tar.gz', src)).toBe('already-exists')
   })
 
   it('refuses a key that would escape the object prefix', async () => {

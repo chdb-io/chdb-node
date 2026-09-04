@@ -250,28 +250,15 @@ export class LocalDurableBackend implements DurableBackend {
 
   async putFileIfAbsent(key: string, localPath: string): Promise<PutOutcome> {
     const dest = this.pathFor(key)
-    await mkdir(dirname(dest), { recursive: true })
     // Hard-linking the caller's file avoids copying a multi-gigabyte archive.
     // It is safe because the durable object writes each backup to a fresh
     // unique path and never touches it again; a caller that mutated the source
     // afterwards would be mutating a published object, which the protocol
     // forbids anyway.
     try {
-      await link(localPath, dest)
-      // The fast path needs the same barriers as the staged one, and needs
-      // them more: this is how a checkpoint is published, so losing it to a
-      // power cut leaves a head naming a base that is not there. The link
-      // shares the caller's inode, so the data has to be flushed through the
-      // source, and the new name lives in the destination directory.
-      await fsyncFile(localPath)
-      await fsyncDir(dirname(dest))
-      return 'created'
+      return await this.linkIntoPlace(localPath, dest)
     } catch (e) {
-      const code = errno(e)
-      if (code === 'EEXIST') return 'already-exists'
-      if (code !== 'EXDEV') {
-        throw new DurableBackendError(`durable: failed to publish ${key} to ${this.describe}`, { cause: e })
-      }
+      if (errno((e as { cause?: unknown }).cause ?? e) !== 'EXDEV') throw e
     }
     // Different filesystem: stage a copy next to the destination, then link.
     const tmp = await this.tmpPath()
@@ -439,10 +426,26 @@ export class LocalDurableBackend implements DurableBackend {
     }
   }
 
-  private async linkIntoPlace(tmp: string, dest: string): Promise<PutOutcome> {
+  /**
+   * The one way an object becomes visible under this root.
+   *
+   * Both durability barriers live here rather than at the call sites, and that
+   * placement is the point. Publishing needs the contents flushed *and* the
+   * directory entry flushed, and three separate paths reach this operation —
+   * bytes staged into a temp file, a same-filesystem hard link, and a
+   * cross-filesystem copy. Barriers added per path were missed twice, once on
+   * each of the latter two, and the second miss was on the path a checkpoint
+   * actually takes. A caller cannot forget what it does not perform.
+   *
+   * Re-flushing a source that is already durable costs a no-op syscall, which
+   * is the right price for not having to reason about which callers did it.
+   */
+  private async linkIntoPlace(source: string, dest: string): Promise<PutOutcome> {
     await mkdir(dirname(dest), { recursive: true })
+    await this.assertRealDirectory(dirname(dest))
+    await fsyncFile(source)
     try {
-      await link(tmp, dest)
+      await link(source, dest)
     } catch (e) {
       if (errno(e) === 'EEXIST') return 'already-exists'
       throw new DurableBackendError(`durable: failed to create ${dest}`, { cause: e })
@@ -452,5 +455,30 @@ export class LocalDurableBackend implements DurableBackend {
     // crash, or a head will reference bytes that no longer exist.
     await fsyncDir(dirname(dest))
     return 'created'
+  }
+
+  /**
+   * Refuse to operate through a directory that is a symlink.
+   *
+   * `pathFor` resolves lexically, which cannot see that `<root>/checkpoints`
+   * is a link to somewhere else entirely — a valid-looking key would then read
+   * or publish outside the object prefix with this process's privileges.
+   *
+   * This is defence in depth rather than a complete answer. Whoever can plant
+   * that link can usually write the object directly, and a check followed by a
+   * use is never perfectly atomic without `openat`, which Node does not
+   * expose. What it does buy is that a link planted once, in a shared parent
+   * such as a temp directory, does not silently redirect every later
+   * operation.
+   */
+  private async assertRealDirectory(dir: string): Promise<void> {
+    if (dir === this.root) return
+    const st = await lstat(dir).catch(() => undefined)
+    if (st?.isSymbolicLink()) {
+      throw new DurableBackendError(
+        `durable: refusing to use ${dir}, which is a symlink; an object prefix must contain ` +
+          `only real directories`,
+      )
+    }
   }
 }
