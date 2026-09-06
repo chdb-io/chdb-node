@@ -49,7 +49,12 @@ ChdbResult:
 class Session(path?='', opts?)
   new Session()        -> temporary in-memory database (temp dir, auto-cleaned)
   new Session("./db")  -> persistent database at ./db
-  opts: { installSignalHandlers?: boolean }  (default false; library does not steal signals)
+  opts: { installSignalHandlers?: boolean, configFile?: string }
+    installSignalHandlers defaults false; the library does not steal signals.
+    configFile selects a readable regular ClickHouse startup configuration file.
+    Relative paths resolve to absolute paths; invalid files and unsupported native
+    bindings fail before opening. The caller retains ownership of the file.
+    Same-path live sessions must use the same resolved configFile (or all omit it).
   Methods:
     .query(sql, format='CSV') -> string                      (sync)
     .queryBind(sql, params, format='CSV') -> string          (sync, bound)

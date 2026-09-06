@@ -245,6 +245,14 @@ export interface ChdbQueryStream extends AsyncIterable<StreamChunk> {
  */
 export interface SessionOptions {
   /**
+   * ClickHouse startup configuration file. Relative paths resolve from the current
+   * working directory. The file must be readable and regular. Sessions sharing a
+   * data path must use the same resolved configuration path until all are closed.
+   * Requires a native binding with session configuration support.
+   * Closing the session does not delete this file.
+   */
+  configFile?: string;
+  /**
    * Opt-in: install SIGINT/SIGTERM handlers that close this session. Default
    * is `false` (a library must not steal the user's signals). These handlers
    * never call `process.exit`; the app decides how to terminate.

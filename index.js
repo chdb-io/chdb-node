@@ -583,6 +583,27 @@ class Session {
   #signalHandler = null; // opt-in signal handler, deregistered on close()
 
   constructor(path = "", opts = {}) {
+    // Validate startup options before creating a directory or releasing the default connection.
+    let configFile;
+    const configured = opts?.configFile;
+    if (configured !== undefined) {
+      if (typeof configured !== 'string' || configured.length === 0 || configured.includes('\0')) {
+        throw new ChdbConnectionError('Session configFile must be a non-empty file path without null bytes.');
+      }
+      configFile = resolvePath(configured);
+      try {
+        if (!fs.statSync(configFile).isFile()) {
+          throw new ChdbConnectionError('Session configFile must refer to a regular file.');
+        }
+        fs.accessSync(configFile, fs.constants.R_OK);
+      } catch (e) {
+        throw new ChdbConnectionError('Cannot read the session configFile.', { cause: e });
+      }
+      if (chdbNode.supportsSessionConfig !== true) {
+        throw new ChdbConnectionError(
+          'The loaded native binding does not support Session configFile. Install a native binding with session configuration support.');
+      }
+    }
     // Opening a session destroys the shared default connection: libchdb binds
     // one data directory per process, so the in-memory default has to yield.
     // Destroying it while a query is still running on it is not survivable —
@@ -644,7 +665,9 @@ class Session {
     try {
       const key = this.path ? resolvePath(this.path) : this.path;
       this._key = key; // normalized directory, for the deferred-teardown bookkeeping
-      this.connection = chdbNode.CreateConnection(key);
+      this.connection = configFile === undefined
+        ? chdbNode.CreateConnection(key)
+        : chdbNode.CreateConnection(key, configFile);
     } catch (e) {
       if (this.isTemp) { try { this.#removeTempDir(); } catch (_) {} }
       throw asConnectionError(e);

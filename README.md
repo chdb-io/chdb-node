@@ -63,6 +63,43 @@ Errors are typed (`ChdbSyntaxError`, `ChdbQueryError`, `ChdbConnectionError`,
 `ChdbAbortError`, `ChdbTimeoutError`, …), each carrying `.code`, the ClickHouse
 `.clickhouseCode`, and `.cause`.
 
+### Session startup configuration
+
+Pass a ClickHouse configuration file without changing the process environment or working directory:
+
+```js
+const session = new Session("./data", { configFile: "/secure/path/clickhouse.xml" });
+try {
+  const result = await session.queryAsync("SELECT 1");
+} finally {
+  session.close();
+}
+```
+
+For example, an endpoint-specific signing region can be configured with:
+
+```xml
+<clickhouse>
+  <s3>
+    <intermediary>
+      <endpoint>https://storage.example/</endpoint>
+      <region>eu-west-1</region>
+    </intermediary>
+  </s3>
+</clickhouse>
+```
+
+`configFile` must name an existing, readable regular file. Relative paths are
+resolved before opening the session. Invalid files fail without replacing an
+existing default connection. The file remains caller-owned and is not deleted
+when the session closes.
+
+Sessions sharing a data directory must use the same resolved configuration path,
+including the choice to omit configuration. Close all connections to that
+directory before selecting another configuration. This option requires a rebuilt
+platform binding with startup-configuration support. Older bindings fail rather
+than silently ignoring the option.
+
 ### One data directory at a time
 
 libchdb binds a single data directory per process, so opening a `Session` takes

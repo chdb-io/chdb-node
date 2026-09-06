@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -13,7 +15,7 @@
 #include <napi.h>
 
 typedef void * ChdbConnection;
-ChdbConnection CreateConnection(const char * path, char ** error_message);
+ChdbConnection CreateConnection(const char * path, const std::string &configFile, char ** error_message);
 void CloseConnection(ChdbConnection conn);
 char * QueryWithConnection(ChdbConnection conn, const char * query, const char * format, char ** error_message);
 
@@ -74,21 +76,26 @@ char * QueryWithConnection(ChdbConnection conn, const char * query, const char *
 // mutates the registry off the main thread.
 struct Registry {
   std::string boundKey;                  // path the EmbeddedServer is bound to (valid while !conns.empty())
+  std::string boundConfigFile;           // startup config path, or "" when none was supplied
   std::set<chdb_connection *> conns;     // every live connection (sessions + the default)
   chdb_connection *defaultConn = nullptr; // the lazy in-memory default (key ""), if up
 };
 static Registry g_reg;
 static std::mutex g_reg_mu;
 
-static chdb_connection *open_raw(const std::string &path) {
+static chdb_connection *open_raw(const std::string &path, const std::string &configFile) {
   char prog[] = "clickhouse";
   std::string pathArg;
-  char *args[2] = { prog, nullptr };
+  std::string configArg;
+  char *args[4] = { prog, nullptr, nullptr, nullptr };
   int argc = 1;
   if (!path.empty()) {
     pathArg = "--path=" + path;
-    args[1] = const_cast<char *>(pathArg.c_str());
-    argc = 2;
+    args[argc++] = const_cast<char *>(pathArg.c_str());
+  }
+  if (!configFile.empty()) {
+    configArg = "--config-file=" + configFile;
+    args[argc++] = const_cast<char *>(configArg.c_str());
   }
   chdb_connection *conn_ptr = chdb_connect(argc, args);
   return (conn_ptr && *conn_ptr) ? conn_ptr : nullptr;
@@ -113,6 +120,7 @@ static void hard_close_all() {
   g_reg.conns.clear();
   g_reg.defaultConn = nullptr;
   g_reg.boundKey.clear();
+  g_reg.boundConfigFile.clear();
 }
 
 static void ensure_atexit() {
@@ -137,7 +145,7 @@ static chdb_connection *get_default_conn(char **error_message) {
                                "') is active; close it before using standalone query()").c_str());
     return nullptr;
   }
-  chdb_connection *c = open_raw("");
+  chdb_connection *c = open_raw("", "");
   if (!c) {
     if (error_message && !*error_message)
       *error_message = strdup("Failed to acquire default connection");
@@ -145,42 +153,50 @@ static chdb_connection *get_default_conn(char **error_message) {
   }
   g_reg.defaultConn = c;
   g_reg.boundKey = "";
+  g_reg.boundConfigFile.clear();
   g_reg.conns.insert(c);
   return c;
 }
 
-// Session connection: same bound path opens ANOTHER independent connection; a
-// live in-memory default yields; a different data directory is rejected.
-static chdb_connection *acquire_session_conn(const std::string &path, char **error_message) {
+// Session connection: the default yields. Other connections must use the same
+// data path and startup config file.
+static chdb_connection *acquire_session_conn(const std::string &path,
+                                            const std::string &configFile,
+                                            char **error_message) {
   ensure_atexit();
   std::lock_guard<std::mutex> lk(g_reg_mu);
+  if (g_reg.defaultConn) {
+    erase_arrow_tables_for_conn(g_reg.defaultConn);
+    chdb_close_conn(g_reg.defaultConn);
+    g_reg.conns.erase(g_reg.defaultConn);
+    g_reg.defaultConn = nullptr;
+    if (g_reg.conns.empty()) {
+      g_reg.boundKey.clear();
+      g_reg.boundConfigFile.clear();
+    }
+  }
   if (!g_reg.conns.empty()) {
-    if (g_reg.boundKey.empty()) {
-      // Only the in-memory default is up (boundKey ""). It is transient and must
-      // yield so this session can bind a real data directory.
-      if (g_reg.defaultConn) {
-        erase_arrow_tables_for_conn(g_reg.defaultConn);
-        chdb_close_conn(g_reg.defaultConn);
-        g_reg.conns.erase(g_reg.defaultConn);
-        g_reg.defaultConn = nullptr;
-      }
-      // conns is now empty; fall through to bind `path`.
-    } else if (g_reg.boundKey != path) {
+    if (g_reg.boundKey != path) {
       if (error_message && !*error_message)
         *error_message = strdup((std::string("chdb: only one active data directory per "
                                  "process; close the current session (path='") + g_reg.boundKey +
                                  "') before opening '" + path + "'").c_str());
       return nullptr;
     }
-    // else boundKey == path: an independent connection to the same server.
+    if (g_reg.boundConfigFile != configFile) {
+      if (error_message && !*error_message)
+        *error_message = strdup("chdb: a different config file is active; close all sessions before changing the config file");
+      return nullptr;
+    }
   }
-  chdb_connection *c = open_raw(path);
+  chdb_connection *c = open_raw(path, configFile);
   if (!c) {
     if (error_message && !*error_message)
       *error_message = strdup((std::string("Failed to create connection for path '") + path + "'").c_str());
     return nullptr;
   }
   g_reg.boundKey = path;
+  g_reg.boundConfigFile = configFile;
   g_reg.conns.insert(c);
   return c;
 }
@@ -197,7 +213,10 @@ static void release_session_conn(chdb_connection *conn) {
   g_reg.conns.erase(it);
   if (conn == g_reg.defaultConn) g_reg.defaultConn = nullptr;
   // Last connection out unbinds the EmbeddedServer so a different path may bind.
-  if (g_reg.conns.empty()) g_reg.boundKey.clear();
+  if (g_reg.conns.empty()) {
+    g_reg.boundKey.clear();
+    g_reg.boundConfigFile.clear();
+  }
 }
 
 static char *exec_query(chdb_connection conn, const char *query,
@@ -279,11 +298,11 @@ static char *exec_query_params(chdb_connection conn,
   return output;
 }
 
-ChdbConnection CreateConnection(const char * path, char ** error_message) {
+ChdbConnection CreateConnection(const char * path, const std::string &configFile, char ** error_message) {
     // Sessions always pass a real path (a temp dir for in-memory sessions), so
     // an empty key here never collides with the default connection's "" key.
     std::string p = (path && path[0]) ? std::string(path) : std::string();
-    return static_cast<ChdbConnection>(acquire_session_conn(p, error_message));
+    return static_cast<ChdbConnection>(acquire_session_conn(p, configFile, error_message));
 }
 
 void CloseConnection(ChdbConnection conn) {
@@ -860,10 +879,29 @@ Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
         Napi::TypeError::New(env, "Path string expected").ThrowAsJavaScriptException();
         return env.Null();
     }
+    if (info.Length() > 1 && !info[1].IsString()) {
+        Napi::TypeError::New(env, "Config file path string expected").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    std::string configFile;
+    if (info.Length() > 1) {
+        configFile = info[1].As<Napi::String>().Utf8Value();
+        if (configFile.empty() || configFile.find('\0') != std::string::npos) {
+            Napi::TypeError::New(env, "Config file path must not be empty or contain null bytes").ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        struct stat configStat;
+        if (stat(configFile.c_str(), &configStat) != 0 ||
+            !S_ISREG(configStat.st_mode) || access(configFile.c_str(), R_OK) != 0) {
+            Napi::Error::New(env, "Config file must be an existing readable regular file: " + configFile).ThrowAsJavaScriptException();
+            return env.Null();
+        }
+    }
 
     std::string path = info[0].As<Napi::String>().Utf8Value();
     char *error_message = nullptr;
-    ChdbConnection conn = CreateConnection(path.c_str(), &error_message);
+    ChdbConnection conn = CreateConnection(path.c_str(), configFile, &error_message);
 
     if (!conn) {
         std::string msg = error_message ? error_message : "Failed to create connection";
@@ -1352,6 +1390,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
 
   // Export connection management functions
   exports.Set("CreateConnection", Napi::Function::New(env, CreateConnectionWrapper));
+  exports.Set("supportsSessionConfig", Napi::Boolean::New(env, true));
   exports.Set("CloseConnection", Napi::Function::New(env, CloseConnectionWrapper));
   exports.Set("QueryWithConnection", Napi::Function::New(env, QueryWithConnectionWrapper));
 
