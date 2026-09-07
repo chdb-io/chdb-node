@@ -105,6 +105,45 @@ jobs:
           AWS_SECRET_ACCESS_KEY: minioadmin
         run: npm run test:durable:s3
 
+  # The durable control plane over the native addon — the default a Node caller
+  # gets, and the half of the seam the Bun end-to-end suite cannot reach. It is
+  # a job of its own for the reasons in vitest.durable-node.config.ts: it needs
+  # a built addon, and the engine binds one data path per process, so it can
+  # neither ride the engine-free job above nor share a worker with the v3 suite.
+  #
+  # Two platforms, one Node version: what this exercises is the C ABI, which
+  # does not vary by Node version, and the addon build is the slow part.
+  durable-node:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: Install JS deps (no compile-on-install)
+        run: npm install --ignore-scripts
+      - name: Fetch libchdb
+        run: npm run libchdb
+      - name: Build (addon + dist)
+        run: npm run build
+      - name: Exercise the freshly built addon (not the published prebuilt)
+        # The published @chdb/lib-<platform> carries its own addon and the loader
+        # prefers it. Until one is published from a tree that binds the durable
+        # ABI it exports none of it, so the suite would refuse to start against
+        # a build that is otherwise fine.
+        shell: bash
+        run: rm -rf node_modules/@chdb/lib-*
+      - name: Durable over the addon
+        run: npm run test:durable:node
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:

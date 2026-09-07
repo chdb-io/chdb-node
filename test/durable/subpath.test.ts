@@ -1,5 +1,5 @@
 /**
- * Packaging guarantees for the two new subpaths.
+ * Packaging guarantees for the durable subpaths.
  *
  * The assertion that matters is the first one: importing `chdb/durable` must
  * not load native code. It is checked in a child process with `process.dlopen`
@@ -100,11 +100,26 @@ describe.skipIf(!built)('subpath imports', () => {
     expect(out).toContain("chdb/durable/s3")
   })
 
-  it('declares both subpaths in package.json exports', () => {
+  it('declares every durable subpath in package.json exports', () => {
     const pkg = require('../../package.json') as { exports: Record<string, unknown> }
     expect(pkg.exports['./durable']).toBeDefined()
     expect(pkg.exports['./libchdb']).toBeDefined()
     expect(pkg.exports['./durable/s3']).toBeDefined()
+    expect(pkg.exports['./durable/node']).toBeDefined()
+  })
+
+  it('points each of them at a file the build produced', () => {
+    // The addon adapter's subpath name and its file name deliberately differ
+    // (`./durable/node` -> `dist/durable/adapters/chdb-node.js`), so a typo
+    // here would only surface as a caller's failed import.
+    const pkg = require('../../package.json') as {
+      exports: Record<string, { require?: string }>
+    }
+    for (const sub of ['./durable', './durable/s3', './durable/node', './libchdb']) {
+      const target = pkg.exports[sub]?.require
+      expect(target, sub).toBeDefined()
+      expect(existsSync(resolve(__dirname, '..', '..', target as string)), target).toBe(true)
+    }
   })
 })
 

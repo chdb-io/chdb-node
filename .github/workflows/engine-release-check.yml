@@ -89,6 +89,14 @@ jobs:
       - name: Test (v2 mocha + v3 vitest)
         run: npm run test:all
 
+      - name: Durable over the addon
+        # The durable ABI is four more C entry points and one size-versioned
+        # struct, so it is exactly what a new engine can break without breaking
+        # anything the suite above touches — chdb_query_analysis_v1 growing a
+        # field, or a class moving between MUTATING and MUTATING_GLOBAL, changes
+        # no declaration the addon compiles against.
+        run: npm run test:durable:node
+
   # Green means the engine can be adopted, not that it has been. Adoption is a
   # one-line change to a pinned version and goes through review like any other
   # dependency bump; this only writes the line. LIBCHDB_NPM_VERSION is left

@@ -28,6 +28,11 @@
       "require": "./dist/durable/backends/s3.js",
       "default": "./dist/durable/backends/s3.js"
     },
+    "./durable/node": {
+      "types": "./dist/durable/adapters/chdb-node.d.ts",
+      "require": "./dist/durable/adapters/chdb-node.js",
+      "default": "./dist/durable/adapters/chdb-node.js"
+    },
     "./libchdb": {
       "types": "./dist/libchdb/index.d.ts",
       "require": "./dist/libchdb/index.js",
@@ -69,6 +74,7 @@
     "prepack": "npm run build:ts",
     "install": "node -e \"\"",
     "test:durable": "npm run build:ts && vitest run --config vitest.durable.config.ts",
+    "test:durable:node": "vitest run --config vitest.durable-node.config.ts",
     "test:durable:e2e": "bun test --timeout 120000 test/durable/libchdb-e2e.bun.test.ts",
     "test:durable:s3": "vitest run --config vitest.durable.config.ts test/durable/s3-backend.test.ts",
     "test:durable:stack": "bun test --timeout 300000 test/durable/full-stack.bun.test.ts"
