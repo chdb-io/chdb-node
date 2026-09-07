@@ -461,7 +461,9 @@ before it arrives (contract §8):
 - Parquet or data WAL
 - garbage collection and destroy — nothing here deletes an object (see below)
 - multiple writers, multiple databases per object, cross-object transactions
-- cross-engine-version restore — V1 pins `chdb_version()` exactly
+- cross-engine-version migration orchestration — V1 already lets later chdb-core
+  releases restore earlier V1 full backups through the `backup_format` and
+  `min_reader` gates, but it does not define an online upgrade/rollback flow
 - multipart upload: a single `PutObject` caps an object at 5 GiB, and a larger
   checkpoint fails with `limit_exceeded` rather than truncating. Note where that
   failure lands — the size is known only after the archive exists, so the backup

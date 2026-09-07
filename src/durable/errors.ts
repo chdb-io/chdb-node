@@ -84,7 +84,7 @@ export class DurableLeaseFencedError extends DurableError {
   override readonly code = 'CHDB_DURABLE_LEASE_FENCED'
 }
 
-/** The object records an engine version that is not exactly the running one. */
+/** The object requires an engine capability or minimum reader this process does not have. */
 export class DurableEngineIncompatibleError extends DurableError {
   readonly category = 'engine_incompatible'
   override readonly code = 'CHDB_DURABLE_ENGINE_INCOMPATIBLE'
