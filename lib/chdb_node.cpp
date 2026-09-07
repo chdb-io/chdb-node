@@ -14,6 +14,9 @@
 
 typedef void * ChdbConnection;
 ChdbConnection CreateConnection(const char * path, char ** error_message);
+ChdbConnection CreateConnectionWithArgs(const char * path,
+                                        const std::vector<std::string> & extraArgs,
+                                        char ** error_message);
 void CloseConnection(ChdbConnection conn);
 char * QueryWithConnection(ChdbConnection conn, const char * query, const char * format, char ** error_message);
 
@@ -80,17 +83,26 @@ struct Registry {
 static Registry g_reg;
 static std::mutex g_reg_mu;
 
-static chdb_connection *open_raw(const std::string &path) {
-  char prog[] = "clickhouse";
-  std::string pathArg;
-  char *args[2] = { prog, nullptr };
-  int argc = 1;
-  if (!path.empty()) {
-    pathArg = "--path=" + path;
-    args[1] = const_cast<char *>(pathArg.c_str());
-    argc = 2;
-  }
-  chdb_connection *conn_ptr = chdb_connect(argc, args);
+// Extra argv entries are the same `--setting=value` forms a `clickhouse local`
+// invocation takes, and they have to be given at connect: `--path` and
+// `--backups.allowed_path` are server configuration rather than session
+// settings, and a durable writer's `SET`-equivalents must not be reachable
+// afterwards (the durable control plane classifies `SET` as CONTROL and
+// refuses it, so a caller cannot undo them through its public surface).
+static chdb_connection *open_raw(const std::string &path,
+                                 const std::vector<std::string> &extraArgs = {}) {
+  std::vector<std::string> owned;
+  owned.reserve(extraArgs.size() + 2);
+  owned.emplace_back("clickhouse");
+  if (!path.empty()) owned.push_back("--path=" + path);
+  for (const std::string &a : extraArgs) owned.push_back(a);
+
+  std::vector<char *> args;
+  args.reserve(owned.size() + 1);
+  for (std::string &a : owned) args.push_back(const_cast<char *>(a.c_str()));
+  args.push_back(nullptr);
+
+  chdb_connection *conn_ptr = chdb_connect(static_cast<int>(owned.size()), args.data());
   return (conn_ptr && *conn_ptr) ? conn_ptr : nullptr;
 }
 
@@ -151,7 +163,9 @@ static chdb_connection *get_default_conn(char **error_message) {
 
 // Session connection: same bound path opens ANOTHER independent connection; a
 // live in-memory default yields; a different data directory is rejected.
-static chdb_connection *acquire_session_conn(const std::string &path, char **error_message) {
+static chdb_connection *acquire_session_conn(const std::string &path,
+                                            const std::vector<std::string> &extraArgs,
+                                            char **error_message) {
   ensure_atexit();
   std::lock_guard<std::mutex> lk(g_reg_mu);
   if (!g_reg.conns.empty()) {
@@ -174,7 +188,7 @@ static chdb_connection *acquire_session_conn(const std::string &path, char **err
     }
     // else boundKey == path: an independent connection to the same server.
   }
-  chdb_connection *c = open_raw(path);
+  chdb_connection *c = open_raw(path, extraArgs);
   if (!c) {
     if (error_message && !*error_message)
       *error_message = strdup((std::string("Failed to create connection for path '") + path + "'").c_str());
@@ -280,10 +294,16 @@ static char *exec_query_params(chdb_connection conn,
 }
 
 ChdbConnection CreateConnection(const char * path, char ** error_message) {
+    return CreateConnectionWithArgs(path, {}, error_message);
+}
+
+ChdbConnection CreateConnectionWithArgs(const char * path,
+                                        const std::vector<std::string> & extraArgs,
+                                        char ** error_message) {
     // Sessions always pass a real path (a temp dir for in-memory sessions), so
     // an empty key here never collides with the default connection's "" key.
     std::string p = (path && path[0]) ? std::string(path) : std::string();
-    return static_cast<ChdbConnection>(acquire_session_conn(p, error_message));
+    return static_cast<ChdbConnection>(acquire_session_conn(p, extraArgs, error_message));
 }
 
 void CloseConnection(ChdbConnection conn) {
@@ -853,6 +873,9 @@ Napi::Value StreamCancelWrapper(const Napi::CallbackInfo &info) {
   return env.Undefined();
 }
 
+// Args: (path, settings[]?) — settings are extra argv entries such as
+// "--backups.allowed_path=/…" or "--async_insert=0". The durable engine
+// adapter is the caller that needs them; every other caller passes none.
 Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
     Napi::Env env = info.Env();
 
@@ -862,8 +885,39 @@ Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
     }
 
     std::string path = info[0].As<Napi::String>().Utf8Value();
+    std::vector<std::string> settings;
+    if (info.Length() > 1 && !info[1].IsUndefined() && !info[1].IsNull()) {
+        if (!info[1].IsArray()) {
+            Napi::TypeError::New(env, "Connection settings must be an array of strings")
+                .ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        Napi::Array arr = info[1].As<Napi::Array>();
+        for (uint32_t i = 0; i < arr.Length(); i++) {
+            Napi::Value v = arr.Get(i);
+            if (!v.IsString()) {
+                Napi::TypeError::New(env, "Connection settings must be an array of strings")
+                    .ThrowAsJavaScriptException();
+                return env.Null();
+            }
+            std::string arg = v.As<Napi::String>().Utf8Value();
+            // The data directory is the registry key, and the registry is what
+            // enforces one bound path per process. A setting that moved the
+            // path would connect somewhere the registry does not know about,
+            // so the engine and the registry would disagree about what is
+            // bound — refuse it here rather than discover it later.
+            if (arg == "--path" || arg.rfind("--path=", 0) == 0) {
+                Napi::TypeError::New(env, "Connection settings cannot set --path; pass the data "
+                                          "directory as the first argument")
+                    .ThrowAsJavaScriptException();
+                return env.Null();
+            }
+            settings.push_back(std::move(arg));
+        }
+    }
+
     char *error_message = nullptr;
-    ChdbConnection conn = CreateConnection(path.c_str(), &error_message);
+    ChdbConnection conn = CreateConnectionWithArgs(path.c_str(), settings, &error_message);
 
     if (!conn) {
         std::string msg = error_message ? error_message : "Failed to create connection";
@@ -1331,6 +1385,237 @@ Napi::Value ArrowUnregisterWrapper(const Napi::CallbackInfo & info) {
   return env.Undefined();
 }
 
+//===--------------------------------------------------------------------===//
+// Durable V1 engine ABI: chdb_version, chdb_backup_database_n,
+// chdb_restore_database_n, chdb_classify_query_n.
+//
+// These four are everything `chdb/durable`'s EngineAdapter seam needs from the
+// engine (docs/design/durable-control-plane.md), and two contract rules decide
+// their shape rather than taste:
+//
+//   1. The binding never builds management SQL. Backup and restore take an
+//      identifier and a path, and core builds the AST and does the quoting —
+//      so a database name holding a backtick cannot change what runs.
+//   2. The binding never classifies SQL itself. No prefix lists, no regular
+//      expressions: chdb_classify_query_n is ClickHouse's own parser answering
+//      how many executable statements a text holds and whether every
+//      persistent write lands in the database the caller owns. A regex cannot
+//      see through `INSERT ... FORMAT` inline data or resolve an unqualified
+//      table name against the session's current database.
+//
+// All three connection-taking calls run on a libuv thread. Backup and restore
+// are unbounded — a checkpoint archives a whole database — and classification
+// joins them there because the parser runs over the whole statement text,
+// inline data included. None of them touch the connection registry, so the
+// handle has to outlive the call: the JS adapter serializes its operations and
+// refuses to close while one is in flight.
+//
+// Error messages here never echo the SQL. A mutation carrying a credential is
+// refused by the layer above, and a message quoting the statement would put
+// the credential in a log — which is the one thing that refusal exists to
+// prevent.
+//===--------------------------------------------------------------------===//
+
+// BACKUP and RESTORE share everything but which symbol they call and what the
+// failure is called.
+class DurableArchiveWorker : public Napi::AsyncWorker {
+public:
+  enum Op { Backup, Restore };
+
+  DurableArchiveWorker(Napi::Env env, chdb_connection conn, Op op, std::string database,
+                       std::string filePath)
+      : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)), conn_(conn), op_(op),
+        database_(std::move(database)), filePath_(std::move(filePath)) {}
+
+  Napi::Promise GetPromise() { return deferred_.Promise(); }
+
+  void Execute() override {
+    const char *what = op_ == Backup ? "chdb_backup_database_n" : "chdb_restore_database_n";
+    // V1 checkpoints are always full. The ABI accepts an incremental base, but
+    // an incremental archive records the *path* of that base, and the path does
+    // not exist on the machine that restores it — so no base is ever passed.
+    chdb_result *result =
+        op_ == Backup
+            ? chdb_backup_database_n(conn_, database_.data(), database_.size(), filePath_.data(),
+                                     filePath_.size(), nullptr, 0)
+            : chdb_restore_database_n(conn_, database_.data(), database_.size(), filePath_.data(),
+                                      filePath_.size());
+    if (!result) {
+      SetError(std::string(what) + " returned a null result");
+      return;
+    }
+    const char *error = chdb_result_error(result);
+    if (error) {
+      std::string msg = std::string(what) + " failed: " + error;
+      chdb_destroy_query_result(result);
+      SetError(msg);
+      return;
+    }
+    chdb_destroy_query_result(result);
+  }
+
+  void OnOK() override { deferred_.Resolve(Env().Undefined()); }
+  void OnError(const Napi::Error &e) override { deferred_.Reject(e.Value()); }
+
+private:
+  Napi::Promise::Deferred deferred_;
+  chdb_connection conn_;
+  Op op_;
+  std::string database_, filePath_;
+};
+
+class DurableClassifyWorker : public Napi::AsyncWorker {
+public:
+  DurableClassifyWorker(Napi::Env env, chdb_connection conn, std::string sql, bool hasTarget,
+                        std::string targetDatabase)
+      : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)), conn_(conn),
+        sql_(std::move(sql)), hasTarget_(hasTarget), target_(std::move(targetDatabase)) {
+    memset(&analysis_, 0, sizeof(analysis_));
+  }
+
+  Napi::Promise GetPromise() { return deferred_.Promise(); }
+
+  void Execute() override {
+    chdb_query_analysis_v1 out;
+    memset(&out, 0, sizeof(out));
+    // Size-versioned struct: a newer engine fills only the fields this build
+    // compiled room for.
+    out.struct_size = sizeof(out);
+    chdb_state state = chdb_classify_query_n(conn_, sql_.data(), sql_.size(),
+                                             hasTarget_ ? target_.data() : nullptr,
+                                             hasTarget_ ? target_.size() : 0, &out);
+    if (state != CHDBSuccess) {
+      // The ABI carries no message for this, and the statement must not become
+      // one. SQL that does not parse is a *successful* UNKNOWN, so a failure
+      // here is about the connection or the struct, never the text.
+      SetError("chdb_classify_query_n reported CHDBError: the connection is closed, or this "
+               "engine wants a larger chdb_query_analysis_v1 than the addon was built against");
+      return;
+    }
+    analysis_ = out;
+  }
+
+  void OnOK() override {
+    Napi::Env env = Env();
+    Napi::HandleScope scope(env);
+    Napi::Object out = Napi::Object::New(env);
+    out.Set("statementCount", Napi::Number::New(env, analysis_.statement_count));
+    out.Set("queryClass", Napi::Number::New(env, analysis_.query_class));
+    // Decoded here rather than in JS so the flag bits are read against the
+    // enum from the header this addon compiled against, in one place.
+    out.Set("hasSecrets",
+            Napi::Boolean::New(env, (analysis_.flags & CHDB_QUERY_HAS_SECRETS) != 0));
+    out.Set("writesOnlyTargetDatabase",
+            Napi::Boolean::New(env,
+                               (analysis_.flags & CHDB_QUERY_WRITES_ONLY_TARGET_DATABASE) != 0));
+    out.Set("changesDatabaseLifecycle",
+            Napi::Boolean::New(env,
+                               (analysis_.flags & CHDB_QUERY_CHANGES_DATABASE_LIFECYCLE) != 0));
+    deferred_.Resolve(out);
+  }
+
+  void OnError(const Napi::Error &e) override { deferred_.Reject(e.Value()); }
+
+private:
+  Napi::Promise::Deferred deferred_;
+  chdb_connection conn_;
+  std::string sql_;
+  bool hasTarget_;
+  std::string target_;
+  chdb_query_analysis_v1 analysis_;
+};
+
+// The connection argument every durable entry point takes, resolved on the main
+// thread (the registry is never touched off-thread).
+static bool durableConn(Napi::Env env, Napi::Value handle, chdb_connection *out) {
+  if (!handle.IsExternal()) {
+    Napi::TypeError::New(env, "Connection handle expected").ThrowAsJavaScriptException();
+    return false;
+  }
+  chdb_connection *inner = static_cast<chdb_connection *>(handle.As<Napi::External<void>>().Data());
+  if (!inner || !*inner) return false;
+  *out = *inner;
+  return true;
+}
+
+// Args: (connection, database, filePath). Full backup, always.
+Napi::Value DurableBackupAsyncWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[1].IsString() || !info[2].IsString()) {
+    Napi::TypeError::New(env, "Usage: connection, database, filePath").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection conn = nullptr;
+  if (!durableConn(env, info[0], &conn)) {
+    if (env.IsExceptionPending()) return env.Undefined();
+    return rejectedPromise(env, "No active connection available");
+  }
+  auto *worker = new DurableArchiveWorker(env, conn, DurableArchiveWorker::Backup,
+                                          info[1].As<Napi::String>().Utf8Value(),
+                                          info[2].As<Napi::String>().Utf8Value());
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+// Args: (connection, database, filePath).
+Napi::Value DurableRestoreAsyncWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[1].IsString() || !info[2].IsString()) {
+    Napi::TypeError::New(env, "Usage: connection, database, filePath").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection conn = nullptr;
+  if (!durableConn(env, info[0], &conn)) {
+    if (env.IsExceptionPending()) return env.Undefined();
+    return rejectedPromise(env, "No active connection available");
+  }
+  auto *worker = new DurableArchiveWorker(env, conn, DurableArchiveWorker::Restore,
+                                          info[1].As<Napi::String>().Utf8Value(),
+                                          info[2].As<Napi::String>().Utf8Value());
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+// Args: (connection, sql, targetDatabase|null). A null target skips the
+// writes-only-target-database judgement, and then the flag is never set.
+Napi::Value DurableClassifyAsyncWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[1].IsString()) {
+    Napi::TypeError::New(env, "Usage: connection, sql, [targetDatabase]")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  bool hasTarget = info.Length() > 2 && info[2].IsString();
+  if (info.Length() > 2 && !hasTarget && !info[2].IsUndefined() && !info[2].IsNull()) {
+    Napi::TypeError::New(env, "targetDatabase must be a string, null or undefined")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection conn = nullptr;
+  if (!durableConn(env, info[0], &conn)) {
+    if (env.IsExceptionPending()) return env.Undefined();
+    return rejectedPromise(env, "No active connection available");
+  }
+  auto *worker = new DurableClassifyWorker(
+      env, conn, info[1].As<Napi::String>().Utf8Value(), hasTarget,
+      hasTarget ? info[2].As<Napi::String>().Utf8Value() : std::string());
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+// The loaded library's own version, which needs no connection: the durable
+// compatibility gate runs before a lease is taken or a scratch directory made,
+// so it has to be answerable before any connection exists.
+Napi::Value EngineVersionWrapper(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  const char *version = chdb_version();
+  if (!version) {
+    Napi::Error::New(env, "chdb_version() returned NULL").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  return Napi::String::New(env, version);
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   // Export the functions
   exports.Set("Query", Napi::Function::New(env, QueryWrapper));
@@ -1354,6 +1639,12 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("CreateConnection", Napi::Function::New(env, CreateConnectionWrapper));
   exports.Set("CloseConnection", Napi::Function::New(env, CloseConnectionWrapper));
   exports.Set("QueryWithConnection", Napi::Function::New(env, QueryWithConnectionWrapper));
+
+  // Durable V1 engine ABI (see the section above).
+  exports.Set("EngineVersion", Napi::Function::New(env, EngineVersionWrapper));
+  exports.Set("DurableBackupAsync", Napi::Function::New(env, DurableBackupAsyncWrapper));
+  exports.Set("DurableRestoreAsync", Napi::Function::New(env, DurableRestoreAsyncWrapper));
+  exports.Set("DurableClassifyAsync", Napi::Function::New(env, DurableClassifyAsyncWrapper));
 
   // Arrow C Data Interface bindings.
   exports.Set("ArrowRegisterArray", Napi::Function::New(env, ArrowRegisterArrayWrapper));
