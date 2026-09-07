@@ -626,10 +626,19 @@ Both halves now exist — the addon binds the durable ABI and
 this package:
 
 1. Publish `@chdb/lib-<platform>` packages built from a tree that binds the
-   durable ABI. `optionalDependencies` already pins `26.7.2-rc.2.1`, but a
-   prebuilt from before this work exports none of the four entry points, and
-   the loader prefers it over a local build — so until those are published,
-   using `chdb/durable/node` from an installed package means `npm run build`
-   plus `rm -rf node_modules/@chdb/lib-*`.
+   durable ABI. `optionalDependencies` and `update_libchdb.sh` already name
+   `26.7.2-rc.2.1`, and the release workflow derives the subpackage version
+   from the latter — but nothing has been tagged since, so that version is not
+   on npm at all. The newest published is `26.7.0-stable.1` (main `chdb@3.3.0`
+   pins it), which carries an addon from before this work and exports none of
+   the four entry points.
+
+   Two different failures follow, depending on what is installed. A fresh
+   install resolves no subpackage — an unsatisfiable *optional* dependency is
+   skipped silently — and dies at `require` with "no native binding", before
+   durable is even reached. An older lockfile brings in `26.7.0-stable.1`,
+   which the loader prefers over a local build, and *that* is the case the
+   adapter refuses by name. Until a tag goes out, using `chdb/durable/node`
+   from a checkout means `npm run build` plus `rm -rf node_modules/@chdb/lib-*`.
 2. Add the shared cross-binding fixtures from the chdb repository once they
    exist, and read a Python-written object with them.

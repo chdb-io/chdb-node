@@ -136,9 +136,9 @@ jobs:
         run: npm run build
       - name: Exercise the freshly built addon (not the published prebuilt)
         # The published @chdb/lib-<platform> carries its own addon and the loader
-        # prefers it. Until one is published from a tree that binds the durable
-        # ABI it exports none of it, so the suite would refuse to start against
-        # a build that is otherwise fine.
+        # prefers it over the build above. The newest on npm is 26.7.0-stable.1,
+        # from before the durable ABI was bound, so leaving it in place would
+        # have the suite refuse to start against a build that is otherwise fine.
         shell: bash
         run: rm -rf node_modules/@chdb/lib-*
       - name: Durable over the addon
