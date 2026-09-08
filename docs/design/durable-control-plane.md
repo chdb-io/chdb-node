@@ -13,11 +13,13 @@ here.
 
 ## What ships
 
-Two subpaths, neither of which loads native code:
+No subpath here loads native code at import — including the one that owns the
+engine, which defers the addon to the first `open()`.
 
 | Subpath | What it is |
 | --- | --- |
 | `chdb/durable` | The control plane: object layout, `head.json`, manifest, lease, CAS, fencing, WAL, checkpoint orchestration, error categories, local backend |
+| `chdb/durable/node` | The above, re-exported, plus the default `EngineAdapter` over this package's addon |
 | `chdb/durable/s3` | S3-compatible backend — AWS S3, Cloudflare R2, MinIO. Registers the `s3` scheme on import |
 | `chdb/libchdb` | A path resolver. Says where `libchdb.so` is; does not open it |
 
@@ -53,6 +55,79 @@ package reaches `libchdb` through its own Bun FFI bindings, and chdb-core binds
 `test/durable/subpath.test.ts` asserts the no-native-load property in a child
 process with `process.dlopen` replaced by a throw, which is the only version of
 that check that cannot pass by accident.
+
+Injected does not have to mean hand-written. `chdb/durable/node` re-exports the
+control plane *and* the adapter over this package's addon, so a Node caller
+writes an engine factory rather than an engine, from one import:
+
+```ts
+import { DurableNamespace, nodeEngineFactory } from 'chdb/durable/node'
+
+const ns = new DurableNamespace('file:///var/lib/chdb-durable', {
+  engineFactory: nodeEngineFactory(),
+})
+```
+
+**Importing that subpath loads no native code either.** The addon arrives when
+an engine is first constructed, inside `open()`; `nodeEngineFactory()` only
+closes over its options. Deferring it that far is what lets the load double as
+the compatibility check — the ABI is verified and the engine version read where
+a caller is actually asking for an engine, so a stale addon fails at `open()`
+naming what is missing instead of at import time.
+
+So the separate subpath is about **layering, not load side effects**.
+`chdb/durable` is the protocol and knows nothing about how an engine is
+reached; `chdb/durable/node` is one answer to that question. A Bun downstream
+owning its own `dlopen` uses the first and never touches the second, which is
+what keeps the engine seam real rather than decorative — and it is why the
+adapter is not folded back into the `chdb/durable` entry point.
+
+### On the addon
+
+`lib/chdb_node.cpp` binds the four entry points the seam needs —
+`chdb_version`, `chdb_backup_database_n`, `chdb_restore_database_n`,
+`chdb_classify_query_n` — and three of them run on the libuv pool. Backup and
+restore are unbounded (a checkpoint archives a whole database) and
+classification joins them there because the parser reads the entire statement
+text, inline data included. That is also what keeps the two mutexes below
+worth having: heartbeat lands on the head mutex while a checkpoint holds the
+operation mutex, and neither is stuck behind a blocked event loop.
+
+Two things the adapter owns rather than the ABI:
+
+- **Connect-time settings.** `--backups.allowed_path` is server configuration,
+  not a session setting, and `--async_insert=0`, `--wait_for_async_insert=1`,
+  `--mutations_sync=2`, `--alter_sync=2` all mean "the statement has landed
+  before it returns" — without them a statement could reach the WAL while its
+  local effect is not yet in the database the next checkpoint archives. They
+  are connect arguments because `SET` classifies as CONTROL, so nothing can
+  undo them through the public surface later.
+- **Quoting the two statements with no C entry point.** `CREATE DATABASE` and
+  `USE` are built in the adapter, and their quoting has to agree with the
+  quoting core does for `BACKUP`/`RESTORE`. Both escapes matter: doubling
+  backticks alone leaves a backslash as an escape introducer, so a database
+  named `a\b` would be created as `a<backspace>` — under a name the backup
+  call would then not find. The suite round-trips a name carrying both.
+
+`chdb_version` is bound as its own export, taking no connection, because the
+compatibility gate runs before a lease is taken or a scratch directory made.
+
+Beyond that, one constraint is the adapter's to hold rather than the control
+plane's: a native call runs on a libuv thread holding the connection, so
+`close()` waits for anything in flight instead of releasing under it. There is
+no interrupt for a running query, so waiting is the only correct answer.
+
+The same hazard from the other direction is the addon's, and building this
+adapter is what exposed it. Opening a data directory closes the shared default
+connection that the stateless `query`/`queryAsync` calls use, and closing one
+mid-operation aborts the engine for the rest of the process. `index.js` had
+guarded that for `new Session()` — but the guard lived *above* the addon, so
+every entry point had to remember it independently, and this adapter, reaching
+`CreateConnection` directly, did not. The count now lives in the addon beside
+the registry whose invariant it protects, incremented by every worker that
+touches a connection off-thread, so the protection applies to callers that
+never heard of it. A guard each caller must re-implement is a guard the next
+caller will miss.
 
 The five methods that matter map onto the C ABI directly. Two of them are the
 reason the seam exists at all:
@@ -335,6 +410,7 @@ symlink.
 
 ```sh
 npm run test:durable          # protocol + state machine + fault matrix (no engine)
+npm run test:durable:node     # the control plane over this package's addon
 npm run test:durable:s3       # S3-compatible provider conformance (needs a bucket)
 npm run test:durable:e2e      # end-to-end against a real libchdb, under Bun
 npm run test:durable:stack    # the whole stack: Bun + libchdb + real object storage
@@ -384,10 +460,29 @@ Running against a shadowing build fails with a message naming the missing ABI
 rather than a bare `dlopen` TypeError.
 
 `test/durable/libchdb-ffi.ts` is the adapter it uses. It is deliberately not
-shipped: the published package's default adapter belongs on the native addon,
-and a Bun-only module in the dependency graph would be a trap for Node users.
-Downstreams that want this shape should own their copy — it is a symbol table
-and fifty lines of `dlopen`.
+shipped: a Bun-only module in the dependency graph would be a trap for Node
+users, and the shipped default is `chdb/durable/node`. Downstreams that want
+the FFI shape should own their copy — it is a symbol table and fifty lines of
+`dlopen`.
+
+`npm run test:durable:node` covers the other half of the seam, which the Bun
+suite by construction cannot reach: the addon's own bindings, the connect-time
+settings, and the adapter's identifier quoting. It re-runs the load-bearing
+scenarios rather than every scenario twice — version recording, WAL replay
+after losing the machine, checkpoint and restore, the refusal matrix, an
+odd database name — plus the cases that exist only here, like refusing to
+release the connection under a call still on a libuv thread. It needs a built
+addon and no prebuilt shadowing it:
+
+```sh
+npm run build && rm -rf node_modules/@chdb/lib-*
+npm run test:durable:node
+```
+
+That second command is not optional housekeeping. The loader prefers a
+published `@chdb/lib-<platform>` over a local build, and until one is published
+from a tree that binds the durable ABI, the adapter refuses to start against it
+— with a message naming the missing exports rather than a `TypeError`.
 
 ### Conformance status
 
@@ -395,7 +490,7 @@ Against the V1 conformance list, this binding's position:
 
 | Requirement | Status |
 | --- | --- |
-| Core ABI and query-classification matrix | covered by the end-to-end suite |
+| Core ABI and query-classification matrix | covered by the end-to-end suite, and again through the addon |
 | All three `backup_format` / `min_reader` gate outcomes | covered |
 | Format fixtures: empty, checkpoint-only, checkpoint-plus-WAL, quoted database | covered |
 | Missing/corrupt base and WAL, future protocol, unknown feature, incompatible engine | covered |
@@ -461,7 +556,9 @@ before it arrives (contract §8):
 - Parquet or data WAL
 - garbage collection and destroy — nothing here deletes an object (see below)
 - multiple writers, multiple databases per object, cross-object transactions
-- cross-engine-version restore — V1 pins `chdb_version()` exactly
+- cross-engine-version migration orchestration — V1 already lets later chdb-core
+  releases restore earlier V1 full backups through the `backup_format` and
+  `min_reader` gates, but it does not define an online upgrade/rollback flow
 - multipart upload: a single `PutObject` caps an object at 5 GiB, and a larger
   checkpoint fails with `limit_exceeded` rather than truncating. Note where that
   failure lands — the size is known only after the archive exists, so the backup
@@ -548,13 +645,24 @@ Fan-out has to be sequential, or spread across worker processes.
 
 ## Still to do on the chdb-node side
 
-The pure-JS layer is complete; the native side is not:
+Both halves now exist — the addon binds the durable ABI and
+`chdb/durable/node` ships the default adapter over it. What is left is not in
+this package:
 
-1. Bind `chdb_backup_database_n`, `chdb_restore_database_n`,
-   `chdb_classify_query_n` and `chdb_version` in `lib/chdb_node.cpp`.
-2. Ship a default `EngineAdapter` over the addon's async API
-   (`src/durable/adapters/chdb-node.ts`), so `chdb/durable` works out of the box
-   for Node callers who are not bringing their own engine.
-3. Point `optionalDependencies` at `@chdb/lib-*` builds carrying the new ABI.
-4. Add the shared cross-binding fixtures from the chdb repository once they
+1. Publish `@chdb/lib-<platform>` packages built from a tree that binds the
+   durable ABI. `optionalDependencies` and `update_libchdb.sh` already name
+   `26.7.2-rc.2.1`, and the release workflow derives the subpackage version
+   from the latter — but nothing has been tagged since, so that version is not
+   on npm at all. The newest published is `26.7.0-stable.1` (main `chdb@3.3.0`
+   pins it), which carries an addon from before this work and exports none of
+   the four entry points.
+
+   Two different failures follow, depending on what is installed. A fresh
+   install resolves no subpackage — an unsatisfiable *optional* dependency is
+   skipped silently — and dies at `require` with "no native binding", before
+   durable is even reached. An older lockfile brings in `26.7.0-stable.1`,
+   which the loader prefers over a local build, and *that* is the case the
+   adapter refuses by name. Until a tag goes out, using `chdb/durable/node`
+   from a checkout means `npm run build` plus `rm -rf node_modules/@chdb/lib-*`.
+2. Add the shared cross-binding fixtures from the chdb repository once they
    exist, and read a Python-written object with them.

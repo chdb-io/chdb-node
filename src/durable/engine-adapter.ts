@@ -79,12 +79,15 @@ export interface EngineAdapter {
   start(options: EngineStartOptions): Promise<void>
 
   /**
-   * Exact `chdb_version()`. Recorded in the head and matched on every open.
+   * Exact `chdb_version()` of the loaded engine.
    *
-   * Must be answerable before {@link start}: the open sequence checks engine
-   * compatibility before it takes a lease or creates a scratch directory, so
-   * a mismatch costs nothing. The underlying C symbol takes no connection, so
-   * this is a property of the loaded library rather than of a session.
+   * Recorded in the head as the producer version. It is not an exact-match
+   * gate: compatibility is checked with `backup_format` and `min_reader`, so
+   * later chdb-core releases can restore earlier V1 full backups. The method
+   * must be answerable before {@link start}: an incompatible engine is refused
+   * before the durable object takes a lease or creates a scratch directory.
+   * The underlying C symbol takes no connection, so this is a property of the
+   * loaded library rather than of a session.
    */
   version(): Promise<string>
 

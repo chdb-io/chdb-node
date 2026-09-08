@@ -10,12 +10,14 @@ import { defineConfig } from 'vitest/config'
 //     chdb/durable loads nothing native" assertion vacuous — the addon would
 //     already be in the process.
 //
-// The Bun end-to-end suite (*.bun.ts) is excluded: it runs under `bun test`
-// because it reaches libchdb through bun:ffi.
+// Two suites are excluded because they would break both properties. The Bun
+// end-to-end suite (*.bun.test.ts) runs under `bun test`, since it reaches
+// libchdb through bun:ffi; the addon suite (node-engine.test.ts) loads the
+// native addon, and has its own config for the same reason.
 export default defineConfig({
   test: {
     include: ['test/durable/**/*.test.ts'],
-    exclude: ['test/durable/**/*.bun.test.ts'],
+    exclude: ['test/durable/**/*.bun.test.ts', 'test/durable/node-engine.test.ts'],
     environment: 'node',
     testTimeout: 20_000,
   },

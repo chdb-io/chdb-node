@@ -25,8 +25,10 @@ Need the database to survive losing the machine?     -> chdb/durable   (experime
 ```
 
 The first four sit on the same engine; `chdb/durable` sits *above* it and loads no native
-code of its own — the caller injects the engine. Default to raw SQL for one-off analytics; use the fluent
-builder when an app or LLM assembles queries from parts (it binds every value server-side).
+code of its own — the engine is injected, and `chdb/durable/node` is the one to inject
+(`engineFactory: nodeEngineFactory()`) unless you own your own `dlopen`. Default to raw SQL
+for one-off analytics; use the fluent builder when an app or LLM assembles queries from
+parts (it binds every value server-side).
 
 ## Minimal examples
 

@@ -99,6 +99,12 @@ Moving between directories works the same way: after `session.close()`, wait wit
 `drainPending()` before opening one at a different path. Opening another session
 at the *same* path needs no wait — those connections coexist by design.
 
+The refusal is enforced in the addon, on a per-connection in-flight count, so
+it holds for every entry point rather than only the ones that remember to
+check. `chdb/durable`'s engine reaches the addon directly and gets the same
+protection.
+
+
 **Behaviour change.** Earlier versions did not refuse — they closed the busy
 connection, which usually aborted the engine and on macOS could leave a query
 whose promise never settled. Code that opened a session without awaiting its
@@ -119,7 +125,8 @@ somewhere later.
 | Arrow **scan** (`registerArrowTable`, Arrow input) | ⏳ follow-up |
 | Arrow zero-copy (M2, `{ zeroCopy: true }`) | ⏳ follow-up |
 | chDB ↔ `@clickhouse/client` integration (`chdb/connection`, **experimental**) | ✅ |
-| Durable V1 control plane (`chdb/durable`, **experimental**) | ✅ pure TS; native adapter pending |
+| Durable V1 control plane (`chdb/durable`, **experimental**) | ✅ pure TS, engine injected |
+| Default durable engine over the addon (`chdb/durable/node`) | ✅ |
 | Remote object storage for durable (`chdb/durable/s3`) | ✅ verified on AWS S3 and MinIO; R2 untested |
 
 ### chDB ↔ `@clickhouse/client` integration (`chdb/connection`, experimental)
@@ -165,9 +172,9 @@ and the sync policy with `@clickhouse/client`.
 > **Status**: implements chDB Durable V1 as specified in
 > `CHDB_DURABLE_V1_CONTRACT.md` in the
 > [chdb](https://github.com/chdb-io/chdb) repository, which is the source of
-> truth for the protocol. The pure-TypeScript control plane is complete; a
-> default engine adapter over the native addon is still to come, so today the
-> caller supplies the engine.
+> truth for the protocol. The control plane is pure TypeScript and the engine
+> is injected; Node callers get a default engine over this package's own addon
+> from `chdb/durable/node`.
 >
 > Requires an engine exporting the durable ABI — currently `26.7.2-rc.2`.
 > Compatibility is a floor rather than an equality: an object records
@@ -178,11 +185,22 @@ and the sync policy with `@clickhouse/client`.
 machine: a full checkpoint plus a statement WAL in object storage, with a
 single `head.json` updated by compare-and-swap under a fenced writer lease.
 
-Importing it loads **no native code** — not the addon, not `libchdb`. The
-engine arrives as an `EngineAdapter` the caller provides, which is what lets a
-Bun process that already owns its own `dlopen(libchdb)` reuse the state machine
-without a second engine in the process. The companion `chdb/libchdb` subpath
-resolves where the library *is* without opening it.
+Importing `chdb/durable` loads **no native code** — not the addon, not
+`libchdb`. The engine arrives as an `EngineAdapter`, which is what lets a Bun
+process that already owns its own `dlopen(libchdb)` reuse the state machine
+without a second engine in it. The companion `chdb/libchdb` subpath resolves
+where the library *is* without opening it.
+
+Node callers do not have to write that adapter: `chdb/durable/node` re-exports
+the control plane plus one over this package's addon. Importing it loads no
+native code either — the addon arrives when `open()` first builds an engine,
+which is also where the ABI is checked, so a stale addon fails there naming
+what is missing. Backup, restore and statement classification run on the libuv
+pool, so a checkpoint of a large database neither freezes the event loop nor
+starves the lease heartbeat. chdb-core binds one data path per process and each
+object needs a private one, so a process holds one open durable object at a
+time and no ordinary `Session` beside it — fan-out goes across worker
+processes.
 
 Recovery on another machine needs the object to live somewhere neither machine
 owns, so `chdb/durable/s3` provides an S3-compatible backend — AWS S3,
@@ -191,10 +209,12 @@ subpath, and `@aws-sdk/client-s3` is an optional peer dependency, so callers
 who only use the local backend never install it.
 
 ```ts
-import { DurableNamespace } from 'chdb/durable'
+import { DurableNamespace, nodeEngineFactory } from 'chdb/durable/node'
 import 'chdb/durable/s3'   // registers the s3:// scheme
 
-const ns = new DurableNamespace('s3://my-bucket/durable?region=eu-west-1', { engineFactory })
+const ns = new DurableNamespace('s3://my-bucket/durable?region=eu-west-1', {
+  engineFactory: nodeEngineFactory(),
+})
 const obj = await ns.open('orders', { database: 'default' })
 
 const ticket = await obj.execute("INSERT INTO events VALUES (1, 'a')")
@@ -230,7 +250,7 @@ out.
 - [Layered API design](docs/design/architecture.md): the Layer 1 / Layer 2 / Layer 3 architecture, package shape, and intended user-facing surfaces.
 - [Layer 1 native binding reviewer guide](docs/design/layer1-native-binding.md): the PR #43 design and implementation map, organized by commit and review feedback.
 - [chDB ↔ `@clickhouse/client` integration (experimental)](docs/design/pluggable-connection.md): the `chdb/connection` surface, the `Connection` interface chdb-node implements, the `.chdb` extension namespace, and the parity-test sync policy.
-- [Durable V1 control plane (experimental)](docs/design/durable-control-plane.md): the `chdb/durable` and `chdb/libchdb` subpaths, the `EngineAdapter` seam, lease/fencing/reconcile behaviour, and the V1 boundary.
+- [Durable V1 control plane (experimental)](docs/design/durable-control-plane.md): the `chdb/durable`, `chdb/durable/node` and `chdb/libchdb` subpaths, the `EngineAdapter` seam, lease/fencing/reconcile behaviour, and the V1 boundary.
 
 ### Runtimes
 
