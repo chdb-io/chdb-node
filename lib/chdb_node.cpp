@@ -146,6 +146,17 @@ static chdb_connection *open_raw(const std::string &path,
 // Scope is a worker actively inside libchdb. An *open* stream whose fetch is
 // not running holds no thread, so closing under it fails the stream rather
 // than corrupting the process; index.js's pendingNativeOps covers that case.
+//
+// Scope also stops at eviction. release_session_conn does NOT consult this
+// count, so an explicit CloseConnection on a busy handle is still the
+// caller's problem to avoid — and both callers do: index.js defers teardown
+// while pendingNativeOps is non-empty, and the durable adapter's close()
+// waits out its own in-flight set before releasing. Left that way
+// deliberately: the count would have to defer the close rather than refuse
+// it, since CloseConnection returns void and index.js does not expect it to
+// fail, and neither existing caller can reach the bug. A third caller that
+// closes a busy handle directly would, so this is the line to move if one
+// appears.
 //===--------------------------------------------------------------------===//
 static std::unordered_map<chdb_connection, int> g_inflight;
 

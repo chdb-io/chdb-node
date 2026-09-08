@@ -378,6 +378,22 @@ describe('the adapter around the addon', () => {
     expect(message).toContain('@chdb/lib-')
   })
 
+  it('checks an injected addon the same way as a loaded one', () => {
+    // Otherwise the injection path is the only one that reports a missing
+    // export as `TypeError: EngineVersion is not a function`, which says
+    // nothing about what to install.
+    const partial = { CreateConnection: () => ({}), CloseConnection: () => {} }
+    let thrown: unknown
+    try {
+      new ChdbNodeEngine({ native: partial as unknown as ChdbDurableNative })
+    } catch (e) {
+      thrown = e
+    }
+    expect(isDurableErrorOf(thrown, 'engine')).toBe(true)
+    expect((thrown as Error).message).toContain('EngineVersion')
+    expect((thrown as Error).message).toContain('DurableClassifyAsync')
+  })
+
   it('accepts the addon this process actually loaded', () => {
     expect(() => assertDurableAbi(loadNative())).not.toThrow()
   })

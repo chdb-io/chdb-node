@@ -263,7 +263,11 @@ export class ChdbNodeEngine implements EngineAdapter {
 
   constructor(options: ChdbNodeEngineOptions = {}) {
     assertExtraArgsAllowed(options.extraArgs ?? [])
-    this.native = options.native ?? loadDurableNative()
+    // An injected addon is checked like a loaded one. Skipping it would make
+    // the injection path the only one that reports a missing export as
+    // `TypeError: EngineVersion is not a function`, instead of the
+    // `DurableEngineError` that names what is absent and how to get it.
+    this.native = options.native ? assertDurableAbi(options.native) : loadDurableNative()
     this.extraArgs = options.extraArgs ?? []
   }
 
