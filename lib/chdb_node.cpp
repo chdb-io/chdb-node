@@ -106,6 +106,67 @@ static chdb_connection *open_raw(const std::string &path,
   return (conn_ptr && *conn_ptr) ? conn_ptr : nullptr;
 }
 
+//===--------------------------------------------------------------------===//
+// In-flight accounting, so a connection is never closed under a running call.
+//
+// Closing one while a libuv thread is still inside libchdb on it is not
+// survivable: the engine aborts for the rest of the process, and on macOS the
+// worker can stay blocked so its promise never settles — an unexplained hang
+// somewhere later.
+//
+// The JS layer already guarded the one path it owns (index.js refuses
+// `new Session()` while a standalone async op is in flight). But that guard
+// sits ABOVE the addon, so every new entry point has to remember it
+// independently — and `chdb/durable/node`, which reaches CreateConnection
+// directly, did not. A guard that each caller must re-implement is a guard
+// that the next caller will miss.
+//
+// So the count lives here, beside the registry whose invariant it protects,
+// and every entry point gets it whether or not it knows. Each AsyncWorker
+// holds a ConnGuard: its constructor runs on the main thread and the framework
+// deletes the worker on the main thread after OnOK/OnError, so retain and
+// release are both serialized by the event loop and can never straddle
+// Execute().
+//
+// Scope is a worker actively inside libchdb. An *open* stream whose fetch is
+// not running holds no thread, so closing under it fails the stream rather
+// than corrupting the process; index.js's pendingNativeOps covers that case.
+//===--------------------------------------------------------------------===//
+static std::unordered_map<chdb_connection, int> g_inflight;
+
+static void retain_conn(chdb_connection conn) {
+  if (!conn) return;
+  std::lock_guard<std::mutex> lk(g_reg_mu);
+  g_inflight[conn]++;
+}
+
+static void release_conn(chdb_connection conn) {
+  if (!conn) return;
+  std::lock_guard<std::mutex> lk(g_reg_mu);
+  auto it = g_inflight.find(conn);
+  if (it == g_inflight.end()) return;
+  if (--it->second <= 0) g_inflight.erase(it);
+}
+
+// Caller must already hold g_reg_mu: the count is read as part of an eviction
+// decision, and reading it separately would let a worker start in between.
+static int inflight_locked(chdb_connection conn) {
+  auto it = g_inflight.find(conn);
+  return it == g_inflight.end() ? 0 : it->second;
+}
+
+// Held as a member by every worker that touches a connection off-thread.
+class ConnGuard {
+public:
+  explicit ConnGuard(chdb_connection conn) : conn_(conn) { retain_conn(conn_); }
+  ~ConnGuard() { release_conn(conn_); }
+  ConnGuard(const ConnGuard &) = delete;
+  ConnGuard &operator=(const ConnGuard &) = delete;
+
+private:
+  chdb_connection conn_;
+};
+
 // Arrow-table registry cleanup (defined alongside g_live_arrow_tables below).
 // A connection's pinned JS buffers live in that registry keyed by the raw
 // chdb_connection*, so they must be dropped when the connection closes — else
@@ -171,8 +232,25 @@ static chdb_connection *acquire_session_conn(const std::string &path,
   if (!g_reg.conns.empty()) {
     if (g_reg.boundKey.empty()) {
       // Only the in-memory default is up (boundKey ""). It is transient and must
-      // yield so this session can bind a real data directory.
+      // yield so this session can bind a real data directory — but not while a
+      // libuv thread is still inside libchdb on it. This is the check every
+      // entry point used to have to make for itself; making it here is what
+      // makes it apply to all of them.
       if (g_reg.defaultConn) {
+        int busy = inflight_locked(*g_reg.defaultConn);
+        if (busy > 0) {
+          if (error_message && !*error_message)
+            *error_message = strdup(
+                (std::string("chdb: cannot bind '") + path + "' while " + std::to_string(busy) +
+                 (busy == 1 ? " operation is" : " operations are") +
+                 " still running on the default connection. Binding a data directory closes "
+                 "that connection, and closing it mid-operation aborts the engine for the "
+                 "whole process. Await those operations first — or `await drainPending()`, "
+                 "since an aborted or timed-out call rejects straight away while the engine "
+                 "keeps computing, so there may be no promise left to await.")
+                    .c_str());
+          return nullptr;
+        }
         erase_arrow_tables_for_conn(g_reg.defaultConn);
         chdb_close_conn(g_reg.defaultConn);
         g_reg.conns.erase(g_reg.defaultConn);
@@ -213,6 +291,7 @@ static void release_session_conn(chdb_connection *conn) {
   // Last connection out unbinds the EmbeddedServer so a different path may bind.
   if (g_reg.conns.empty()) g_reg.boundKey.clear();
 }
+
 
 static char *exec_query(chdb_connection conn, const char *query,
                         const char *format, char **error_message) {
@@ -460,7 +539,8 @@ public:
       : Napi::AsyncWorker(env),
         deferred_(Napi::Promise::Deferred::New(env)),
         conn_(conn), sql_(std::move(sql)), format_(std::move(format)),
-        hasParams_(hasParams), names_(std::move(names)), values_(std::move(values)) {}
+        hasParams_(hasParams), names_(std::move(names)), values_(std::move(values)),
+        guard_(conn) {}
 
   Napi::Promise GetPromise() { return deferred_.Promise(); }
 
@@ -521,6 +601,7 @@ private:
   std::vector<char> data_;
   double elapsed_ = 0.0;
   uint64_t rowsRead_ = 0, bytesRead_ = 0;
+  ConnGuard guard_;
 };
 
 static Napi::Value rejectedPromise(Napi::Env env, const char *msg) {
@@ -607,7 +688,8 @@ public:
                   Napi::Buffer<char> data, bool countLines)
       : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)),
         conn_(conn), prefix_(std::move(prefix)),
-        dataPtr_(data.Data()), dataLen_(data.Length()), countLines_(countLines) {
+        dataPtr_(data.Data()), dataLen_(data.Length()), countLines_(countLines),
+        guard_(conn) {
     bufRef_ = Napi::Persistent(data.As<Napi::Object>());
   }
 
@@ -675,6 +757,7 @@ private:
   Napi::ObjectReference bufRef_; // released on the main thread in the worker dtor
   double elapsed_ = 0.0;
   uint64_t rowsWritten_ = 0, bytesWritten_ = 0, linesSent_ = 0;
+  ConnGuard guard_;
 };
 
 // Standalone raw insert (default connection). Args: (prefix, dataBuffer, countLines)
@@ -803,7 +886,8 @@ Napi::Value StreamQueryWrapper(const Napi::CallbackInfo &info) {
 class StreamFetchWorker : public Napi::AsyncWorker {
 public:
   StreamFetchWorker(Napi::Env env, StreamState *st)
-      : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)), st_(st) {}
+      : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)), st_(st),
+        guard_(st ? st->conn : nullptr) {}
   Napi::Promise GetPromise() { return deferred_.Promise(); }
 
   void Execute() override {
@@ -852,6 +936,7 @@ private:
   std::vector<char> data_;
   uint64_t numRows_ = 0;
   bool done_ = false;
+  ConnGuard guard_;
 };
 
 // Args: (streamHandle) -> Promise<{ bytes, numRows, done }>
@@ -1425,7 +1510,7 @@ public:
   DurableArchiveWorker(Napi::Env env, chdb_connection conn, Op op, std::string database,
                        std::string filePath)
       : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)), conn_(conn), op_(op),
-        database_(std::move(database)), filePath_(std::move(filePath)) {}
+        database_(std::move(database)), filePath_(std::move(filePath)), guard_(conn) {}
 
   Napi::Promise GetPromise() { return deferred_.Promise(); }
 
@@ -1462,6 +1547,7 @@ private:
   chdb_connection conn_;
   Op op_;
   std::string database_, filePath_;
+  ConnGuard guard_;
 };
 
 class DurableClassifyWorker : public Napi::AsyncWorker {
@@ -1469,7 +1555,8 @@ public:
   DurableClassifyWorker(Napi::Env env, chdb_connection conn, std::string sql, bool hasTarget,
                         std::string targetDatabase)
       : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)), conn_(conn),
-        sql_(std::move(sql)), hasTarget_(hasTarget), target_(std::move(targetDatabase)) {
+        sql_(std::move(sql)), hasTarget_(hasTarget), target_(std::move(targetDatabase)),
+        guard_(conn) {
     memset(&analysis_, 0, sizeof(analysis_));
   }
 
@@ -1523,6 +1610,7 @@ private:
   bool hasTarget_;
   std::string target_;
   chdb_query_analysis_v1 analysis_;
+  ConnGuard guard_;
 };
 
 // The connection argument every durable entry point takes, resolved on the main

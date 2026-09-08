@@ -53,6 +53,37 @@ describe.skipIf(!built)('subpath imports', () => {
     expect(out).toBe('clean')
   })
 
+  it('loads chdb/durable/node without loading any native addon', () => {
+    // The subpath that owns the engine still must not load it at import: the
+    // addon arrives when open() first builds one. Calling the factory is part
+    // of the check, since it is the step a caller performs before any open and
+    // the one most likely to acquire the addon by accident.
+    const out = runNode(`
+      process.dlopen = () => { throw new Error('durable/node subpath loaded native code') }
+      const m = require('./dist/durable/node.js')
+      if (typeof m.DurableNamespace !== 'function') throw new Error('missing DurableNamespace')
+      if (typeof m.nodeEngineFactory !== 'function') throw new Error('missing nodeEngineFactory')
+      m.nodeEngineFactory({ extraArgs: ['--max_threads=2'] })
+      const native = Object.keys(require.cache).filter(p => p.endsWith('.node'))
+      if (native.length) throw new Error('native modules loaded: ' + native.join(','))
+      console.log('clean')
+    `)
+    expect(out).toBe('clean')
+  })
+
+  it('loads chdb/durable/node without native code under ESM too', () => {
+    const out = runNode(`
+      process.dlopen = () => { throw new Error('durable/node subpath loaded native code') }
+      import('./dist/durable/node.js').then(m => {
+        if (typeof m.DurableNamespace !== 'function') throw new Error('no DurableNamespace')
+        if (typeof m.nodeEngineFactory !== 'function') throw new Error('no nodeEngineFactory')
+        m.nodeEngineFactory()
+        console.log('clean')
+      }).catch(e => { console.error(e); process.exit(1) })
+    `)
+    expect(out).toBe('clean')
+  })
+
   it('exposes named exports to ESM importers', () => {
     const out = runNode(`
       import('./dist/durable/index.js').then(m => {

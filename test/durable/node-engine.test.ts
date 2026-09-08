@@ -23,9 +23,10 @@
  */
 
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, rm } from 'fs/promises'
+import { execFileSync } from 'child_process'
+import { mkdir, mkdtemp, readFile, rm } from 'fs/promises'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
 
 import { DurableNamespace } from '../../src/durable/namespace'
@@ -34,6 +35,7 @@ import { isDurableErrorOf } from '../../src/durable/errors'
 import {
   ChdbNodeEngine,
   assertDurableAbi,
+  assertExtraArgsAllowed,
   nodeEngineFactory,
   type ChdbDurableNative,
 } from '../../src/durable/adapters/chdb-node'
@@ -241,6 +243,92 @@ describe('real chdb_classify_query_n gates the public surface', () => {
   })
 })
 
+describe('cross-entry-point connection safety', () => {
+  // Run in a child process: the scenario deliberately leaves a query running
+  // on the shared default connection, and asserting on it from inside this
+  // worker would leave that state behind for whatever runs next.
+  function runNode(source: string): string {
+    return execFileSync(process.execPath, ['-e', source], {
+      encoding: 'utf8',
+      cwd: resolve(__dirname, '..', '..'),
+    }).trim()
+  }
+
+  const scenario = (awaitFirst: boolean): string => `
+    const { queryAsync } = require('./index.js')
+    const { ChdbNodeEngine } = require('./dist/durable/adapters/chdb-node.js')
+    const { mkdtempSync } = require('fs')
+    const { tmpdir } = require('os')
+    const { join } = require('path')
+    ;(async () => {
+      const root = mkdtempSync(join(tmpdir(), 'durable-race-'))
+      const pending = queryAsync('SELECT sum(number) FROM numbers(4000000000)')
+      pending.catch(() => {})
+      ${awaitFirst ? 'await pending' : 'await new Promise(r => setTimeout(r, 200))'}
+      const engine = new ChdbNodeEngine()
+      try {
+        await engine.start({ dataPath: join(root, 'data'), backupsAllowedPath: join(root, 'b') })
+        console.log('STARTED')
+        await engine.close()
+      } catch (e) {
+        console.log('REFUSED: ' + e.message)
+      }
+      ${awaitFirst ? '' : 'await pending.catch(() => {})'}
+      process.exit(0)
+    })().catch(e => { console.error(e); process.exit(1) })
+  `
+
+  it('refuses to bind a data directory under a running standalone query', () => {
+    // index.js guards this for `new Session()`, but that guard sits above the
+    // addon, so every entry point had to remember it — and this one, reaching
+    // CreateConnection directly, did not. Closing the default connection while
+    // a libuv thread is inside libchdb on it aborts the engine for the rest of
+    // the process, or leaves the worker blocked so its promise never settles.
+    const out = runNode(scenario(false))
+    expect(out).toContain('REFUSED')
+    expect(out).toContain('still running on the default connection')
+  })
+
+  it('binds normally once that query has been awaited', () => {
+    // The refusal has to be a wait, not a wall: a released count must let the
+    // next binding through, or the process is stuck for good.
+    expect(runNode(scenario(true))).toBe('STARTED')
+  })
+})
+
+describe('the settings the engine actually ends up with', () => {
+  // A fake native can only prove which strings were passed. What the engine
+  // did with them is a different claim, and it is the one that matters — so it
+  // is read back out of system.settings on a real connection.
+  it('pins the durability settings and still honours a legitimate extraArg', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'durable-node-set-'))
+    roots.push(root)
+    const engine = new ChdbNodeEngine({ extraArgs: ['--max_threads=7'] })
+    try {
+      const data = join(root, 'data')
+      const backups = join(root, 'backups')
+      await mkdir(data, { recursive: true })
+      await mkdir(backups, { recursive: true })
+      await engine.start({ dataPath: data, backupsAllowedPath: backups })
+      const csv = await engine.query(
+        `SELECT name, value FROM system.settings WHERE name IN ` +
+          `('async_insert','wait_for_async_insert','mutations_sync','alter_sync','max_threads') ` +
+          `ORDER BY name`,
+        'CSV',
+      )
+      expect(csv).toBe(
+        '"alter_sync","2"\n' +
+          '"async_insert","0"\n' +
+          '"max_threads","7"\n' +
+          '"mutations_sync","2"\n' +
+          '"wait_for_async_insert","1"\n',
+      )
+    } finally {
+      await engine.close()
+    }
+  })
+})
+
 describe('the adapter around the addon', () => {
   /** A native double: no engine, and every call resolves the way the ABI would. */
   function fakeNative(overrides: Partial<ChdbDurableNative> = {}): ChdbDurableNative & {
@@ -369,11 +457,10 @@ describe('the adapter around the addon', () => {
     await engine.close()
   })
 
-  it('applies the settings a durable writer cannot leave to chance', async () => {
-    // Connect arguments rather than SETs, because the control plane classifies
-    // SET as CONTROL: an async insert or an unsynchronised mutation would
-    // return before its effect landed, putting a statement in the WAL whose
-    // local effect is not yet in the database the next checkpoint archives.
+  it('puts durable\u2019s own arguments last, so nothing can outrank them', async () => {
+    // ClickHouse takes the last value for a repeated argument, so order is the
+    // lock behind the reserved-name check: even a caller that got a reserved
+    // setting past the door loses to the copy appended afterwards.
     let settings: readonly string[] = []
     const native = fakeNative({
       CreateConnection: (_path: string, given?: readonly string[]) => {
@@ -384,14 +471,38 @@ describe('the adapter around the addon', () => {
     const engine = new ChdbNodeEngine({ native, extraArgs: ['--max_threads=2'] })
     await engine.start({ dataPath: '/tmp/x', backupsAllowedPath: '/tmp/x/backups' })
     expect(settings).toEqual([
+      '--max_threads=2',
       '--backups.allowed_path=/tmp/x/backups',
       '--async_insert=0',
       '--wait_for_async_insert=1',
       '--mutations_sync=2',
       '--alter_sync=2',
-      '--max_threads=2',
     ])
     await engine.close()
+  })
+
+  it('refuses every spelling of a reserved setting', () => {
+    // Connect arguments rather than SETs, because the control plane classifies
+    // SET as CONTROL: an async insert or an unsynchronised mutation would
+    // return before its effect landed, putting a statement in the WAL whose
+    // local effect is not yet in the database the next checkpoint archives.
+    // Which is exactly why extraArgs must not be able to hand them back.
+    const reserved = [
+      '--async_insert=1',
+      '--async_insert',
+      '--async_insert 1',
+      '--wait_for_async_insert=0',
+      '--mutations_sync=0',
+      '--alter_sync=0',
+      '--backups.allowed_path=/tmp/elsewhere',
+      '--path=/tmp/elsewhere',
+    ]
+    for (const arg of reserved) {
+      expect(() => assertExtraArgsAllowed([arg]), arg).toThrow(TypeError)
+      // Reported where it was written, not at the first open().
+      expect(() => nodeEngineFactory({ extraArgs: [arg] }), arg).toThrow(/cannot set/)
+    }
+    expect(() => assertExtraArgsAllowed(['--max_threads=8'])).not.toThrow()
   })
 
   it('never passes an incremental base to backup', async () => {

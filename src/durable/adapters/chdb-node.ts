@@ -2,16 +2,23 @@
  * The default {@link EngineAdapter} for Node: the durable control plane driven
  * by this package's own native addon.
  *
- * `chdb/durable` loads no native code, on purpose — the engine arrives
- * injected, so a Bun `dlopen` or a test fake can drive the same state machine.
- * This module is the injection Node callers should not have to write
- * themselves. It lives behind its own subpath (`chdb/durable/node`) rather
- * than in the barrel, because importing it *does* load the addon and that
- * would make the no-native-load guarantee of `chdb/durable` vacuous.
+ * `chdb/durable` takes an injected engine, on purpose — so a Bun `dlopen` or a
+ * test fake can drive the same state machine. This module is the injection
+ * Node callers should not have to write themselves; import it through the
+ * `chdb/durable/node` barrel, which also re-exports the control plane.
+ *
+ * Importing this module loads no native code. The addon is loaded when an
+ * engine is first *constructed*, inside `namespace.open()` —
+ * {@link nodeEngineFactory} only closes over its options. Deferring it that
+ * far is what lets the load double as the compatibility check: the ABI is
+ * verified and the engine version read at the point a caller is actually
+ * asking for an engine, so a stale addon fails at `open()` naming what is
+ * missing, rather than at import time from a module the caller may not reach.
+ *
+ * The subpath is therefore about **layering, not load side effects**.
  *
  * ```ts
- * import { DurableNamespace } from 'chdb/durable'
- * import { nodeEngineFactory } from 'chdb/durable/node'
+ * import { DurableNamespace, nodeEngineFactory } from 'chdb/durable/node'
  *
  * const ns = new DurableNamespace('s3://bucket/durable?region=us-east-2', {
  *   engineFactory: nodeEngineFactory(),
@@ -97,12 +104,75 @@ const DURABILITY_SETTINGS = [
   '--alter_sync=2',
 ] as const
 
+/**
+ * Argv entries `extraArgs` may not carry, because durable's own guarantees
+ * rest on them.
+ *
+ * ClickHouse takes the *last* value for a repeated argument, so an `extraArgs`
+ * appended after {@link DURABILITY_SETTINGS} could turn `async_insert` back
+ * on — and then `execute()` returns while the rows are still in a buffer, the
+ * statement joins the WAL, and the next checkpoint archives a database that
+ * does not contain them. `BACKUP DATABASE` only captures what has landed, and
+ * a successful checkpoint empties the WAL list, so those rows are gone from
+ * both halves with nothing reported. That is the one failure class this
+ * package exists to rule out, so it is refused rather than documented.
+ *
+ * This list lives here rather than in the addon on purpose. Only durable needs
+ * these pinned; an ordinary `Session` legitimately tunes `mutations_sync` or
+ * loads a config file, and the addon serves both. `path` is the exception —
+ * the addon refuses it for every caller, since it is the connection registry's
+ * key — and it is repeated here so the refusal names durable's own option.
+ */
+export const RESERVED_SETTINGS: readonly string[] = [
+  'path',
+  'backups.allowed_path',
+  'async_insert',
+  'wait_for_async_insert',
+  'mutations_sync',
+  'alter_sync',
+]
+
+/**
+ * The setting name inside an argv entry: leading dashes stripped, cut at the
+ * `=` or the space. Covers `--async_insert=1`, `--async_insert 1` and a bare
+ * `--async_insert`, which ClickHouse reads as three spellings of one argument.
+ */
+function settingName(arg: string): string {
+  const stripped = arg.replace(/^-+/, '')
+  const cut = stripped.search(/[=\s]/)
+  return (cut === -1 ? stripped : stripped.slice(0, cut)).trim()
+}
+
+/**
+ * Refuse reserved settings before anything is connected. A `TypeError`
+ * rather than a durable category, matching how `DurableNamespace` reports a
+ * malformed option: this is a mistake in the calling code, not a state the
+ * object can be in.
+ */
+export function assertExtraArgsAllowed(extraArgs: readonly string[]): void {
+  for (const arg of extraArgs) {
+    if (typeof arg !== 'string') {
+      throw new TypeError(`durable: extraArgs must be strings, got ${typeof arg}`)
+    }
+    const name = settingName(arg)
+    if (RESERVED_SETTINGS.includes(name)) {
+      throw new TypeError(
+        `durable: extraArgs cannot set ${JSON.stringify(name)} — durable pins it, and ` +
+          `ClickHouse takes the last value for a repeated argument, so this would silently ` +
+          `override it. Reserved: ${RESERVED_SETTINGS.join(', ')}`,
+      )
+    }
+  }
+}
+
 export interface ChdbNodeEngineOptions {
   /**
-   * Extra `--setting=value` argv entries appended to the connection. `--path`
-   * is refused by the addon: the data directory is the connection registry's
-   * key, and a setting that moved it would leave the registry describing a
-   * path the engine is not on.
+   * Extra `--setting=value` argv entries for the connection, e.g.
+   * `['--max_threads=8', '--max_memory_usage=8000000000']`.
+   *
+   * Durable's own arguments are appended after these and win, and the settings
+   * durable depends on are refused outright — see {@link RESERVED_SETTINGS}.
+   * Everything else ClickHouse accepts on a command line is fair game.
    */
   extraArgs?: readonly string[]
   /** Use this addon instead of loading one. For tests. */
@@ -179,6 +249,7 @@ export class ChdbNodeEngine implements EngineAdapter {
   private readonly inFlight = new Set<Promise<unknown>>()
 
   constructor(options: ChdbNodeEngineOptions = {}) {
+    assertExtraArgsAllowed(options.extraArgs ?? [])
     this.native = options.native ?? loadDurableNative()
     this.extraArgs = options.extraArgs ?? []
   }
@@ -195,10 +266,13 @@ export class ChdbNodeEngine implements EngineAdapter {
   async start(options: EngineStartOptions): Promise<void> {
     if (this.connection) throw new DurableEngineError('durable: engine is already started')
     if (this.closed) throw new DurableEngineError('durable: engine is closed')
+    // Durable's own arguments go LAST, so that even a reserved setting that
+    // slipped past `assertExtraArgsAllowed` loses — ClickHouse takes the last
+    // value for a repeated argument. The check is the door; this is the lock.
     const settings = [
+      ...this.extraArgs,
       `--backups.allowed_path=${options.backupsAllowedPath}`,
       ...DURABILITY_SETTINGS,
-      ...this.extraArgs,
     ]
     try {
       this.connection = this.native.CreateConnection(options.dataPath, settings)
@@ -316,5 +390,9 @@ export class ChdbNodeEngine implements EngineAdapter {
  * addon is reported at the open that needed it.
  */
 export function nodeEngineFactory(options: ChdbNodeEngineOptions = {}): EngineFactory {
+  // Checked here as well as in the constructor, so a bad `extraArgs` is
+  // reported where it was written rather than at the first `open()`. It is a
+  // string check, so it costs nothing and loads nothing.
+  assertExtraArgsAllowed(options.extraArgs ?? [])
   return () => new ChdbNodeEngine(options)
 }

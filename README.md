@@ -99,6 +99,12 @@ Moving between directories works the same way: after `session.close()`, wait wit
 `drainPending()` before opening one at a different path. Opening another session
 at the *same* path needs no wait — those connections coexist by design.
 
+The refusal is enforced in the addon, on a per-connection in-flight count, so
+it holds for every entry point rather than only the ones that remember to
+check. `chdb/durable`'s engine reaches the addon directly and gets the same
+protection.
+
+
 **Behaviour change.** Earlier versions did not refuse — they closed the busy
 connection, which usually aborted the engine and on macOS could leave a query
 whose promise never settled. Code that opened a session without awaiting its
@@ -185,13 +191,16 @@ process that already owns its own `dlopen(libchdb)` reuse the state machine
 without a second engine in it. The companion `chdb/libchdb` subpath resolves
 where the library *is* without opening it.
 
-Node callers do not have to write that adapter: `chdb/durable/node` is one over
-this package's addon, and importing *that* is what loads the engine. Backup,
-restore and statement classification run on the libuv pool, so a checkpoint of
-a large database neither freezes the event loop nor starves the lease
-heartbeat. chdb-core binds one data path per process and each object needs a
-private one, so a process holds one open durable object at a time and no
-ordinary `Session` beside it — fan-out goes across worker processes.
+Node callers do not have to write that adapter: `chdb/durable/node` re-exports
+the control plane plus one over this package's addon. Importing it loads no
+native code either — the addon arrives when `open()` first builds an engine,
+which is also where the ABI is checked, so a stale addon fails there naming
+what is missing. Backup, restore and statement classification run on the libuv
+pool, so a checkpoint of a large database neither freezes the event loop nor
+starves the lease heartbeat. chdb-core binds one data path per process and each
+object needs a private one, so a process holds one open durable object at a
+time and no ordinary `Session` beside it — fan-out goes across worker
+processes.
 
 Recovery on another machine needs the object to live somewhere neither machine
 owns, so `chdb/durable/s3` provides an S3-compatible backend — AWS S3,
@@ -200,9 +209,8 @@ subpath, and `@aws-sdk/client-s3` is an optional peer dependency, so callers
 who only use the local backend never install it.
 
 ```ts
-import { DurableNamespace } from 'chdb/durable'
-import { nodeEngineFactory } from 'chdb/durable/node'   // the engine, on the addon
-import 'chdb/durable/s3'                                // registers the s3:// scheme
+import { DurableNamespace, nodeEngineFactory } from 'chdb/durable/node'
+import 'chdb/durable/s3'   // registers the s3:// scheme
 
 const ns = new DurableNamespace('s3://my-bucket/durable?region=eu-west-1', {
   engineFactory: nodeEngineFactory(),

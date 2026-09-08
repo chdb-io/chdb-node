@@ -13,12 +13,15 @@ here.
 
 ## What ships
 
-| Subpath | What it is | Loads native code |
-| --- | --- | --- |
-| `chdb/durable` | The control plane: object layout, `head.json`, manifest, lease, CAS, fencing, WAL, checkpoint orchestration, error categories, local backend | no |
-| `chdb/durable/s3` | S3-compatible backend — AWS S3, Cloudflare R2, MinIO. Registers the `s3` scheme on import | no |
-| `chdb/libchdb` | A path resolver. Says where `libchdb.so` is; does not open it | no |
-| `chdb/durable/node` | The default `EngineAdapter`, over this package's addon | **yes** |
+No subpath here loads native code at import — including the one that owns the
+engine, which defers the addon to the first `open()`.
+
+| Subpath | What it is |
+| --- | --- |
+| `chdb/durable` | The control plane: object layout, `head.json`, manifest, lease, CAS, fencing, WAL, checkpoint orchestration, error categories, local backend |
+| `chdb/durable/node` | The above, re-exported, plus the default `EngineAdapter` over this package's addon |
+| `chdb/durable/s3` | S3-compatible backend — AWS S3, Cloudflare R2, MinIO. Registers the `s3` scheme on import |
+| `chdb/libchdb` | A path resolver. Says where `libchdb.so` is; does not open it |
 
 The S3 backend sits behind its own subpath so that `chdb/durable` never pulls
 in the AWS SDK. A caller using only the local backend should not have to
@@ -53,22 +56,31 @@ package reaches `libchdb` through its own Bun FFI bindings, and chdb-core binds
 process with `process.dlopen` replaced by a throw, which is the only version of
 that check that cannot pass by accident.
 
-Injected does not have to mean hand-written. `chdb/durable/node` is the adapter
-over this package's addon, so a Node caller writes an engine factory rather
-than an engine:
+Injected does not have to mean hand-written. `chdb/durable/node` re-exports the
+control plane *and* the adapter over this package's addon, so a Node caller
+writes an engine factory rather than an engine, from one import:
 
 ```ts
-import { DurableNamespace } from 'chdb/durable'
-import { nodeEngineFactory } from 'chdb/durable/node'
+import { DurableNamespace, nodeEngineFactory } from 'chdb/durable/node'
 
 const ns = new DurableNamespace('file:///var/lib/chdb-durable', {
   engineFactory: nodeEngineFactory(),
 })
 ```
 
-It sits behind its own subpath rather than in the barrel for the reason above:
-importing it *does* load the addon, and putting it in `chdb/durable` would make
-that subpath's whole guarantee vacuous.
+**Importing that subpath loads no native code either.** The addon arrives when
+an engine is first constructed, inside `open()`; `nodeEngineFactory()` only
+closes over its options. Deferring it that far is what lets the load double as
+the compatibility check — the ABI is verified and the engine version read where
+a caller is actually asking for an engine, so a stale addon fails at `open()`
+naming what is missing instead of at import time.
+
+So the separate subpath is about **layering, not load side effects**.
+`chdb/durable` is the protocol and knows nothing about how an engine is
+reached; `chdb/durable/node` is one answer to that question. A Bun downstream
+owning its own `dlopen` uses the first and never touches the second, which is
+what keeps the engine seam real rather than decorative — and it is why the
+adapter is not folded back into the `chdb/durable` entry point.
 
 ### On the addon
 
@@ -104,6 +116,18 @@ Beyond that, one constraint is the adapter's to hold rather than the control
 plane's: a native call runs on a libuv thread holding the connection, so
 `close()` waits for anything in flight instead of releasing under it. There is
 no interrupt for a running query, so waiting is the only correct answer.
+
+The same hazard from the other direction is the addon's, and building this
+adapter is what exposed it. Opening a data directory closes the shared default
+connection that the stateless `query`/`queryAsync` calls use, and closing one
+mid-operation aborts the engine for the rest of the process. `index.js` had
+guarded that for `new Session()` — but the guard lived *above* the addon, so
+every entry point had to remember it independently, and this adapter, reaching
+`CreateConnection` directly, did not. The count now lives in the addon beside
+the registry whose invariant it protects, incremented by every worker that
+touches a connection off-thread, so the protection applies to callers that
+never heard of it. A guard each caller must re-implement is a guard the next
+caller will miss.
 
 The five methods that matter map onto the C ABI directly. Two of them are the
 reason the seam exists at all:
