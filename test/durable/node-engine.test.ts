@@ -417,6 +417,64 @@ describe('the adapter around the addon', () => {
     expect(native.closed).toBe(1)
   })
 
+  it('refuses an argument carrying a NUL byte, at both layers', () => {
+    // Built rather than written literally, so this file holds no control
+    // character. A JS string may carry a NUL and `c_str()` hands the engine
+    // only what precedes it — so '--path<NUL>x' arrives as a bare '--path',
+    // an option that takes the NEXT argv as its value, and the entry after it
+    // becomes the data directory. Measured before the fix: ['--path<NUL>x',
+    // '/other'] bound /other while the registry recorded the requested path.
+    // That is the exact mismatch the registry exists to prevent, and it
+    // walked straight through the '--path' check, which compares strings.
+    const nul = String.fromCharCode(0)
+    for (const arg of [`--path${nul}x`, `--async_insert${nul}x`, `--max_threads${nul}x`]) {
+      expect(() => assertExtraArgsAllowed([arg]), arg).toThrow(/NUL/)
+      expect(() => nodeEngineFactory({ extraArgs: [arg] }), arg).toThrow(/NUL/)
+    }
+    // And the addon refuses them independently, which is what protects the
+    // callers that never pass through the adapter.
+    const native = loadNative() as { CreateConnection: (p: string, s?: string[]) => unknown }
+    expect(() => native.CreateConnection('/tmp/should-not-open', [`--path${nul}x`, '/tmp/other'])).toThrow(
+      /NUL/,
+    )
+    expect(() => native.CreateConnection(`/tmp/should${nul}-not-open`)).toThrow(/NUL/)
+  })
+
+  it('makes every concurrent close wait for the connection to actually go', async () => {
+    // Returning early on a `closed` flag would tell the second caller the
+    // handle is released while the first is still waiting out a backup that
+    // owns it.
+    let finish: (() => void) | undefined
+    const native = fakeNative({
+      DurableBackupAsync: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve
+        }),
+    })
+    const engine = new ChdbNodeEngine({ native })
+    await engine.start({ dataPath: '/tmp/x', backupsAllowedPath: '/tmp/x/backups' })
+
+    const backup = engine.backupDatabase('db', '/tmp/x/backups/a.tar.gz')
+    const first = engine.close()
+    const second = engine.close()
+
+    let secondSettled = false
+    void second.then(() => {
+      secondSettled = true
+    })
+    await new Promise((r) => setTimeout(r, 20))
+    expect(secondSettled).toBe(false)
+    expect(native.closed).toBe(0)
+
+    finish?.()
+    await backup
+    await Promise.all([first, second])
+    expect(native.closed).toBe(1)
+    // A third, long after the fact, still resolves and still closes once.
+    await engine.close()
+    expect(native.closed).toBe(1)
+  })
+
   it('is safe to close twice, and refuses use afterwards', async () => {
     const native = fakeNative()
     const engine = new ChdbNodeEngine({ native })

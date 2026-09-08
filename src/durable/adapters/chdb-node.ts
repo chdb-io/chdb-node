@@ -154,6 +154,17 @@ export function assertExtraArgsAllowed(extraArgs: readonly string[]): void {
     if (typeof arg !== 'string') {
       throw new TypeError(`durable: extraArgs must be strings, got ${typeof arg}`)
     }
+    // Before the name check, because an embedded NUL is how an argument gets
+    // past it: the engine sees only the bytes before the NUL, so
+    // `'--path\0x'` reaches it as a bare `--path` and swallows the next entry
+    // as its value. The addon refuses these too — this is the earlier, more
+    // specific error, and it is what keeps the check below honest.
+    if (arg.includes('\0')) {
+      throw new TypeError(
+        `durable: extraArgs cannot contain a NUL byte — it truncates the argument at the C ` +
+          `boundary and lets the next one become its value`,
+      )
+    }
     const name = settingName(arg)
     if (RESERVED_SETTINGS.includes(name)) {
       throw new TypeError(
@@ -245,6 +256,8 @@ export class ChdbNodeEngine implements EngineAdapter {
   private readonly extraArgs: readonly string[]
   private connection: unknown = null
   private closed = false
+  /** The one cleanup every concurrent {@link close} awaits. */
+  private closing?: Promise<void>
   /** Native calls still on a libuv thread, so close can wait them out. */
   private readonly inFlight = new Set<Promise<unknown>>()
 
@@ -368,10 +381,24 @@ export class ChdbNodeEngine implements EngineAdapter {
    * handle, so closing under one would be a use-after-free rather than a
    * cancelled operation. There is no interrupt for a running query, so this
    * waits rather than aborts.
+   *
+   * Concurrent and repeated calls share one cleanup and all resolve only once
+   * the connection is actually gone. Returning early on a `closed` flag would
+   * be a lie to every caller but the first: the first may still be waiting out
+   * a backup, so the handle is still owned by a libuv thread while the others
+   * have been told it is released. Waiting on `inFlight` instead of on the
+   * shared promise would narrow that window without closing it — the count
+   * reaches zero before `CloseConnection` is called.
    */
   async close(): Promise<void> {
-    if (this.closed) return
+    // Set synchronously, so an operation starting between this call and the
+    // first `await` is refused rather than queued behind a closing engine.
     this.closed = true
+    if (!this.closing) this.closing = this.releaseConnection()
+    return this.closing
+  }
+
+  private async releaseConnection(): Promise<void> {
     while (this.inFlight.size > 0) {
       await Promise.allSettled([...this.inFlight])
     }

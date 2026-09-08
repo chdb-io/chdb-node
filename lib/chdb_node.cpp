@@ -89,8 +89,23 @@ static std::mutex g_reg_mu;
 // settings, and a durable writer's `SET`-equivalents must not be reachable
 // afterwards (the durable control plane classifies `SET` as CONTROL and
 // refuses it, so a caller cannot undo them through its public surface).
+//
+// Every entry is checked for an embedded NUL first. A JS string may hold one,
+// and `c_str()` hands the engine everything before it — so an argument that
+// looks like "--path\0anything" arrives as a bare "--path", an option that
+// takes the NEXT argv as its value, and the following entry becomes the data
+// directory. Measured: `['--path\0x', '/other']` bound /other while the
+// registry recorded the requested path, which is precisely the mismatch this
+// bookkeeping exists to prevent. CreateConnectionWrapper refuses these with a
+// message; this is the backstop for any future caller that reaches here
+// without going through it.
 static chdb_connection *open_raw(const std::string &path,
                                  const std::vector<std::string> &extraArgs = {}) {
+  if (path.find('\0') != std::string::npos) return nullptr;
+  for (const std::string &a : extraArgs) {
+    if (a.find('\0') != std::string::npos) return nullptr;
+  }
+
   std::vector<std::string> owned;
   owned.reserve(extraArgs.size() + 2);
   owned.emplace_back("clickhouse");
@@ -970,6 +985,15 @@ Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
     }
 
     std::string path = info[0].As<Napi::String>().Utf8Value();
+    // An embedded NUL truncates the argument at the C boundary, and a
+    // truncated prefix can be an option that consumes the next argv as its
+    // value — which is how "--path" gets smuggled past the check below. See
+    // open_raw for the measured case.
+    if (path.find('\0') != std::string::npos) {
+        Napi::TypeError::New(env, "Data directory cannot contain a NUL byte")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
     std::vector<std::string> settings;
     if (info.Length() > 1 && !info[1].IsUndefined() && !info[1].IsNull()) {
         if (!info[1].IsArray()) {
@@ -986,6 +1010,16 @@ Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
                 return env.Null();
             }
             std::string arg = v.As<Napi::String>().Utf8Value();
+            // Checked before the --path test, not after: an embedded NUL is
+            // exactly how an argument evades that test and still reaches the
+            // engine as "--path".
+            if (arg.find('\0') != std::string::npos) {
+                Napi::TypeError::New(env, "Connection settings cannot contain a NUL byte; it "
+                                          "would truncate the argument and let the next one "
+                                          "become its value")
+                    .ThrowAsJavaScriptException();
+                return env.Null();
+            }
             // The data directory is the registry key, and the registry is what
             // enforces one bound path per process. A setting that moved the
             // path would connect somewhere the registry does not know about,
