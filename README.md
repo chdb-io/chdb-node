@@ -104,6 +104,30 @@ it holds for every entry point rather than only the ones that remember to
 check. `chdb/durable`'s engine reaches the addon directly and gets the same
 protection.
 
+### Engine arguments at connect (`connectionArgs`)
+
+Some of what an embedder needs cannot be a `SET`: `--config-file` is not a
+setting, and the arguments deciding how a data directory loads have already
+taken effect before the first query could run.
+
+```js
+const s = new Session("./data", {
+  connectionArgs: [
+    "--async_load_databases=0",         // load databases synchronously
+    "--async_load_system_database=0",   // and the system tables too
+    "--tables_loader_foreground_pool_size=4",
+    "--restore_threads=1",
+    "--output_format_json_quote_64bit_integers=1",
+    "--config-file=/etc/my-chdb.xml",
+  ],
+});
+```
+
+Anything the engine accepts on a `clickhouse local` command line is passed
+through verbatim. Two forms are refused: `--path`, since the data directory is
+the connection registry's key and comes from the first argument, and anything
+containing a NUL byte, which would truncate the argument at the C boundary and
+let the next entry become its value.
 
 **Behaviour change.** Earlier versions did not refuse — they closed the busy
 connection, which usually aborted the engine and on macOS could leave a query

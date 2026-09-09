@@ -250,6 +250,45 @@ export interface SessionOptions {
    * never call `process.exit`; the app decides how to terminate.
    */
   installSignalHandlers?: boolean;
+  /**
+   * Extra argv entries for the engine, in `clickhouse local` command-line
+   * form:
+   *
+   * ```js
+   * new Session('./db', {
+   *   connectionArgs: [
+   *     '--async_load_databases=0',              // load databases synchronously
+   *     '--async_load_system_database=0',        // and the system tables too
+   *     '--tables_loader_foreground_pool_size=4',
+   *     '--restore_threads=1',
+   *     '--output_format_json_quote_64bit_integers=1',
+   *     '--config-file=/etc/my-chdb.xml',
+   *   ],
+   * })
+   * ```
+   *
+   * These have to be given at connect rather than as `SET` statements. Some
+   * are server configuration and not settings at all (`--config-file`), and
+   * the ones governing how the data directory loads have already taken effect
+   * before a query could run — so there is no later moment at which setting
+   * them would mean anything.
+   *
+   * Two forms are refused, both by the addon, so both throw here:
+   *
+   * - `--path`, in any spelling. The data directory is the connection
+   *   registry's key and comes from the first constructor argument; a setting
+   *   that moved it would leave the registry and the engine describing
+   *   different places.
+   * - anything containing a NUL byte. It truncates the argument at the C
+   *   boundary, and a truncated prefix can be an option that takes the next
+   *   entry as its value — which is how `--path` gets smuggled past the check
+   *   above.
+   *
+   * Everything else the engine accepts on a command line is passed through
+   * verbatim, unvalidated: a name this build does not know, or a malformed
+   * value, is the engine's to reject.
+   */
+  connectionArgs?: readonly string[];
 }
 
 /**
