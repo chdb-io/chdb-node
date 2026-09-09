@@ -641,10 +641,27 @@ class Session {
     // while one is live is still rejected. The registry key is normalized to an
     // absolute path so e.g. "./data" and its absolute form bind the same server;
     // this.path is left as the caller passed it (public surface).
+    // Extra argv entries for the engine, e.g. --async_load_databases=0 or
+    // --config-file=... . They have to be given here rather than as SET
+    // statements later: some are server configuration and not settings at all
+    // (--config-file, --backups.allowed_path), and the ones that decide how
+    // the data directory is loaded have already taken effect by the time a
+    // query could run. The addon refuses --path, since the data directory is
+    // the connection registry's key and comes from the first argument.
+    let connectionArgs;
+    if (opts && opts.connectionArgs != null) {
+      if (!Array.isArray(opts.connectionArgs) ||
+          opts.connectionArgs.some((a) => typeof a !== "string")) {
+        throw new TypeError("Session: connectionArgs must be an array of strings");
+      }
+      connectionArgs = opts.connectionArgs;
+    }
     try {
       const key = this.path ? resolvePath(this.path) : this.path;
       this._key = key; // normalized directory, for the deferred-teardown bookkeeping
-      this.connection = chdbNode.CreateConnection(key);
+      this.connection = connectionArgs
+        ? chdbNode.CreateConnection(key, connectionArgs)
+        : chdbNode.CreateConnection(key);
     } catch (e) {
       if (this.isTemp) { try { this.#removeTempDir(); } catch (_) {} }
       throw asConnectionError(e);
