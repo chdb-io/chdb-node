@@ -119,10 +119,10 @@
     "node-gyp-build": "^4.6.0"
   },
   "optionalDependencies": {
-    "@chdb/lib-darwin-arm64": "26.7.2-rc.2.1",
-    "@chdb/lib-darwin-x64": "26.7.2-rc.2.1",
-    "@chdb/lib-linux-arm64-gnu": "26.7.2-rc.2.1",
-    "@chdb/lib-linux-x64-gnu": "26.7.2-rc.2.1"
+    "@chdb/lib-darwin-arm64": "26.7.3-stable.1",
+    "@chdb/lib-darwin-x64": "26.7.3-stable.1",
+    "@chdb/lib-linux-arm64-gnu": "26.7.3-stable.1",
+    "@chdb/lib-linux-x64-gnu": "26.7.3-stable.1"
   },
   "peerDependencies": {
     "@clickhouse/client": ">=1.23.0",
