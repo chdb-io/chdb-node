@@ -200,7 +200,7 @@ and the sync policy with `@clickhouse/client`.
 > is injected; Node callers get a default engine over this package's own addon
 > from `chdb/durable/node`.
 >
-> Requires an engine exporting the durable ABI — currently `26.7.2-rc.2`.
+> Requires an engine exporting the durable ABI — currently `26.7.3`.
 > Compatibility is a floor rather than an equality: an object records
 > `min_reader` and `backup_format`, and any engine at or above that floor opens
 > it. An object written by `26.7.2-rc.2` stays readable on `26.7.3` and later.

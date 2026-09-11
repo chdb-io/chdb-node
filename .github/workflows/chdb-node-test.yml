@@ -10,9 +10,9 @@ on:
 
 # update_libchdb.sh pins a published chdb-core libchdb across all four target
 # platforms, so the full v2 + v3 suite is expected green here. The pin is
-# currently the v26.7.2-rc.2 pre-release, which is the first to export the
-# Durable V1 ABI (chdb_backup_database_n / chdb_restore_database_n /
-# chdb_classify_query_n).
+# currently v26.7.3, the first stable release to export the Durable V1 ABI
+# (chdb_backup_database_n / chdb_restore_database_n / chdb_classify_query_n);
+# v26.7.2-rc.2 was the candidate that introduced them.
 
 # Harden the registry fetch so a transient reset (e.g. ECONNRESET during
 # install) retries instead of reddening the job. Combined with the per-job
