@@ -131,6 +131,42 @@ describe.skipIf(!built)('subpath imports', () => {
     expect(out).toContain("chdb/durable/s3")
   })
 
+  it('loads chdb/durable/s3 even without the AWS SDK, and says what to install', () => {
+    // The SDK is an optional peer dependency, so a caller using only the local
+    // backend does not pay for it. That makes "I do want S3 and forgot to
+    // install it" a real path, and a static import made it a bare
+    // `Cannot find module '@aws-sdk/client-s3'` from a file the caller has
+    // never heard of. Checked in a child process with the module resolution
+    // broken, since the SDK is installed in this tree.
+    const out = runNode(`
+      const Module = require('module')
+      const real = Module._resolveFilename
+      Module._resolveFilename = function (request, ...rest) {
+        if (request === '@aws-sdk/client-s3') {
+          const e = new Error("Cannot find module '@aws-sdk/client-s3'")
+          e.code = 'MODULE_NOT_FOUND'
+          throw e
+        }
+        return real.call(this, request, ...rest)
+      }
+      // The module itself still loads, and still registers the scheme.
+      const s3 = require('./dist/durable/backends/s3.js')
+      if (typeof s3.S3DurableBackend !== 'function') throw new Error('no S3DurableBackend')
+      const { DurableNamespace } = require('./dist/durable/index.js')
+      new DurableNamespace('s3://b/p?region=us-east-1', { engineFactory: () => ({}) })
+      // Only constructing a backend reaches the SDK.
+      try {
+        new s3.S3DurableBackend({ bucket: 'b', prefix: 'p' })
+        throw new Error('expected a missing-dependency failure')
+      } catch (e) {
+        if (!e.message.includes('@aws-sdk/client-s3')) throw new Error('unhelpful: ' + e.message)
+        if (!e.message.includes('npm install')) throw new Error('no fix given: ' + e.message)
+        console.log('clean')
+      }
+    `)
+    expect(out).toBe('clean')
+  })
+
   it('declares every durable subpath in package.json exports', () => {
     const pkg = require('../../package.json') as { exports: Record<string, unknown> }
     expect(pkg.exports['./durable']).toBeDefined()

@@ -72,17 +72,51 @@
 import { createReadStream } from 'fs'
 import { stat } from 'fs/promises'
 import type { Readable } from 'stream'
-import {
-  GetObjectCommand,
-  PutObjectCommand,
-  S3Client,
-  type S3ClientConfig,
+import type {
+  GetObjectCommand as GetObjectCommandCtor,
+  PutObjectCommand as PutObjectCommandCtor,
+  S3Client as S3ClientCtor,
+  S3ClientConfig,
 } from '@aws-sdk/client-s3'
 
 import type { DurableBackend, GetWithEtag, PutOutcome, ReplaceOutcome } from '../backend'
 import { DurableBackendError, DurableLimitExceededError } from '../errors'
 import { isValidObjectKey } from '../keys'
 import { registerBackendScheme } from '../namespace'
+
+/**
+ * The AWS SDK, loaded on first use rather than on import.
+ *
+ * `@aws-sdk/client-s3` is an *optional* peer dependency — a caller using only
+ * the local backend should not have to install several megabytes of it. The
+ * cost of that is the failure a caller meets when they do want S3 and have not
+ * installed it, and a static import made that failure a bare
+ * `Cannot find module '@aws-sdk/client-s3'` thrown from a file they have never
+ * heard of, at `require('chdb/durable/s3')`.
+ *
+ * Deferring the load moves it to the first S3 operation and lets it say what
+ * to install. The rest of this module — the scheme registration, the key
+ * validation, the size limit — loads and works either way.
+ */
+type AwsS3Sdk = typeof import('@aws-sdk/client-s3')
+
+let sdk: AwsS3Sdk | undefined
+
+function awsSdk(): AwsS3Sdk {
+  if (sdk) return sdk
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    sdk = require('@aws-sdk/client-s3') as AwsS3Sdk
+  } catch (e) {
+    throw new DurableBackendError(
+      `durable: chdb/durable/s3 needs @aws-sdk/client-s3, which is an optional peer ` +
+        `dependency so that callers using only the local backend do not pay for it. ` +
+        `Install it: npm install @aws-sdk/client-s3`,
+      { cause: e },
+    )
+  }
+  return sdk
+}
 
 /** Ceiling for a single PutObject. Beyond this a checkpoint needs multipart. */
 export const MAX_SINGLE_PUT_BYTES = 5 * 1024 * 1024 * 1024
@@ -92,7 +126,7 @@ export interface S3BackendOptions {
   /** Key prefix for this object, without a leading slash. May be empty. */
   prefix?: string
   /** Pre-built client. Takes precedence over `clientConfig`. */
-  client?: S3Client
+  client?: S3ClientCtor
   /** Passed to `new S3Client`. Credentials come from the default chain unless set. */
   clientConfig?: S3ClientConfig
 }
@@ -177,7 +211,7 @@ function backendError(what: string, describe: string, e: unknown): DurableBacken
 
 export class S3DurableBackend implements DurableBackend {
   readonly describe: string
-  private readonly client: S3Client
+  private readonly client: S3ClientCtor
   private readonly bucket: string
   private readonly prefix: string
 
@@ -185,7 +219,7 @@ export class S3DurableBackend implements DurableBackend {
     if (!options.bucket) throw new RangeError('durable: S3 backend requires a bucket')
     this.bucket = options.bucket
     this.prefix = options.prefix ? options.prefix.replace(/^\/+|\/+$/g, '') : ''
-    this.client = options.client ?? new S3Client(options.clientConfig ?? {})
+    this.client = options.client ?? new (awsSdk().S3Client)(options.clientConfig ?? {})
     // Never the endpoint's credentials, and never a presigned anything: this
     // string ends up in error messages and logs.
     this.describe = `s3://${this.bucket}/${this.prefix}`
@@ -206,7 +240,7 @@ export class S3DurableBackend implements DurableBackend {
   async getBytesWithEtag(key: string): Promise<GetWithEtag | undefined> {
     try {
       const out = await this.client.send(
-        new GetObjectCommand({ Bucket: this.bucket, Key: this.keyFor(key) }),
+        new (awsSdk().GetObjectCommand)({ Bucket: this.bucket, Key: this.keyFor(key) }),
       )
       if (!out.Body) return undefined
       const bytes = await out.Body.transformToByteArray()
@@ -230,7 +264,7 @@ export class S3DurableBackend implements DurableBackend {
   async openReadStream(key: string): Promise<Readable | undefined> {
     try {
       const out = await this.client.send(
-        new GetObjectCommand({ Bucket: this.bucket, Key: this.keyFor(key) }),
+        new (awsSdk().GetObjectCommand)({ Bucket: this.bucket, Key: this.keyFor(key) }),
       )
       if (!out.Body) return undefined
       // Under Node the SDK hands back a Readable; the union also covers the
@@ -268,7 +302,7 @@ export class S3DurableBackend implements DurableBackend {
     this.assertWithinSinglePut(key, bytes.byteLength)
     try {
       const out = await this.client.send(
-        new PutObjectCommand({
+        new (awsSdk().PutObjectCommand)({
           Bucket: this.bucket,
           Key: this.keyFor(key),
           Body: bytes,
@@ -291,11 +325,11 @@ export class S3DurableBackend implements DurableBackend {
 
   private async conditionalPut(
     key: string,
-    input: Omit<ConstructorParameters<typeof PutObjectCommand>[0], 'Bucket' | 'Key'>,
+    input: Omit<ConstructorParameters<typeof PutObjectCommandCtor>[0], 'Bucket' | 'Key'>,
   ): Promise<PutOutcome> {
     try {
       await this.client.send(
-        new PutObjectCommand({ ...input, Bucket: this.bucket, Key: this.keyFor(key) }),
+        new (awsSdk().PutObjectCommand)({ ...input, Bucket: this.bucket, Key: this.keyFor(key) }),
       )
       return 'created'
     } catch (e) {

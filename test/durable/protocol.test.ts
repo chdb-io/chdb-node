@@ -13,6 +13,7 @@ import { existsSync } from 'fs'
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { pathToFileURL } from 'url'
 
 import { coldHead, parseHead, serializeHead } from '../../src/durable/head'
 import { assertEngineCompatible, assertReadable, assertWritable } from '../../src/durable/negotiate'
@@ -21,6 +22,8 @@ import { decodeWalSegment, encodeWalSegment, walLineBytes } from '../../src/dura
 import { checkpointKey, isValidObjectKey, walKey } from '../../src/durable/keys'
 import { LIMITS } from '../../src/durable/types'
 import { LocalDurableBackend } from '../../src/durable/backends/local'
+import { DurableNamespace } from '../../src/durable/namespace'
+import { FakeEngine } from './fakes'
 import {
   QueryClass,
   assertExecuteAllowed,
@@ -768,5 +771,56 @@ describe('local backend conditional operations', () => {
     expect(await be.getBytes('wal/nope.jsonl')).toBeUndefined()
     expect(await be.getBytesWithEtag('head.json')).toBeUndefined()
     expect(await be.openReadStream('checkpoints/nope.tar.gz')).toBeUndefined()
+  })
+})
+
+describe('namespace URL schemes', () => {
+  // A namespace URL is the sort of thing that ends up in a config file shared
+  // between a Python service and a Node one. Python spells the local backend
+  // `local:`, Go registers both, and this binding used to take only `file:` —
+  // so one config worked in two bindings out of three.
+  const engineFactory = () => new FakeEngine()
+
+  /** Open and return the failure, which is how the resolved path surfaces. */
+  async function openMissing(url: string): Promise<Error> {
+    const ns = new DurableNamespace(url, { engineFactory })
+    try {
+      await ns.open('missing', { readOnly: true })
+      throw new Error(`expected ${url} to report a missing object`)
+    } catch (e) {
+      return e as Error
+    }
+  }
+
+  it('accepts both spellings, and resolves them to the same place', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'scheme-'))
+    const dir = join(root, 'ns')
+    // not_found rather than a scheme error means the backend resolved and
+    // looked: the object really is absent.
+    const viaFile = await openMissing(pathToFileURL(dir).href)
+    const viaLocal = await openMissing(`local:${dir}`)
+    expect(isDurableErrorOf(viaFile, 'not_found')).toBe(true)
+    expect(isDurableErrorOf(viaLocal, 'not_found')).toBe(true)
+    // The message names the resolved location, so equal messages mean both
+    // spellings point at one directory — which is the whole claim.
+    expect(viaLocal.message).toBe(viaFile.message)
+  })
+
+  it('takes a path containing a space through the local spelling', async () => {
+    // `file:` percent-encodes a space; `local:` carries it literally, and a
+    // decoded path is what the other bindings resolve to.
+    const root = await mkdtemp(join(tmpdir(), 'scheme with space-'))
+    expect(isDurableErrorOf(await openMissing(`local:${join(root, 'ns')}`), 'not_found')).toBe(true)
+  })
+
+  it('refuses a local URL naming a host instead of a path', async () => {
+    // Dropping the host silently would resolve `local://data/objects` to
+    // `/objects`, which is not what anyone wrote.
+    expect((await openMissing('local://data/objects')).message).toMatch(/takes a path, not a host/)
+  })
+
+  it('refuses a relative path and a malformed percent-escape', async () => {
+    expect((await openMissing('local:relative/path')).message).toMatch(/absolute path/)
+    expect((await openMissing('local:/tmp/100%pct')).message).toMatch(/percent-escape/)
   })
 })

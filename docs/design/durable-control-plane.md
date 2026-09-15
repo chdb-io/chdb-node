@@ -266,6 +266,19 @@ can plant it can rewrite the objects directly — and check-then-use cannot be
 made atomic without `openat`, which Node does not expose. Anything wanting that
 property should not be on this backend.
 
+It answers to two scheme names, `file:` and `local:`. That is not a
+convenience — a namespace URL ends up in a config file, and that config file
+gets shared between services in different languages. Python spells this
+backend `local:`, Go registers both, and this binding took only `file:` until
+it was pointed out, which made Node the one place a working configuration
+stopped working. The two forms differ in how a path is written rather than
+where it points: `file:` is a real URL, so a space is `%20`; `local:` is
+opaque, so the path is closer to literal. Past ordinary paths the bindings do
+not agree anyway — Python leaves `local:` undecoded, Go decodes it — so this
+follows Go rather than inventing a third behaviour for a case none of them
+share. A `local:` URL naming a host (`local://data/objects`) is refused
+instead of silently resolving to `/objects`.
+
 A local directory cannot be a remote authority. When the machine holding it is
 gone, so is the object — so the local backend is what conformance and
 development run on, not what makes a database recoverable somewhere else.
@@ -416,6 +429,24 @@ npm run test:durable:e2e      # end-to-end against a real libchdb, under Bun
 npm run test:durable:stack    # the whole stack: Bun + libchdb + real object storage
 ```
 
+Two more run by hand, because each needs something CI does not have. They
+check the promises that only move when core releases, so the cost of running
+them at adoption time rather than per-commit is low:
+
+```sh
+CHDB_LIBCHDB_OLD=…/26.7.2-rc.2/libchdb.so CHDB_LIBCHDB_NEW=…/26.7.3/libchdb.so \
+  npm run test:durable:cross-version    # a newer engine restores an older one's archive
+
+CHDB_PYTHON=/tmp/pyenv/bin/python \
+  npm run test:durable:cross-binding    # Python writes, Node reads, and back
+```
+
+`cross-version` re-execs itself once per stage. A libchdb is `dlopen`ed once
+per process — it has to be, since the engine binds one data path per process —
+so a single-process version would load the first library and answer every
+later request with it: both versions report the same number, the floor never
+rises, and the script passes while proving nothing.
+
 The last one is the arrangement a downstream actually deploys, and the only
 place the other two suites' halves meet. Each of them covers one: a real engine
 over a local directory, or a real bucket under a fake engine. Both can pass
@@ -453,7 +484,7 @@ CHDB_LIBCHDB_PATH=/path/to/chdb-core/buildlib/libchdb.so npm run test:durable:e2
 `CHDB_LIBCHDB_PATH` is only needed when a platform package that predates the
 durable ABI is installed. The resolver prefers `@chdb/lib-*` over anything in
 the working tree, so a stale one shadows a local `chdb-core` build — and until
-the RC platform packages are published, the newest on npm is
+a Durable-capable platform package is published, the newest on npm is
 `26.7.0-stable.1`, which exports none of the durable symbols. Either override
 the path or `rm -rf node_modules/@chdb/lib-*`, which is what CI already does.
 Running against a shadowing build fails with a message naming the missing ABI
@@ -497,12 +528,37 @@ Against the V1 conformance list, this binding's position:
 | Single-writer races, fencing, heartbeat, failed and ambiguous commits | covered |
 | Unknown-field round trips, size limits, secret redaction, close failure | covered |
 | Full provider suite against a real object store | covered — AWS S3 and MinIO |
-| Restoring full backups from *earlier* core releases | not applicable yet — `v26.7.2-rc.2` is the first release with the Durable ABI, so there is no earlier archive to restore |
-| New-header/old-library and old-header/new-library ABI tests | not applicable yet — same reason; the promise starts here |
-| Every writer's fixture read by two other bindings | pending — needs Python and Go to reach V1 |
+| Restoring full backups from *earlier* core releases | covered — `npm run test:durable:cross-version` |
+| Old-header/new-library ABI | covered — an addon compiled against `26.7.2-rc.2` headers runs the whole suite on `26.7.3` |
+| New-header/old-library ABI | not covered — needs an addon built against headers newer than the engine it loads, which no released pair produces yet |
+| Every writer's fixture read by two other bindings | Python covered — `npm run test:durable:cross-binding`; Go pending |
 
-The two "not applicable" rows become real on the second Durable-capable core
-release, and the fixtures written now are what they will be tested against.
+Two of these became testable when `26.7.3` shipped, since `26.7.2-rc.2` then
+stopped being the only Durable-capable engine. Both scripts are run by hand
+rather than in CI — one needs two engine downloads, the other a second
+language runtime — and what they check moves only when core releases.
+
+Measured on `26.7.2-rc.2` → `26.7.3`:
+
+| Claim | Result |
+| --- | --- |
+| New engine restores a base archive the old engine wrote | holds |
+| …and replays a WAL segment the old engine appended | holds |
+| Writing raises `min_reader`, and the old engine is then refused `engine_incompatible` | holds |
+
+Measured against Python `chdb` 4.4.0 (same `26.7.3` engine, its own bindings):
+
+| Exchange | Result |
+| --- | --- |
+| Python base + WAL, restored and replayed by Node | holds |
+| Node appends to a Python-written object; Python reads it back | holds |
+| Node checkpoints; Python RESTOREs from that archive with no WAL left | holds |
+| Both on a real object store (MinIO), not just a local directory | holds |
+| One `local:` URL string opened by both | holds |
+
+Go reached V1 as well (`chdb-go/chdb/durable`), so the contract's
+read-by-two-other-bindings requirement is one pair short rather than two. The
+Go exchange has not been run.
 
 ### Provider conformance
 
@@ -533,12 +589,12 @@ durable object written on one "machine" — one namespace instance, one engine,
 one scratch tree — reopened on another that shares nothing but the bucket, for
 both a WAL-only object and a checkpointed one.
 
-Run against engine `26.7.2-rc.2`:
+Run against engine `26.7.3`:
 
 | Provider | Status |
 | --- | --- |
-| AWS S3 (`us-east-2`) | 11/11 conformance, plus 4/4 full stack |
-| MinIO (`RELEASE.2025-09-07`) | 11/11 conformance, run repeatedly |
+| MinIO (latest) | 11/11 conformance, plus 4/4 full stack, plus the cross-binding exchange |
+| AWS S3 (`us-east-2`) | 11/11 conformance and 4/4 full stack on `26.7.2-rc.2`; not re-run on `26.7.3` |
 | Cloudflare R2 | not run — the code path is the same, but the claim is not made until measured |
 
 The two that have run agree on every point, including the ETag behaviour above:
@@ -664,5 +720,9 @@ this package:
    which the loader prefers over a local build, and *that* is the case the
    adapter refuses by name. Until a tag goes out, using `chdb/durable/node`
    from a checkout means `npm run build` plus `rm -rf node_modules/@chdb/lib-*`.
-2. Add the shared cross-binding fixtures from the chdb repository once they
-   exist, and read a Python-written object with them.
+2. Run the cross-binding exchange against Go as well. Python is covered by
+   `npm run test:durable:cross-binding`, and `chdb-go/chdb/durable` reached V1
+   too, so the contract's read-by-two-other-bindings requirement is one pair
+   short. The shared fixtures in the chdb repository are still worth adopting
+   when they exist — a fixture pins a byte layout, while these scripts only
+   prove two live implementations agree.
