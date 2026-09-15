@@ -437,9 +437,16 @@ them at adoption time rather than per-commit is low:
 CHDB_LIBCHDB_OLD=…/26.7.2-rc.2/libchdb.so CHDB_LIBCHDB_NEW=…/26.7.3/libchdb.so \
   npm run test:durable:cross-version    # a newer engine restores an older one's archive
 
-CHDB_PYTHON=/tmp/pyenv/bin/python \
-  npm run test:durable:cross-binding    # Python writes, Node reads, and back
+CHDB_PYTHON=/tmp/pyenv/bin/python CHDB_GO_REPO=/path/to/chdb-go \
+  npm run test:durable:cross-binding    # Python and Go write, Node reads, and back
 ```
+
+`cross-binding` skips a pairing whose runtime is absent and fails only when
+neither is there, so it is worth running with just one installed. Go finds its
+engine through `CHDB_LIB_PATH`, which the script points at this repository's
+`libchdb.so` — worth knowing because the chdb-go checkout I ran against
+declared `v26.7.3` while the library on disk was still `26.7.2-rc.2`, which
+would have made this a cross-version test wearing a cross-binding label.
 
 `cross-version` re-execs itself once per stage. A libchdb is `dlopen`ed once
 per process — it has to be, since the engine binds one data path per process —
@@ -531,7 +538,7 @@ Against the V1 conformance list, this binding's position:
 | Restoring full backups from *earlier* core releases | covered — `npm run test:durable:cross-version` |
 | Old-header/new-library ABI | covered — an addon compiled against `26.7.2-rc.2` headers runs the whole suite on `26.7.3` |
 | New-header/old-library ABI | not covered — needs an addon built against headers newer than the engine it loads, which no released pair produces yet |
-| Every writer's fixture read by two other bindings | Python covered — `npm run test:durable:cross-binding`; Go pending |
+| Every writer's fixture read by two other bindings | covered — Python and Go, `npm run test:durable:cross-binding` |
 
 Two of these became testable when `26.7.3` shipped, since `26.7.2-rc.2` then
 stopped being the only Durable-capable engine. Both scripts are run by hand
@@ -546,19 +553,22 @@ Measured on `26.7.2-rc.2` → `26.7.3`:
 | …and replays a WAL segment the old engine appended | holds |
 | Writing raises `min_reader`, and the old engine is then refused `engine_incompatible` | holds |
 
-Measured against Python `chdb` 4.4.0 (same `26.7.3` engine, its own bindings):
+Measured against Python `chdb` 4.4.0 and `chdb-go` (all three on the same
+`26.7.3` engine, each through its own bindings, so a difference would be a
+binding difference rather than a version one):
 
-| Exchange | Result |
-| --- | --- |
-| Python base + WAL, restored and replayed by Node | holds |
-| Node appends to a Python-written object; Python reads it back | holds |
-| Node checkpoints; Python RESTOREs from that archive with no WAL left | holds |
-| Both on a real object store (MinIO), not just a local directory | holds |
-| One `local:` URL string opened by both | holds |
+| Exchange | Python | Go |
+| --- | --- | --- |
+| Its base + WAL, restored and replayed by Node | holds | holds |
+| Node appends to its object; it reads the append back | holds | holds |
+| Node checkpoints; it RESTOREs from that archive with no WAL left | holds | holds |
+| One `local:` URL string opened by both | holds | — |
+| Also over a real object store (MinIO), not just a local directory | holds | — |
 
-Go reached V1 as well (`chdb-go/chdb/durable`), so the contract's
-read-by-two-other-bindings requirement is one pair short rather than two. The
-Go exchange has not been run.
+That covers the contract's requirement from this binding's side: an object Node
+wrote is read by both other V1 implementations, and objects they wrote are read
+by Node. The pairing the three still owe each other is Python ↔ Go, which is
+not this repository's to run.
 
 ### Provider conformance
 
@@ -720,9 +730,7 @@ this package:
    which the loader prefers over a local build, and *that* is the case the
    adapter refuses by name. Until a tag goes out, using `chdb/durable/node`
    from a checkout means `npm run build` plus `rm -rf node_modules/@chdb/lib-*`.
-2. Run the cross-binding exchange against Go as well. Python is covered by
-   `npm run test:durable:cross-binding`, and `chdb-go/chdb/durable` reached V1
-   too, so the contract's read-by-two-other-bindings requirement is one pair
-   short. The shared fixtures in the chdb repository are still worth adopting
-   when they exist — a fixture pins a byte layout, while these scripts only
-   prove two live implementations agree.
+2. Adopt the shared cross-binding fixtures from the chdb repository once they
+   exist. `test:durable:cross-binding` proves Node, Python and Go agree as
+   live implementations, which is not quite the same claim — a fixture pins a
+   byte layout, so it catches three implementations drifting together.
