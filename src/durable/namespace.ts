@@ -57,13 +57,57 @@ export function registerBackendScheme(scheme: string, factory: BackendSchemeFact
   SCHEMES.set(scheme.replace(/:$/, ''), factory)
 }
 
-registerBackendScheme('file', (url, objectId) => {
-  const root = fileURLToPath(url)
+/**
+ * The local filesystem, under two scheme names.
+ *
+ * `file:` is this binding's spelling; `local:` is Python's, and Go registers
+ * the same backend under both for the same reason it matters here — a
+ * namespace URL is the sort of thing that ends up in a config file shared
+ * between a Python service and a Node one, and refusing the other binding's
+ * spelling turns that into a support ticket. Node was the only one of the
+ * three that took just one.
+ *
+ * The two forms differ in how the path is written, not in where it points.
+ * `file:` is a real URL, so a space is `%20`; `local:` is opaque, so the path
+ * is closer to literal. Beyond ordinary paths the bindings do not agree
+ * anyway (Python leaves `local:` undecoded, Go decodes it), so this follows
+ * Go — one factory, decode both — rather than inventing a third behaviour for
+ * a case none of them share.
+ */
+const localFilesystem: BackendSchemeFactory = (url, objectId) => {
+  const root = url.protocol === 'file:' ? fileURLToPath(url) : opaquePath(url)
   if (!isAbsolute(root)) {
-    throw new RangeError(`durable: file namespace must be an absolute path, got ${url.href}`)
+    throw new RangeError(
+      `durable: a ${url.protocol} namespace must be an absolute path, got ${url.href}`,
+    )
   }
   return new LocalDurableBackend({ root: join(root, objectId) })
-})
+}
+
+/** The path inside a `local:` URL, which is not a `file:` URL and has no host. */
+function opaquePath(url: URL): string {
+  // A host would be silently dropped otherwise, and `local://data/objects` far
+  // more likely means a mistyped path than a hostname nobody can resolve.
+  if (url.host) {
+    throw new RangeError(
+      `durable: a ${url.protocol} namespace takes a path, not a host; got ${url.href}. ` +
+        `Write local:/absolute/path`,
+    )
+  }
+  try {
+    return decodeURIComponent(url.pathname)
+  } catch {
+    // A stray `%` that is not an escape. Reported here rather than left as a
+    // bare URIError, which says nothing about which input produced it.
+    throw new RangeError(
+      `durable: ${url.href} has a malformed percent-escape in its path; write a literal ` +
+        `'%' as '%25', or use a file: URL`,
+    )
+  }
+}
+
+registerBackendScheme('file', localFilesystem)
+registerBackendScheme('local', localFilesystem)
 
 export interface DurableNamespaceOptions {
   /** How to build the engine for an object being opened. Required. */

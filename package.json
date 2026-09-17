@@ -77,7 +77,9 @@
     "test:durable:node": "npm run build:ts && vitest run --config vitest.durable-node.config.ts",
     "test:durable:e2e": "bun test --timeout 120000 test/durable/libchdb-e2e.bun.test.ts",
     "test:durable:s3": "vitest run --config vitest.durable.config.ts test/durable/s3-backend.test.ts",
-    "test:durable:stack": "bun test --timeout 300000 test/durable/full-stack.bun.test.ts"
+    "test:durable:stack": "bun test --timeout 300000 test/durable/full-stack.bun.test.ts",
+    "test:durable:cross-version": "bun scripts/durable-cross-version.ts",
+    "test:durable:cross-binding": "npm run build:ts && node scripts/durable-cross-binding.mjs"
   },
   "author": {
     "name": "chdb",

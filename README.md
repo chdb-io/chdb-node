@@ -226,6 +226,10 @@ object needs a private one, so a process holds one open durable object at a
 time and no ordinary `Session` beside it — fan-out goes across worker
 processes.
 
+The local backend answers to both `file:` and `local:`, because a namespace URL
+gets shared between services in different languages and Python spells it
+`local:` while Go takes either.
+
 Recovery on another machine needs the object to live somewhere neither machine
 owns, so `chdb/durable/s3` provides an S3-compatible backend — AWS S3,
 Cloudflare R2 and MinIO through one implementation. It sits behind its own
