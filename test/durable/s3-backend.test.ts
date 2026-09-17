@@ -179,6 +179,11 @@ describe.skipIf(!BUCKET)(`S3-compatible backend (${ENDPOINT ?? 'aws'})`, () => {
   })
 
   describe('large objects', () => {
+    // 180s rather than the suite's 20s. 12 MiB is nothing against a local
+    // MinIO — 0.4s — and about a minute against a real bucket across an
+    // ocean, so the default made this the one test that fails on AWS while
+    // the implementation is fine. A red suite that means "your network is
+    // far away" trains people to ignore it.
     it('streams a file up and back down with its digest intact', async () => {
       const be = backend('stream')
       const dir = await mkdtemp(join(tmpdir(), 'durable-s3-'))
@@ -206,7 +211,7 @@ describe.skipIf(!BUCKET)(`S3-compatible backend (${ENDPOINT ?? 'aws'})`, () => {
       })
       expect(size).toBe(expected.size)
       expect(hash.digest('hex')).toBe(expected.sha256)
-    })
+    }, 180_000)
   })
 
   describe('recovery on another machine', () => {

@@ -604,8 +604,15 @@ Run against engine `26.7.3`:
 | Provider | Status |
 | --- | --- |
 | MinIO (latest) | 11/11 conformance, plus 4/4 full stack, plus the cross-binding exchange |
-| AWS S3 (`us-east-2`) | 11/11 conformance and 4/4 full stack on `26.7.2-rc.2`; not re-run on `26.7.3` |
+| AWS S3 (`eu-central-1`) | 11/11 conformance, 4/4 full stack, and the cross-binding exchange, on `26.7.3` |
 | Cloudflare R2 | not run — the code path is the same, but the claim is not made until measured |
+
+One number is worth carrying: the 12 MiB large-object case takes about 0.4s
+against a local MinIO and about a minute against a real bucket an ocean away,
+so it carries its own 180s timeout rather than the suite's 20s. Without that
+it is the one test that fails on AWS while the implementation is fine, and a
+red suite meaning "your network is far away" is a suite people learn to
+ignore.
 
 The two that have run agree on every point, including the ETag behaviour above:
 `If-None-Match: *` and `If-Match` are atomic on both, an eight-way race leaves
