@@ -186,8 +186,9 @@ describe('CLI — end-to-end', () => {
     const r = spawnSync(
       process.execPath,
       ['dist/layer3/codegen/cli.js', '--from-file', csv, '--format', 'CSVWithNames', '--label', 'events'],
-      { cwd: process.cwd(), encoding: 'utf-8' },
+      { cwd: process.cwd(), encoding: 'utf-8', timeout: 15_000 },
     )
+    expect(r.error).toBeUndefined()
     expect(r.status).toBe(0)
     expect(r.stdout).toMatch(/export interface Database \{/)
     expect(r.stdout).toMatch(/events: \{[\s\S]*'Nullable\(Int64\)'/)
