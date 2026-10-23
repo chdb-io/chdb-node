@@ -57,8 +57,8 @@ jobs:
   # Provider conformance for the S3 backend. Separate from the job above so a
   # flaky container cannot redden the engine-free suite, and because this is the
   # only automated check that conditional create and compare-and-swap work
-  # against a real object store rather than a filesystem. MinIO needs no
-  # credentials, so it runs on every PR; AWS S3 and R2 stay manual.
+  # against a real object store rather than a filesystem. The local server
+  # needs no external credentials, so it runs on every PR; AWS S3 and R2 stay manual.
   durable-s3:
     runs-on: ubuntu-latest
     steps:
@@ -68,13 +68,15 @@ jobs:
           node-version: 22.x
           cache: npm
       - run: npm install --ignore-scripts
-      - name: Start MinIO
+      - name: Start MinIO-compatible Silo
         # Not a `services:` container: GitHub offers no way to pass a command to
         # one, and this image needs `server /data` to start at all.
+        # Official MinIO images are no longer anonymously pullable from Quay or
+        # Docker Hub. Pin a tested MinIO-compatible Silo release and its digest.
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:latest server /data
+            docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46 server /data
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null; then
               echo "MinIO ready after ${i}s"; exit 0

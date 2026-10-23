@@ -214,10 +214,19 @@ static void hard_close_all() {
   g_reg.boundKey.clear();
 }
 
+// Node's environment cleanup closes connections, but the engine may still own
+// background threads when C++ static destructors run. On macOS with core
+// v26.9.0, a CLI that queried once could hang indefinitely inside exit().
+// Run this process-wide backstop before the engine's own exit handlers.
+static void shutdown_on_process_exit() {
+  hard_close_all();
+  (void)chdb_shutdown();
+}
+
 static void ensure_atexit() {
   static bool done = false;
   if (!done) {
-    std::atexit(hard_close_all);
+    std::atexit(shutdown_on_process_exit);
     done = true;
   }
 }
@@ -225,7 +234,6 @@ static void ensure_atexit() {
 // Default connection for standalone query()/queryBind() (lazy, in-memory). A
 // single shared default per process; reused across standalone calls.
 static chdb_connection *get_default_conn(char **error_message) {
-  ensure_atexit();
   std::lock_guard<std::mutex> lk(g_reg_mu);
   if (g_reg.defaultConn) return g_reg.defaultConn;
   // No default up. If a session holds a real data directory, "" cannot bind a
@@ -245,6 +253,9 @@ static chdb_connection *get_default_conn(char **error_message) {
   g_reg.defaultConn = c;
   g_reg.boundKey = "";
   g_reg.conns.insert(c);
+  // Register only after chdb_connect initialized the engine: atexit handlers
+  // run in reverse registration order, so shutdown must precede its teardown.
+  ensure_atexit();
   return c;
 }
 
@@ -253,7 +264,6 @@ static chdb_connection *get_default_conn(char **error_message) {
 static chdb_connection *acquire_session_conn(const std::string &path,
                                             const std::vector<std::string> &extraArgs,
                                             char **error_message) {
-  ensure_atexit();
   std::lock_guard<std::mutex> lk(g_reg_mu);
   if (!g_reg.conns.empty()) {
     if (g_reg.boundKey.empty()) {
@@ -300,6 +310,7 @@ static chdb_connection *acquire_session_conn(const std::string &path,
   }
   g_reg.boundKey = path;
   g_reg.conns.insert(c);
+  ensure_atexit();
   return c;
 }
 
