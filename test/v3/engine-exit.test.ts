@@ -45,4 +45,72 @@ describe('engine process teardown (chdb-node#97)', () => {
     expect(child.stdout.trim()).toBe('1000')
     expect(child.stderr).toBe('')
   }, 20_000)
+
+  // The standalone functions' default connection had no 'exit' hook, so a
+  // process.exit() left it to the addon's atexit backstop, inside C exit(),
+  // after statics the server teardown still uses were destroyed. With merges
+  // in flight that crashed: SIGSEGV, or "mutex lock failed: Invalid argument",
+  // each after chDB's crash handler waited about 30 s.
+  it('exits cleanly from process.exit() with merges in flight on the default connection', () => {
+    const entry = join(process.cwd(), 'index.js')
+    const script = `
+      const { query } = require(${JSON.stringify(entry)});
+      query('CREATE TABLE t (id UInt64, s String) ENGINE = MergeTree ORDER BY id');
+      let merging = 0;
+      for (let i = 0; i < 200 && merging === 0; i++) {
+        query('INSERT INTO t SELECT number, toString(number) FROM numbers(' + i * 20000 + ', 20000)');
+        merging = Number(query('SELECT count() FROM system.merges', 'CSV').trim());
+      }
+      process.stdout.write(String(merging));
+      process.exit(0);
+    `
+    const child = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      timeout: 20_000,
+      killSignal: 'SIGKILL',
+    })
+    expect(child.error, child.stderr).toBeUndefined()
+    expect(child.signal, child.stderr).toBeNull()
+    expect(child.status, child.stderr).toBe(0)
+    // Only meaningful if a merge was running when the exit began.
+    expect(Number(child.stdout)).toBeGreaterThan(0)
+    expect(child.stderr).toBe('')
+  }, 30_000)
+
+  // The same with a query still running on the default connection, which the
+  // 'exit' hook must not close under it. It is closed in exit() instead, by
+  // the backstop registered again from the hook so that it runs before the
+  // destroyed statics. Without that this crashed or hung in exit().
+  it('exits cleanly from process.exit() with an insert still running on the default connection', () => {
+    const entry = join(process.cwd(), 'index.js')
+    const script = `
+      const { query, queryAsync } = require(${JSON.stringify(entry)});
+      query('CREATE TABLE t (id UInt64, s String) ENGINE = MergeTree ORDER BY id');
+      let merging = 0;
+      for (let i = 0; i < 200 && merging === 0; i++) {
+        query('INSERT INTO t SELECT number, toString(number) FROM numbers(' + i * 20000 + ', 20000)');
+        merging = Number(query('SELECT count() FROM system.merges', 'CSV').trim());
+      }
+      let done = false;
+      queryAsync('INSERT INTO t SELECT number, toString(number) FROM numbers(10000000)', { format: 'CSV' })
+        .then(() => { done = true; }, () => { done = true; });
+      setTimeout(() => {
+        process.stdout.write(merging + ' ' + (done ? 'done' : 'running'));
+        process.exit(0);
+      }, 20);
+    `
+    const child = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      killSignal: 'SIGKILL',
+    })
+    expect(child.error, child.stderr).toBeUndefined()
+    expect(child.signal, child.stderr).toBeNull()
+    expect(child.status, child.stderr).toBe(0)
+    // Only meaningful if merges ran and the insert had not finished at exit.
+    const [merging, insert] = child.stdout.split(' ')
+    expect(Number(merging)).toBeGreaterThan(0)
+    expect(insert).toBe('running')
+    expect(child.stderr).toBe('')
+  }, 70_000)
 })
