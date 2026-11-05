@@ -5,6 +5,7 @@
 #include <string.h>
 #include <iostream>
 #include <memory>
+#include <atomic>
 #include <mutex>
 #include <set>
 #include <unordered_map>
@@ -230,9 +231,21 @@ static void hard_close_all() {
 // including ones a query or a MergeTree merge constructed. Closing a connection
 // here tears the server down onto those destroyed statics; with merges in
 // flight, a process.exit() on the default connection crashed in this handler.
+//
+// chdb_shutdown() is one of them: it keeps a function-local static mutex,
+// constructed by its first call. Once ExitTeardownWrapper has called it, a
+// second call from here locks that mutex after its destructor ran, which macOS
+// reports as "mutex lock failed: Invalid argument" and aborts. So the exit
+// paths call it once between them.
+static std::atomic<bool> g_exit_shutdown_called{false};
+
+static void shutdown_engine_once() {
+  if (!g_exit_shutdown_called.exchange(true)) (void)chdb_shutdown();
+}
+
 static void shutdown_on_process_exit() {
   hard_close_all();
-  (void)chdb_shutdown();
+  shutdown_engine_once();
 }
 
 // Set at the first connect. Guarded by g_reg_mu: both callers hold it.
@@ -1813,7 +1826,7 @@ Napi::Value ExitTeardownWrapper(const Napi::CallbackInfo &info) {
     if (busy)
       std::atexit(shutdown_on_process_exit);
     else
-      (void)chdb_shutdown();
+      shutdown_engine_once();
   }
   return info.Env().Undefined();
 }
