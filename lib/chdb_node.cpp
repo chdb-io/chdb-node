@@ -251,6 +251,11 @@ static void shutdown_on_process_exit() {
 // Set at the first connect. Guarded by g_reg_mu: both callers hold it.
 static bool g_atexit_registered = false;
 
+// Environments that loaded the addon and have not been torn down: the main
+// thread, and each worker_threads Worker that required it. Init counts one in,
+// its env cleanup hook counts it out. ExitTeardownWrapper reads it.
+static std::atomic<int> g_live_envs{0};
+
 static void ensure_atexit() {
   if (!g_atexit_registered) {
     std::atexit(shutdown_on_process_exit);
@@ -1800,13 +1805,20 @@ Napi::Value EngineVersionWrapper(const Napi::CallbackInfo &info) {
 // thread only after this returns. For those, the backstop is registered once
 // more. exit() then runs it first: after Node has joined the thread, and before
 // the statics that the first registration runs after.
+//
+// While another environment has the addon loaded (a worker_threads Worker),
+// nothing is closed: that thread may be using any connection, its own sessions
+// or the shared default, and synchronous calls are not in the in-flight count.
+// Node stops it only after this returns, so closing one here freed it under
+// the worker's next query. The backstop is registered again instead; by the
+// time exit() runs it, Node has stopped and joined every worker.
 Napi::Value ExitTeardownWrapper(const Napi::CallbackInfo &info) {
   bool started;
-  bool busy = false;
+  bool busy = g_live_envs.load() > 1;
   {
     std::lock_guard<std::mutex> lk(g_reg_mu);
     started = g_atexit_registered;
-    for (auto it = g_reg.conns.begin(); it != g_reg.conns.end();) {
+    for (auto it = g_reg.conns.begin(); !busy && it != g_reg.conns.end();) {
       chdb_connection *c = *it;
       if (c && inflight_locked(*c) > 0) {
         busy = true;
@@ -1873,8 +1885,13 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   // Close every live connection on env teardown, ahead of the std::atexit
   // backstop. Both call the idempotent hard_close_all, so running twice is
   // harmless. Node runs no cleanup hooks on process.exit(), which is one reason
-  // index.js closes on the 'exit' event instead (ExitTeardownWrapper).
-  env.AddCleanupHook([] { hard_close_all(); });
+  // index.js closes on the 'exit' event instead (ExitTeardownWrapper). The
+  // hook also counts this environment out of g_live_envs.
+  g_live_envs.fetch_add(1);
+  env.AddCleanupHook([] {
+    g_live_envs.fetch_sub(1);
+    hard_close_all();
+  });
 
   return exports;
 }
