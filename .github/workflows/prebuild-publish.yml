@@ -35,7 +35,7 @@ jobs:
         include:
           - { os: ubuntu-latest, plat: linux-x64-gnu }
           - { os: ubuntu-24.04-arm, plat: linux-arm64-gnu }
-          - { os: macos-14, plat: darwin-arm64 }
+          - { os: macos-15, plat: darwin-arm64 }
           - { os: macos-15-intel, plat: darwin-x64 }
     steps:
       - uses: actions/checkout@v4
@@ -192,7 +192,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-15-intel]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel]
         node: ["18", "20", "22"]
     runs-on: ${{ matrix.os }}
     steps:
