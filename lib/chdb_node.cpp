@@ -5,6 +5,7 @@
 #include <string.h>
 #include <iostream>
 #include <memory>
+#include <atomic>
 #include <mutex>
 #include <set>
 #include <unordered_map>
@@ -201,8 +202,9 @@ private:
 static void erase_arrow_tables_for_conn(chdb_connection *conn);
 static void clear_all_arrow_tables();
 
-// Close every live connection. atexit backstop (the JS layer closes sessions on
-// 'exit' too); also used so a leaked connection never outlives the process.
+// Close every live connection. atexit backstop (the JS layer closes sessions and
+// calls ExitTeardownWrapper on 'exit' first); also used so a leaked connection
+// never outlives the process.
 static void hard_close_all() {
   std::lock_guard<std::mutex> lk(g_reg_mu);
   clear_all_arrow_tables();
@@ -214,20 +216,50 @@ static void hard_close_all() {
   g_reg.boundKey.clear();
 }
 
-// Node's environment cleanup closes connections, but the engine may still own
-// background threads when C++ static destructors run. On macOS with core
-// v26.9.0, a CLI that queried once could hang indefinitely inside exit().
-// Run this process-wide backstop before the engine's own exit handlers.
-static void shutdown_on_process_exit() {
-  hard_close_all();
-  (void)chdb_shutdown();
+// The atexit backstop: close whatever is still open when the process reaches C
+// exit(), then stop the engine, so it owns no background threads while C++
+// static destructors run. On macOS with core v26.9.0, a CLI that queried once
+// could hang indefinitely inside exit() without it.
+//
+// It is only the fallback. index.js calls ExitTeardownWrapper (below) from the
+// process 'exit' event, which closes everything it safely can before exit().
+// atexit handlers and static destructors run in reverse order of registration,
+// and this one is registered once, at the first connect, so it runs after two
+// things registered later: the exit teardown the engine registers on every
+// start (since chdb-core v26.11.0-rc.2), so after an engine restart that runs
+// first, and every function-local static constructed after the first connect,
+// including ones a query or a MergeTree merge constructed. Closing a connection
+// here tears the server down onto those destroyed statics; with merges in
+// flight, a process.exit() on the default connection crashed in this handler.
+//
+// chdb_shutdown() is one of them: it keeps a function-local static mutex,
+// constructed by its first call. Once ExitTeardownWrapper has called it, a
+// second call from here locks that mutex after its destructor ran, which macOS
+// reports as "mutex lock failed: Invalid argument" and aborts. So the exit
+// paths call it once between them.
+static std::atomic<bool> g_exit_shutdown_called{false};
+
+static void shutdown_engine_once() {
+  if (!g_exit_shutdown_called.exchange(true)) (void)chdb_shutdown();
 }
 
+static void shutdown_on_process_exit() {
+  hard_close_all();
+  shutdown_engine_once();
+}
+
+// Set at the first connect. Guarded by g_reg_mu: both callers hold it.
+static bool g_atexit_registered = false;
+
+// Environments that loaded the addon and have not been torn down: the main
+// thread, and each worker_threads Worker that required it. Init counts one in,
+// its env cleanup hook counts it out. ExitTeardownWrapper reads it.
+static std::atomic<int> g_live_envs{0};
+
 static void ensure_atexit() {
-  static bool done = false;
-  if (!done) {
+  if (!g_atexit_registered) {
     std::atexit(shutdown_on_process_exit);
-    done = true;
+    g_atexit_registered = true;
   }
 }
 
@@ -253,8 +285,9 @@ static chdb_connection *get_default_conn(char **error_message) {
   g_reg.defaultConn = c;
   g_reg.boundKey = "";
   g_reg.conns.insert(c);
-  // Register only after chdb_connect initialized the engine: atexit handlers
-  // run in reverse registration order, so shutdown must precede its teardown.
+  // Register only after chdb_connect started the engine, so the backstop runs
+  // before the exit teardown that start registered (see shutdown_on_process_exit
+  // for what it still runs after).
   ensure_atexit();
   return c;
 }
@@ -1760,6 +1793,56 @@ Napi::Value EngineVersionWrapper(const Napi::CallbackInfo &info) {
   return Napi::String::New(env, version);
 }
 
+// Exit teardown, called by index.js from the main thread's process 'exit'
+// event: the last point before Node calls C exit(), where every static is still
+// alive (shutdown_on_process_exit explains why the atexit backstop is too late).
+// index.js has closed its sessions by then. This closes what is left, the
+// standalone default connection above all, and then stops the engine, so
+// nothing of chDB runs into Node's own teardown.
+//
+// A connection an async call is still running on (the in-flight count) stays
+// open: closing it under the call aborts the engine, and Node joins that libuv
+// thread only after this returns. For those, the backstop is registered once
+// more. exit() then runs it first: after Node has joined the thread, and before
+// the statics that the first registration runs after.
+//
+// While another environment has the addon loaded (a worker_threads Worker),
+// nothing is closed: that thread may be using any connection, its own sessions
+// or the shared default, and synchronous calls are not in the in-flight count.
+// Node stops it only after this returns, so closing one here freed it under
+// the worker's next query. The backstop is registered again instead; by the
+// time exit() runs it, Node has stopped and joined every worker.
+Napi::Value ExitTeardownWrapper(const Napi::CallbackInfo &info) {
+  bool started;
+  bool busy = g_live_envs.load() > 1;
+  {
+    std::lock_guard<std::mutex> lk(g_reg_mu);
+    started = g_atexit_registered;
+    for (auto it = g_reg.conns.begin(); !busy && it != g_reg.conns.end();) {
+      chdb_connection *c = *it;
+      if (c && inflight_locked(*c) > 0) {
+        busy = true;
+        ++it;
+        continue;
+      }
+      if (c) {
+        erase_arrow_tables_for_conn(c);
+        chdb_close_conn(c);
+      }
+      if (c == g_reg.defaultConn) g_reg.defaultConn = nullptr;
+      it = g_reg.conns.erase(it);
+    }
+    if (g_reg.conns.empty()) g_reg.boundKey.clear();
+  }
+  if (started) {
+    if (busy)
+      std::atexit(shutdown_on_process_exit);
+    else
+      shutdown_engine_once();
+  }
+  return info.Env().Undefined();
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   // Export the functions
   exports.Set("Query", Napi::Function::New(env, QueryWrapper));
@@ -1796,10 +1879,19 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("ArrowRegisterColumns", Napi::Function::New(env, ArrowRegisterColumnsWrapper));
   exports.Set("ArrowUnregister", Napi::Function::New(env, ArrowUnregisterWrapper));
 
-  // Most-reliable exit cleanup: close every live connection on env teardown,
-  // ahead of (and complementary to) the std::atexit backstop. Both call the
-  // idempotent hard_close_all, so running twice is harmless.
-  env.AddCleanupHook([] { hard_close_all(); });
+  // For index.js's process 'exit' hook.
+  exports.Set("ExitTeardown", Napi::Function::New(env, ExitTeardownWrapper));
+
+  // Close every live connection on env teardown, ahead of the std::atexit
+  // backstop. Both call the idempotent hard_close_all, so running twice is
+  // harmless. Node runs no cleanup hooks on process.exit(), which is one reason
+  // index.js closes on the 'exit' event instead (ExitTeardownWrapper). The
+  // hook also counts this environment out of g_live_envs.
+  g_live_envs.fetch_add(1);
+  env.AddCleanupHook([] {
+    g_live_envs.fetch_sub(1);
+    hard_close_all();
+  });
 
   return exports;
 }

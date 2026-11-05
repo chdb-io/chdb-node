@@ -6,6 +6,7 @@ const chdbNode = require('./dist/loader.js').loadNative();
 const { mkdtempSync, rmSync, realpathSync } = fs;
 const { join, resolve: resolvePath } = require('path');
 const os = require('os');
+const { isMainThread } = require('worker_threads');
 const {
   ChdbConnectionError,
   ChdbClosedError,
@@ -568,12 +569,33 @@ let exitHookInstalled = false;
 function ensureExitHook() {
   if (exitHookInstalled) return;
   exitHookInstalled = true;
-  process.on('exit', () => {
+  const teardown = () => {
     for (const s of openSessions) {
       try { s.close(); } catch (_) { /* best effort */ }
     }
-  });
+    // Then what the sessions do not cover: the standalone default connection,
+    // which the addon opens on first use, and any connection close() had to
+    // defer. The addon closes the idle ones and stops the engine here, before
+    // C exit(), because its atexit backstop runs after statics the engine
+    // still needs are destroyed: a process.exit() with MergeTree merges in
+    // flight on the default connection crashed there. As with the sessions, an
+    // 'exit' listener that runs after this one finds the engine closed. Main
+    // thread only: the connections and the engine are process-wide, and a
+    // worker that exits must not close them under the main thread.
+    if (isMainThread && typeof chdbNode.ExitTeardown === 'function') {
+      try { chdbNode.ExitTeardown(); } catch (_) { /* best effort */ }
+    }
+  };
+  process.on('exit', teardown);
+  // Deno.exit() skips the process 'exit' event and dispatches 'unload'
+  // instead. Running both is harmless: the second finds nothing left to do.
+  if (typeof Deno !== 'undefined' && typeof globalThis.addEventListener === 'function') {
+    globalThis.addEventListener('unload', teardown);
+  }
 }
+// Installed up front rather than with the first Session: the standalone
+// functions reach the engine through that default connection without one.
+ensureExitHook();
 
 // Session class with connection-based path handling
 const SESSION_SIGNALS = ['SIGINT', 'SIGTERM'];

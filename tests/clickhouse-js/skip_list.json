@@ -226,6 +226,26 @@
       "file": "packages/client-node/__tests__/integration/node_streaming_e2e.test.ts",
       "test": "[Node.js] streaming e2e > should stream a Parquet file",
       "reason": "Streams a Parquet file into chdb via `INSERT FORMAT Parquet`; chdb's `ParquetV3BlockInputFormat` rejects this specific fixture with `apache::thrift::protocol::TProtocolException: invalid TType`. The server's older Parquet input format accepts it. Engine-version divergence in Parquet decoder."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/error_parsing.test.ts",
+      "test": "ClickHouse server errors parsing > returns \"unknown identifier\" error",
+      "reason": "Engine-version divergence, not a chdb gap. Since chdb-core v26.9.0 (ClickHouse 26.9.2.1; v26.7.3 is unaffected) the analyzer's message ends the identifier with `. In scope ...` (capital I) where this tag's case-sensitive regex expects ` in scope`. Code 47 and type UNKNOWN_IDENTIFIER still parse correctly; only the message match misses. Upstream accepts both spellings since ClickHouse/clickhouse-js#1025 (client-1.24.0). Drop this entry when syncedAgainst moves to that release or later."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/error_parsing.test.ts",
+      "test": "ClickHouse server errors parsing > returns \"unknown table\" error",
+      "reason": "Same `. In scope` message change as the entry above. Code 60 and type UNKNOWN_TABLE still parse correctly. Fixed upstream by the same clickhouse-js#1025."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/date_time.test.ts",
+      "test": "DateTime > DateTime64(3) > should insert DateTime64(3) and get it back (different timezone)",
+      "reason": "Engine-version divergence, not a chdb gap. Since chdb-core v26.9.0 (ClickHouse 26.9.2.1; v26.7.3 is unaffected) an epoch-milliseconds JSON number inserted into DateTime64(3) saturates to 9999-12-31 23:59:59.000 instead of being read as ticks; the same value sent as a JSON string still parses. chdb-node never sends a Date this way (it formats Date values as strings), so this only reaches callers who put raw epoch-ms numbers into JSONEachRow themselves. Upstream skips this test on such servers since clickhouse-js#1025 (isDateTime64FromJSONNumberBroken)."
+    },
+    {
+      "file": "packages/client-common/__tests__/integration/data_types.test.ts",
+      "test": "data types > should work with custom JSON handling (BigInt and Date)",
+      "reason": "Same epoch-ms DateTime64(3) saturation as the entry above: the test's custom JSON.stringify sends a Date as getTime(). Upstream skips it on such servers since clickhouse-js#1025."
     }
   ]
 }
