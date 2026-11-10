@@ -38,11 +38,15 @@ import { ChdbCompileError } from '../../errors'
 const arrowFinalizers = new FinalizationRegistry<{
   rt: Runtime
   conn: unknown
+  session?: { readonly connection: unknown }
   name: string
   state: { live: boolean }
-}>(({ rt, conn, name, state }) => {
+}>(({ rt, conn, session, name, state }) => {
   if (!state.live) return
   state.live = false
+  // Session.close() releases the native connection and its Arrow registrations.
+  // The External captured at registration is no longer safe to pass to native.
+  if (session !== undefined && session.connection !== conn) return
   try {
     rt._arrowUnregister(conn, name)
   } catch {
@@ -171,20 +175,30 @@ export function registerArrowTable(
 ): ArrowTableHandle {
   validate(name, columns)
   const encoded = columns.map(encodeColumn)
-  const conn = opts.session !== undefined ? opts.session.connection : null
-  if (opts.session !== undefined && conn == null) {
+  const session = opts.session
+  const conn = session !== undefined ? session.connection : null
+  if (session !== undefined && conn == null) {
     throw new ChdbCompileError('registerArrowTable: session has no active connection')
   }
   const rt = runtime()
+  const sessionStillOwnsConnection = (): boolean => session === undefined || session.connection === conn
   // Shared between close/refresh and the GC finalizer so all three agree on
   // whether the table is currently registered.
   const state = { live: false }
   const register = (): void => {
+    if (!sessionStillOwnsConnection()) {
+      throw new ChdbCompileError('registerArrowTable: session has no active connection')
+    }
     rt._arrowRegisterColumns(conn, name, encoded)
     state.live = true
   }
   const unregister = (): void => {
     if (!state.live) return
+    if (!sessionStillOwnsConnection()) {
+      // Closing the Session has already dropped its native Arrow registrations.
+      state.live = false
+      return
+    }
     rt._arrowUnregister(conn, name)
     state.live = false
   }
@@ -203,6 +217,6 @@ export function registerArrowTable(
   }
   // Register the GC fallback. The handle is also the unregister token so
   // `close()` can cancel it.
-  arrowFinalizers.register(handle, { rt, conn, name, state }, handle)
+  arrowFinalizers.register(handle, { rt, conn, session, name, state }, handle)
   return handle
 }

@@ -39,6 +39,17 @@ describe('registerArrowTable — round-trips JS data through the engine', () => 
     ], { session })).toThrow(/session has no active connection/)
   })
 
+  it('does not unregister through a Session connection after the Session closes', () => {
+    const session = new Session()
+    const t = registerArrowTable('arr_session_closed_first', [
+      { name: 'x', type: 'Int32', data: new Int32Array([1]) },
+    ], { session })
+    session.close()
+    expect(() => t.refresh()).toThrow(/session has no active connection/)
+    expect(() => t.close()).not.toThrow()
+    expect(() => t.close()).not.toThrow()
+  })
+
   it('reads Int32, Float64, and Utf8 columns in row order', async () => {
     const t = registerArrowTable('arr_basics', [
       { name: 'id', type: 'Int32', data: new Int32Array([10, 20, 30]) },
