@@ -922,7 +922,7 @@ function version() {
 
 // Arrow C Data Interface — low-level binding. The high-level helper lives in
 // Layer 3 (`src/layer3/execute/arrow-input.ts`); this module just routes the
-// call to the native addon. The connection arg is a `Session._handle` (the
+// call to the native addon. The connection arg is `Session.connection` (the
 // External returned by CreateConnection) or null for the process-wide default.
 function _arrowRegisterColumns(connection, tableName, columns) {
   return chdbNode.ArrowRegisterColumns(connection ?? null, tableName, columns);

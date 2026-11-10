@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { registerArrowTable, selectFrom, chTable, ChdbCompileError } from '../../../index.js'
+import { registerArrowTable, selectFrom, chTable, ChdbCompileError, Session } from '../../../index.js'
 
 // Arrow C Data Interface input — register a JS columnar dataset as
 // `arrowstream('<name>')` and read it through the regular builder. Single-pass
@@ -7,6 +7,49 @@ import { registerArrowTable, selectFrom, chTable, ChdbCompileError } from '../..
 // repeated reads against the same table.
 
 describe('registerArrowTable — round-trips JS data through the engine', () => {
+  it('registers and unregisters on the supplied Session connection', async () => {
+    const session = new Session()
+    try {
+      const t = registerArrowTable('arr_session', [
+        { name: 'x', type: 'Int32', data: new Int32Array([7, 8]) },
+      ], { session })
+      try {
+        const result = await session.queryAsync(
+          "SELECT x FROM arrowstream('arr_session') ORDER BY x",
+          { format: 'JSONEachRow' },
+        )
+        expect(result.text().trim().split('\n').map((line) => JSON.parse(line))).toEqual([{ x: 7 }, { x: 8 }])
+      } finally {
+        t.close()
+      }
+      await expect(session.queryAsync(
+        "SELECT x FROM arrowstream('arr_session')",
+        { format: 'JSONEachRow' },
+      )).rejects.toThrow(/arr_session|not found/i)
+    } finally {
+      session.close()
+    }
+  })
+
+  it('rejects a closed Session instead of registering on the default connection', () => {
+    const session = new Session()
+    session.close()
+    expect(() => registerArrowTable('arr_closed_session', [
+      { name: 'x', type: 'Int32', data: new Int32Array([1]) },
+    ], { session })).toThrow(/session has no active connection/)
+  })
+
+  it('does not unregister through a Session connection after the Session closes', () => {
+    const session = new Session()
+    const t = registerArrowTable('arr_session_closed_first', [
+      { name: 'x', type: 'Int32', data: new Int32Array([1]) },
+    ], { session })
+    session.close()
+    expect(() => t.refresh()).toThrow(/session has no active connection/)
+    expect(() => t.close()).not.toThrow()
+    expect(() => t.close()).not.toThrow()
+  })
+
   it('reads Int32, Float64, and Utf8 columns in row order', async () => {
     const t = registerArrowTable('arr_basics', [
       { name: 'id', type: 'Int32', data: new Int32Array([10, 20, 30]) },
