@@ -17,7 +17,7 @@
  * handle for each query.
  */
 
-import { runtime, type Runtime, type RuntimeSession } from '../runtime'
+import { runtime, type Runtime } from '../runtime'
 import { ChdbCompileError } from '../../errors'
 
 /**
@@ -167,11 +167,14 @@ function encodeColumn(col: ArrowColumnInput): NativeArrowColumn {
 export function registerArrowTable(
   name: string,
   columns: ReadonlyArray<ArrowColumnInput>,
-  opts: { session?: RuntimeSession } = {},
+  opts: { session?: { readonly connection: unknown } } = {},
 ): ArrowTableHandle {
   validate(name, columns)
   const encoded = columns.map(encodeColumn)
-  const conn = opts.session !== undefined ? (opts.session as { _handle?: unknown })._handle : null
+  const conn = opts.session !== undefined ? opts.session.connection : null
+  if (opts.session !== undefined && conn == null) {
+    throw new ChdbCompileError('registerArrowTable: session has no active connection')
+  }
   const rt = runtime()
   // Shared between close/refresh and the GC finalizer so all three agree on
   // whether the table is currently registered.
