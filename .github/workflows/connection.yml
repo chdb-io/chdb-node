@@ -55,7 +55,10 @@ jobs:
       - run: npm run test:v3 -- test/v3/connection/
 
   parity:
-    runs-on: ubuntu-latest
+    # The pinned clickhouse-js client-1.23.0 test dependency simdjson@0.9.2
+    # fails to build with GCC 15 on ubuntu-26.04 (ubuntu-latest as of Nov 2026).
+    # Keep parity on the last known-good image until upstream updates it.
+    runs-on: ubuntu-24.04
     env:
       TZ: UTC
     steps:
