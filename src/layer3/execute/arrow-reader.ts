@@ -31,8 +31,9 @@ const readerFinalizers = new FinalizationRegistry<{
 
 /**
  * Register a one-shot synchronous or asynchronous RecordBatch reader. The
- * native queue holds at most two batches (including a batch awaiting C Data
- * release); JS produces on its own event loop and awaits queue capacity.
+ * native queue holds at most two not-yet-delivered batches; JS produces on its
+ * own event loop and awaits queue capacity. Core may retain delivered batches
+ * beyond the queue, so this is not a total-query memory bound.
  * Core get_next only waits on native descriptors and never invokes JS on its
  * query worker. Pass the returned name to arrowstream(name) on this Session.
  */

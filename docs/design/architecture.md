@@ -77,6 +77,7 @@ Current PR #43 Layer 1 capabilities include:
 - CJS and ESM entry points.
 
 See [Layer 1 Native Binding Design and Implementation](./layer1-native-binding.md) for the full reviewer guide.
+For the newer direct Arrow input/output path, see [Node native Arrow: threads and ownership](./native-arrow.md).
 
 ## Layer 2 - ClickHouse Client Compatibility
 

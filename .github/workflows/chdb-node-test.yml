@@ -218,7 +218,9 @@ jobs:
     # installed `chdb` package — the Node analogue of chDB Python's "pip install
     # the built wheel, then run the suite". Proves the published shape actually
     # loads and runs, not just the in-repo source.
-    runs-on: ubuntu-latest
+    # Keep the portable-builder host stable; the rolling ubuntu-latest image
+    # (26.04) cancelled the AlmaLinux re-link step before packaging on #104.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

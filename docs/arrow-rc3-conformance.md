@@ -15,6 +15,8 @@ platforms and registry-installed packages remain CI/release gates.
 The shared contract is `chdb-core/docs/NATIVE_ARROW_BINDING_CONTRACT.md`. In
 this binding, **direct** means C Data/C Stream without Arrow IPC. Input and
 output may copy buffers; no end-to-end zero-copy claim is made.
+For application examples see the [Arrow guide](arrow.md); for the bounded
+queue and release sequence see the [Node Arrow design](design/native-arrow.md).
 The optional `chdb/arrow` subpath supplies TypeScript `Table`/`RecordBatch`
 return types without making the base `chdb` entry require `apache-arrow`.
 
