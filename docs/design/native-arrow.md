@@ -54,6 +54,10 @@ Synchronous queries cannot consume a live JS reader on the same connection:
 they would block the event loop that must feed this queue. Stream creation
 also refuses an in-flight operation on its connection, and fetches on one
 stream handle are serialized.
+Because core's Arrow registry shares raw borrowed pointers process-wide,
+source registration excludes live Sessions in other Node isolates, and an
+isolate cannot open a Session while another owns a source. This prevents a
+foreign scan from retaining a source after its owning isolate tears down.
 Closing during a scan defers unregister and input release until query cleanup;
 the thread-safe callback releases JS-owned references on their isolate. On
 output, the copy precedes C release, so a returned batch outlives the native

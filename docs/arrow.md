@@ -143,5 +143,9 @@ the JS event loop.
 - Keep each `Session` open until its scans and readers finish. Cancel a
   partially consumed output reader, close input registrations, and await
   input reader cleanup. Error paths release the native handles.
+- Arrow source registrations are isolate-local. While one isolate owns a
+  registration, another Node worker cannot open a Session; close the source
+  before transferring work between isolates. The engine's registry names are
+  process-wide, but a borrowed JS buffer cannot safely outlive its isolate.
 
 For the thread and ownership model, see the [Node Arrow design](design/native-arrow.md).

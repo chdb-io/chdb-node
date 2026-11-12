@@ -17,10 +17,10 @@
 #include <napi.h>
 
 typedef void * ChdbConnection;
-ChdbConnection CreateConnection(const char * path, char ** error_message);
+ChdbConnection CreateConnection(const char * path, char ** error_message, napi_env owner);
 ChdbConnection CreateConnectionWithArgs(const char * path,
                                         const std::vector<std::string> & extraArgs,
-                                        char ** error_message);
+                                        char ** error_message, napi_env owner);
 void CloseConnection(ChdbConnection conn);
 char * QueryWithConnection(ChdbConnection conn, const char * query, const char * format, char ** error_message);
 
@@ -85,6 +85,44 @@ struct Registry {
 static Registry g_reg;
 static std::mutex g_reg_mu;
 static std::unordered_map<chdb_connection *, napi_env> g_conn_owner;
+// A C Stream borrows JS buffers from its owning isolate. Core exposes names
+// process-wide, so do not allow another isolate to open a connection while
+// registrations exist, or register a source while another isolate has one.
+static napi_env g_arrow_registration_owner = nullptr;
+static size_t g_arrow_registration_pending = 0;
+static std::set<std::pair<chdb_connection *, std::string>> g_arrow_registration_names;
+static void resetArrowOwnerIfIdleLocked() {
+  if (!g_arrow_registration_pending && g_arrow_registration_names.empty())
+    g_arrow_registration_owner = nullptr;
+}
+static bool beginArrowRegistration(Napi::Env env) {
+  std::lock_guard<std::mutex> lock(g_reg_mu);
+  const napi_env owner = env;
+  if (g_arrow_registration_owner && g_arrow_registration_owner != owner) return false;
+  for (auto * conn : g_reg.conns) {
+    auto found = g_conn_owner.find(conn);
+    if (found != g_conn_owner.end() && found->second != owner) return false;
+  }
+  g_arrow_registration_owner = owner;
+  ++g_arrow_registration_pending;
+  return true;
+}
+static bool reserveArrowRegistration(Napi::Env env) {
+  if (beginArrowRegistration(env)) return true;
+  Napi::Error::New(env, "Arrow sources cannot be shared with a live Session in another Node isolate")
+      .ThrowAsJavaScriptException();
+  return false;
+}
+static void finishArrowRegistration(chdb_connection * conn, const std::string & name, bool success) {
+  std::lock_guard<std::mutex> lock(g_reg_mu);
+  --g_arrow_registration_pending;
+  if (success) g_arrow_registration_names.emplace(conn, name);
+  resetArrowOwnerIfIdleLocked();
+}
+static void endArrowRegistrationLocked(chdb_connection * conn, const std::string & name) {
+  g_arrow_registration_names.erase({conn, name});
+  resetArrowOwnerIfIdleLocked();
+}
 static bool hasLiveAsyncArrowReader(chdb_connection * conn);
 static bool rejectSyncArrowReader(Napi::Env env, chdb_connection * conn) {
   if (!hasLiveAsyncArrowReader(conn)) return false;
@@ -169,6 +207,9 @@ static chdb_connection *open_raw(const std::string &path,
 // appears.
 //===--------------------------------------------------------------------===//
 static std::unordered_map<chdb_connection, int> g_inflight;
+struct DirectArrowStreamState;
+static void finishDirectArrowStream(DirectArrowStreamState * state);
+static std::vector<std::pair<chdb_connection, std::shared_ptr<DirectArrowStreamState>>> g_deferred_arrow_streams;
 
 static void retain_conn(chdb_connection conn) {
   if (!conn) return;
@@ -181,7 +222,15 @@ static void release_conn(chdb_connection conn) {
   std::lock_guard<std::mutex> lk(g_reg_mu);
   auto it = g_inflight.find(conn);
   if (it == g_inflight.end()) return;
-  if (--it->second <= 0) g_inflight.erase(it);
+  if (--it->second > 0) return;
+  g_inflight.erase(it);
+  // No worker can still hold this connection. Finish any cancellation that
+  // would have blocked its JS producer if performed on the event loop.
+  for (auto pending = g_deferred_arrow_streams.begin(); pending != g_deferred_arrow_streams.end();) {
+    if (pending->first != conn) { ++pending; continue; }
+    finishDirectArrowStream(pending->second.get());
+    pending = g_deferred_arrow_streams.erase(pending);
+  }
 }
 
 // Caller must already hold g_reg_mu: the count is read as part of an eviction
@@ -224,6 +273,9 @@ static void hard_close_all() {
   g_conn_owner.clear();
   g_reg.defaultConn = nullptr;
   g_reg.boundKey.clear();
+  g_arrow_registration_names.clear();
+  g_arrow_registration_pending = 0;
+  g_arrow_registration_owner = nullptr;
 }
 
 // The atexit backstop: close whatever is still open when the process reaches C
@@ -292,6 +344,11 @@ static void ensure_atexit() {
 // single shared default per process; reused across standalone calls.
 static chdb_connection *get_default_conn(char **error_message, napi_env owner) {
   std::lock_guard<std::mutex> lk(g_reg_mu);
+  if (g_arrow_registration_owner && g_arrow_registration_owner != owner) {
+    if (error_message && !*error_message)
+      *error_message = strdup("Arrow sources belong to another Node isolate; close them first");
+    return nullptr;
+  }
   if (g_reg.defaultConn) {
     auto found = g_conn_owner.find(g_reg.defaultConn);
     if (found != g_conn_owner.end() && found->second != owner) {
@@ -330,8 +387,13 @@ static chdb_connection *get_default_conn(char **error_message, napi_env owner) {
 // live in-memory default yields; a different data directory is rejected.
 static chdb_connection *acquire_session_conn(const std::string &path,
                                             const std::vector<std::string> &extraArgs,
-                                            char **error_message) {
+                                            char **error_message, napi_env owner) {
   std::lock_guard<std::mutex> lk(g_reg_mu);
+  if (g_arrow_registration_owner && g_arrow_registration_owner != owner) {
+    if (error_message && !*error_message)
+      *error_message = strdup("Arrow sources belong to another Node isolate; close them first");
+    return nullptr;
+  }
   if (!g_reg.conns.empty()) {
     if (g_reg.boundKey.empty()) {
       // Only the in-memory default is up (boundKey ""). It is transient and must
@@ -378,6 +440,7 @@ static chdb_connection *acquire_session_conn(const std::string &path,
   }
   g_reg.boundKey = path;
   g_reg.conns.insert(c);
+  g_conn_owner[c] = owner;
   ensure_atexit();
   return c;
 }
@@ -478,17 +541,17 @@ static char *exec_query_params(chdb_connection conn,
   return output;
 }
 
-ChdbConnection CreateConnection(const char * path, char ** error_message) {
-    return CreateConnectionWithArgs(path, {}, error_message);
+ChdbConnection CreateConnection(const char * path, char ** error_message, napi_env owner) {
+    return CreateConnectionWithArgs(path, {}, error_message, owner);
 }
 
 ChdbConnection CreateConnectionWithArgs(const char * path,
                                         const std::vector<std::string> & extraArgs,
-                                        char ** error_message) {
+                                        char ** error_message, napi_env owner) {
     // Sessions always pass a real path (a temp dir for in-memory sessions), so
     // an empty key here never collides with the default connection's "" key.
     std::string p = (path && path[0]) ? std::string(path) : std::string();
-    return static_cast<ChdbConnection>(acquire_session_conn(p, extraArgs, error_message));
+    return static_cast<ChdbConnection>(acquire_session_conn(p, extraArgs, error_message, owner));
 }
 
 void CloseConnection(ChdbConnection conn) {
@@ -1130,7 +1193,7 @@ Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
     }
 
     char *error_message = nullptr;
-    ChdbConnection conn = CreateConnectionWithArgs(path.c_str(), settings, &error_message);
+    ChdbConnection conn = CreateConnectionWithArgs(path.c_str(), settings, &error_message, env);
 
     if (!conn) {
         std::string msg = error_message ? error_message : "Failed to create connection";
@@ -1139,10 +1202,6 @@ Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
         return env.Null();
     }
 
-    {
-        std::lock_guard<std::mutex> lock(g_reg_mu);
-        g_conn_owner[static_cast<chdb_connection *>(conn)] = env;
-    }
     return Napi::External<void>::New(env, conn);
 }
 
@@ -1529,14 +1588,24 @@ struct DirectArrowStreamState {
   bool cancelRequested = false;
 };
 
-static void closeDirectArrowStream(DirectArrowStreamState * state) {
+static void finishDirectArrowStream(DirectArrowStreamState * state) {
+  if (!state || !state->handle) return;
+  chdb_stream_cancel_query(state->conn, state->handle);
+  chdb_destroy_query_result(state->handle);
+  state->handle = nullptr;
+}
+
+static void closeDirectArrowStream(const std::shared_ptr<DirectArrowStreamState> & state) {
   if (!state || state->closed) return;
   if (state->fetching) { state->cancelRequested = true; return; }
+  std::lock_guard<std::mutex> lock(g_reg_mu);
+  if (state->closed) return;
   state->closed = true;
-  if (state->handle) {
-    chdb_stream_cancel_query(state->conn, state->handle);
-    chdb_destroy_query_result(state->handle);
-    state->handle = nullptr;
+  if (inflight_locked(state->conn) > 0) {
+    state->cancelRequested = true;
+    g_deferred_arrow_streams.emplace_back(state->conn, state);
+  } else {
+    finishDirectArrowStream(state.get());
   }
 }
 
@@ -1596,16 +1665,18 @@ Napi::Value StartArrowStreamWrapper(const Napi::CallbackInfo & info) {
     Napi::Error::New(env, message).ThrowAsJavaScriptException();
     return env.Undefined();
   }
-  auto * state = new DirectArrowStreamState{*conn, handle};
-  return Napi::External<DirectArrowStreamState>::New(env, state, [](Napi::Env, DirectArrowStreamState * s) {
-    closeDirectArrowStream(s);
+  auto * state = new std::shared_ptr<DirectArrowStreamState>(
+      std::make_shared<DirectArrowStreamState>(DirectArrowStreamState{*conn, handle}));
+  return Napi::External<std::shared_ptr<DirectArrowStreamState>>::New(env, state,
+      [](Napi::Env, std::shared_ptr<DirectArrowStreamState> * s) {
+    closeDirectArrowStream(*s);
     delete s;
   });
 }
 
 class FetchArrowWorker : public Napi::AsyncWorker {
 public:
-  FetchArrowWorker(Napi::Env env, DirectArrowStreamState * state, Napi::Value handle)
+  FetchArrowWorker(Napi::Env env, std::shared_ptr<DirectArrowStreamState> state, Napi::Value handle)
       : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)),
         state_(state), handleRef_(Napi::Persistent(handle)), guard_(state ? state->conn : nullptr) {}
   Napi::Promise GetPromise() { return deferred_.Promise(); }
@@ -1644,7 +1715,7 @@ public:
 
 private:
   Napi::Promise::Deferred deferred_;
-  DirectArrowStreamState * state_;
+  std::shared_ptr<DirectArrowStreamState> state_;
   Napi::Reference<Napi::Value> handleRef_;
   bool done_ = false;
   std::vector<DirectArrowColumn> fields_;
@@ -1655,7 +1726,7 @@ private:
 Napi::Value FetchArrowStreamWrapper(const Napi::CallbackInfo & info) {
   Napi::Env env = info.Env();
   if (info.Length() < 1 || !info[0].IsExternal()) return rejectedPromise(env, "Usage: Arrow stream handle");
-  auto * state = info[0].As<Napi::External<DirectArrowStreamState>>().Data();
+  auto state = *info[0].As<Napi::External<std::shared_ptr<DirectArrowStreamState>>>().Data();
   if (state->closed || state->cancelRequested) return rejectedPromise(env, "Arrow stream is closed");
   if (state->fetching) return rejectedPromise(env, "Arrow stream fetch already in progress");
   state->fetching = true;
@@ -1666,7 +1737,7 @@ Napi::Value FetchArrowStreamWrapper(const Napi::CallbackInfo & info) {
 
 Napi::Value CancelArrowStreamWrapper(const Napi::CallbackInfo & info) {
   if (info.Length() >= 1 && info[0].IsExternal())
-    closeDirectArrowStream(info[0].As<Napi::External<DirectArrowStreamState>>().Data());
+    closeDirectArrowStream(*info[0].As<Napi::External<std::shared_ptr<DirectArrowStreamState>>>().Data());
   return info.Env().Undefined();
 }
 
@@ -1756,11 +1827,13 @@ Napi::Value ArrowRegisterArrayWrapper(const Napi::CallbackInfo & info) {
   if (!pointerArg(env, info[2], "schemaPtr", &schemaPtr)) return env.Undefined();
   if (!pointerArg(env, info[3], "arrayPtr", &arrayPtr)) return env.Undefined();
 
+  if (!reserveArrowRegistration(env)) return env.Undefined();
   chdb_state st = chdb_arrow_array_scan(
       *conn,
       tableName.c_str(),
       reinterpret_cast<chdb_arrow_schema>(static_cast<uintptr_t>(schemaPtr)),
       reinterpret_cast<chdb_arrow_array>(static_cast<uintptr_t>(arrayPtr)));
+  finishArrowRegistration(conn, tableName, st == CHDBSuccess);
   if (st != CHDBSuccess) {
     Napi::Error::New(env, "chdb_arrow_array_scan failed for table " + tableName).ThrowAsJavaScriptException();
     return env.Undefined();
@@ -1781,10 +1854,12 @@ Napi::Value ArrowRegisterStreamWrapper(const Napi::CallbackInfo & info) {
   uint64_t streamPtr = 0;
   if (!pointerArg(env, info[2], "streamPtr", &streamPtr)) return env.Undefined();
 
+  if (!reserveArrowRegistration(env)) return env.Undefined();
   chdb_state st = chdb_arrow_scan(
       *conn,
       tableName.c_str(),
       reinterpret_cast<chdb_arrow_stream>(static_cast<uintptr_t>(streamPtr)));
+  finishArrowRegistration(conn, tableName, st == CHDBSuccess);
   if (st != CHDBSuccess) {
     Napi::Error::New(env, "chdb_arrow_scan failed for table " + tableName).ThrowAsJavaScriptException();
     return env.Undefined();
@@ -2017,22 +2092,27 @@ static void liveArrowRelease(AbiArrayStream * stream) { stream->release = nullpt
 // erasing only our map left dangling pointers and reserved names behind.
 static void erase_arrow_tables_for_conn(chdb_connection *conn) {
   std::lock_guard<std::mutex> lock(g_live_arrow_mu);
+  // Caller holds g_reg_mu. Include low-level caller-built registrations that
+  // have no JS-buffer entry in the maps below.
+  for (auto it = g_arrow_registration_names.begin(); it != g_arrow_registration_names.end();) {
+    if (it->first != conn) { ++it; continue; }
+    chdb_arrow_unregister_table(*conn, it->second.c_str());
+    it = g_arrow_registration_names.erase(it);
+  }
+  resetArrowOwnerIfIdleLocked();
   for (auto it = g_live_arrow_tables.begin(); it != g_live_arrow_tables.end();) {
     if (it->first.first == conn) {
-      chdb_arrow_unregister_table(*conn, it->first.second.c_str());
       it = g_live_arrow_tables.erase(it);
     }
     else ++it;
   }
   for (auto it = g_live_arrow_streams.begin(); it != g_live_arrow_streams.end();) {
     if (it->first.first == conn) {
-      chdb_arrow_unregister_table(*conn, it->first.second.c_str());
       it = g_live_arrow_streams.erase(it);
     } else ++it;
   }
   for (auto it = g_live_arrow_async.begin(); it != g_live_arrow_async.end();) {
     if (it->first.first == conn) {
-      chdb_arrow_unregister_table(*conn, it->first.second.c_str());
       cancelAsyncArrowStream(it->second);
       it = g_live_arrow_async.erase(it);
     } else ++it;
@@ -2265,11 +2345,13 @@ Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
   auto live = makeLiveArrowTable(env, info[2].As<Napi::Array>());
   if (!live) return env.Undefined();
 
+  if (!reserveArrowRegistration(env)) return env.Undefined();
   chdb_state st = chdb_arrow_array_scan(
       *conn,
       tableName.c_str(),
       reinterpret_cast<chdb_arrow_schema>(&live->rootSchema),
       reinterpret_cast<chdb_arrow_array>(&live->rootArray));
+  finishArrowRegistration(conn, tableName, st == CHDBSuccess);
   if (st != CHDBSuccess) {
     Napi::Error::New(env, "chdb_arrow_array_scan failed for table " + tableName).ThrowAsJavaScriptException();
     return env.Undefined();
@@ -2325,7 +2407,10 @@ Napi::Value ArrowRegisterBatchesWrapper(const Napi::CallbackInfo & info) {
   live->stream.get_last_error = liveArrowGetLastError;
   live->stream.release = liveArrowRelease;
   live->stream.private_data = live.get();
-  if (chdb_arrow_scan(*conn, tableName.c_str(), reinterpret_cast<chdb_arrow_stream>(&live->stream)) != CHDBSuccess) {
+  if (!reserveArrowRegistration(env)) return env.Undefined();
+  const chdb_state st = chdb_arrow_scan(*conn, tableName.c_str(), reinterpret_cast<chdb_arrow_stream>(&live->stream));
+  finishArrowRegistration(conn, tableName, st == CHDBSuccess);
+  if (st != CHDBSuccess) {
     Napi::Error::New(env, "chdb_arrow_scan failed for table " + tableName).ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -2362,7 +2447,10 @@ Napi::Value ArrowRegisterReaderWrapper(const Napi::CallbackInfo & info) {
   state->stream.get_last_error = liveAsyncArrowGetLastError;
   state->stream.release = liveAsyncArrowRelease;
   state->stream.private_data = state.get();
-  if (chdb_arrow_scan(*conn, tableName.c_str(), reinterpret_cast<chdb_arrow_stream>(&state->stream)) != CHDBSuccess) {
+  if (!reserveArrowRegistration(env)) return env.Undefined();
+  const chdb_state st = chdb_arrow_scan(*conn, tableName.c_str(), reinterpret_cast<chdb_arrow_stream>(&state->stream));
+  finishArrowRegistration(conn, tableName, st == CHDBSuccess);
+  if (st != CHDBSuccess) {
     Napi::Error::New(env, "chdb_arrow_scan failed for reader " + tableName).ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -2466,6 +2554,10 @@ Napi::Value ArrowUnregisterWrapper(const Napi::CallbackInfo & info) {
       cancelAsyncArrowStream(async->second);
       g_live_arrow_async.erase(async);
     }
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_reg_mu);
+    endArrowRegistrationLocked(conn, tableName);
   }
   return env.Undefined();
 }

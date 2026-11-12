@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { RecordBatch, Schema, Table } from 'apache-arrow'
-import { Session, drainPending } from '../../index.js'
+import { Session, registerArrowReader, drainPending } from '../../index.js'
 
 describe('Session.queryArrow — direct C Data output', () => {
   it('rejects rc.2 and older native engines before calling the Arrow ABI', async () => {
@@ -254,5 +254,30 @@ describe('Session.queryArrowStream — incremental C Data batches', () => {
         for await (const _ of reader) { /* consume until the engine fails */ }
       })()).rejects.toThrow(/arrow stream failure/)
     } finally { session.close(); await drainPending() }
+  })
+
+  it('does not block the JS producer when cancelling an idle stream on a busy connection', async () => {
+    const session = new Session()
+    const idle = session.queryArrowStream('SELECT toInt32(1) AS x')
+    const arrow = require('apache-arrow') as typeof import('apache-arrow')
+    const batch = (x: number) => new arrow.Table({
+      x: arrow.vectorFromArray([x], new arrow.Int32()),
+    }).batches[0]!
+    async function* batches() {
+      yield batch(1)
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      yield batch(2)
+    }
+    const source = await registerArrowReader(batches(), { session })
+    try {
+      const pending = session.queryAsync(`SELECT sum(x) FROM arrowstream('${source.name}')`, { format: 'CSV' })
+      const started = Date.now()
+      idle.cancel()
+      expect(Date.now() - started).toBeLessThan(50)
+      expect((await pending).text().trim()).toBe('3')
+      await source.producerDone
+      await drainPending()
+      await expect(session.queryArrow('SELECT toInt32(4) AS x')).resolves.toBeDefined()
+    } finally { idle.cancel(); await source.close(); session.close(); await drainPending() }
   })
 })
