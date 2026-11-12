@@ -80,9 +80,11 @@ export interface RuntimeArrowColumn {
   nullCount: number
   /** `[validity bitmap | null, data, offsets?]`. Offsets is Utf8-only. */
   buffers: ReadonlyArray<Buffer | null>
+  dictionary?: { format: string; length: number; nullCount: number; buffers: ReadonlyArray<Buffer | null> }
 }
 
 export interface Runtime {
+  _assertArrowCore(): void
   Session: RuntimeSessionCtor
   queryAsync(query: string, opts?: RuntimeQueryOptions): Promise<ChdbResult>
   queryBindAsync(query: string, params: object, opts?: RuntimeQueryOptions): Promise<ChdbResult>
@@ -92,9 +94,20 @@ export interface Runtime {
     connection: unknown,
     tableName: string,
     columns: ReadonlyArray<RuntimeArrowColumn>,
-  ): void
-  /** Remove a previously registered arrow table. */
-  _arrowUnregister(connection: unknown, tableName: string): void
+  ): unknown
+  _arrowRegisterBatches(
+    connection: unknown,
+    tableName: string,
+    batches: ReadonlyArray<ReadonlyArray<RuntimeArrowColumn>>,
+  ): unknown
+  _arrowRegisterReader(connection: unknown, tableName: string, firstBatch: ReadonlyArray<RuntimeArrowColumn>): {
+    handle: unknown; token: unknown
+  }
+  _arrowPushReaderBatch(handle: unknown, batch: ReadonlyArray<RuntimeArrowColumn>): Promise<void>
+  _arrowFinishReader(handle: unknown, error?: string): void
+  _arrowCancelReader(handle: unknown): void
+  /** Remove a registered table, optionally deferring until native scans drain. */
+  _arrowUnregister(connection: unknown, tableName: string, token: unknown, defer?: boolean): boolean
 }
 
 let cached: Runtime | undefined

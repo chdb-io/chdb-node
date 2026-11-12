@@ -1,4 +1,5 @@
 #pragma once
 
-char *Query(const char *query, const char *format);
-char *QuerySession(const char *query, const char *format, const char *path);
+#include <node_api.h>
+
+char *Query(const char *query, const char *format, char **error_message, napi_env owner);

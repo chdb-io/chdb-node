@@ -38,6 +38,11 @@
       "require": "./dist/libchdb/index.js",
       "default": "./dist/libchdb/index.js"
     },
+    "./arrow": {
+      "types": "./dist/arrow-entry.d.ts",
+      "import": "./arrow.mjs",
+      "require": "./dist/arrow-entry.js"
+    },
     "./agents": {
       "types": "./integrations/agents/index.d.mts",
       "import": "./integrations/agents/index.mjs"
@@ -92,6 +97,7 @@
   "files": [
     "index.js",
     "index.mjs",
+    "arrow.mjs",
     "index.d.ts",
     "dist",
     "example.js",
@@ -121,10 +127,10 @@
     "node-gyp-build": "^4.6.0"
   },
   "optionalDependencies": {
-    "@chdb/lib-darwin-arm64": "26.11.0-rc.2.1",
-    "@chdb/lib-darwin-x64": "26.11.0-rc.2.1",
-    "@chdb/lib-linux-arm64-gnu": "26.11.0-rc.2.1",
-    "@chdb/lib-linux-x64-gnu": "26.11.0-rc.2.1"
+    "@chdb/lib-darwin-arm64": "26.11.0-rc.3.1",
+    "@chdb/lib-darwin-x64": "26.11.0-rc.3.1",
+    "@chdb/lib-linux-arm64-gnu": "26.11.0-rc.3.1",
+    "@chdb/lib-linux-x64-gnu": "26.11.0-rc.3.1"
   },
   "peerDependencies": {
     "@clickhouse/client": ">=1.23.0",

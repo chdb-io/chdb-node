@@ -144,14 +144,19 @@ somewhere later.
 | Server-side parameter binding (`{name:Type}`) | ✅ |
 | Insert (object / positional rows) | ✅ |
 | Streaming results (`AsyncIterable`) | ✅ |
-| Arrow **output** (`format: 'arrow'` + `toArrow()`) | ✅ |
+| Arrow IPC **output** (`format: 'arrow'` + `toArrow()`) | ✅ |
 | AbortSignal / timeout | ✅ (single-shot is honest: rejects early; native runs to completion) |
-| Arrow **scan** (`registerArrowTable`, Arrow input) | ⏳ follow-up |
+| Direct Arrow **scan**, reader, typed results, and bulk insert | ✅ in PR #104 (rc.3 native packages pending) |
 | Arrow zero-copy (M2, `{ zeroCopy: true }`) | ⏳ follow-up |
 | chDB ↔ `@clickhouse/client` integration (`chdb/connection`, **experimental**) | ✅ |
 | Durable V1 control plane (`chdb/durable`, **experimental**) | ✅ pure TS, engine injected |
 | Default durable engine over the addon (`chdb/durable/node`) | ✅ |
 | Remote object storage for durable (`chdb/durable/s3`) | ✅ verified on AWS S3 and MinIO; R2 untested |
+
+See the [Arrow guide](docs/arrow.md) for examples, lifecycle rules, and the
+difference between direct C Data/C Stream and the existing Arrow IPC path.
+The direct APIs require chdb-core v26.11.0-rc.3; they are not in the currently
+published npm platform packages.
 
 ### chDB ↔ `@clickhouse/client` integration (`chdb/connection`, experimental)
 

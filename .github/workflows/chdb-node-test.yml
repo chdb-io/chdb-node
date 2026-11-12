@@ -218,7 +218,9 @@ jobs:
     # installed `chdb` package — the Node analogue of chDB Python's "pip install
     # the built wheel, then run the suite". Proves the published shape actually
     # loads and runs, not just the in-repo source.
-    runs-on: ubuntu-latest
+    # Keep the portable-builder host stable; the rolling ubuntu-latest image
+    # (26.04) cancelled the AlmaLinux re-link step before packaging on #104.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -246,7 +248,8 @@ jobs:
           # subpackage from the registry — the cleanroom then tests the released
           # binary instead of the one just built, which is how a non-relocatable
           # binary (chdb-io/chdb-node#50) shipped past a green cleanroom.
-          export CHDB_LIB_VERSION="$(grep -E '^LIBCHDB_NPM_VERSION=' update_libchdb.sh | cut -d= -f2)"
+          CHDB_LIB_VERSION="$(grep -E '^LIBCHDB_NPM_VERSION=' update_libchdb.sh | cut -d= -f2)"
+          export CHDB_LIB_VERSION
           npm run build:platform
           MAIN_TGZ="$PWD/$(npm pack --silent)"
           SUB_DIR="$PWD/npm/@chdb/lib-linux-x64-gnu"
@@ -257,7 +260,7 @@ jobs:
         run: |
           mkdir -p /tmp/cleanroom && cd /tmp/cleanroom
           npm init -y >/dev/null
-          npm install --no-save "$SUB_TGZ" "$MAIN_TGZ"
+          npm install --no-save "$SUB_TGZ" "$MAIN_TGZ" apache-arrow@21.1.0
           # The exact binary that will be dlopen'd must be relocatable. Assert it
           # directly on the INSTALLED file — this also fails loudly (instead of a
           # cryptic dlopen error) if npm resolved the subpackage from the registry
@@ -265,6 +268,7 @@ jobs:
           INSTALLED_NODE="node_modules/@chdb/lib-linux-x64-gnu/chdb_node.node"
           bash "$GITHUB_WORKSPACE/scripts/assert-relocatable.sh" "$INSTALLED_NODE"
           cp "$GITHUB_WORKSPACE/scripts/smoke-e2e.mjs" ./smoke-e2e.mjs
+          cp "$GITHUB_WORKSPACE/scripts/smoke-arrow-e2e.mjs" ./smoke-arrow-e2e.mjs
           # Relocation-faithful e2e: delete the build-machine libchdb.so so a
           # baked absolute/build-dir library reference (chdb-io/chdb-node#50)
           # can no longer be satisfied from the build tree. The installed package
@@ -273,9 +277,12 @@ jobs:
           # passes on the build runner even when the binary is unshippable.
           rm -f "$GITHUB_WORKSPACE/libchdb.so"
           node smoke-e2e.mjs
+          node smoke-arrow-e2e.mjs
       - name: The same install has to run on Debian bookworm
         # The symbol assert reads the binary; this runs it. bookworm is older
         # than every GitHub runner image and is the base of the node:22 /
         # node:20 / node:lts images, so it is where users first meet a binary
         # that demands a newer libstdc++ or glibc than they have.
-        run: docker run --rm -v /tmp/cleanroom:/w -w /w node:22-bookworm node smoke-e2e.mjs
+        run: |
+          docker run --rm -v /tmp/cleanroom:/w -w /w node:22-bookworm node smoke-e2e.mjs
+          docker run --rm -v /tmp/cleanroom:/w -w /w node:22-bookworm node smoke-arrow-e2e.mjs

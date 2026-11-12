@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { registerArrowTable, selectFrom, chTable, ChdbCompileError, Session } from '../../../index.js'
+import { registerArrowTable, registerArrowSource, selectFrom, chTable, ChdbCompileError, Session, drainPending } from '../../../index.js'
+import { Table, Field, List, Int32, Int64, Uint64, Float32, Float64, Bool, Utf8, Binary, TimestampMillisecond, Decimal, vectorFromArray } from 'apache-arrow'
 
 // Arrow C Data Interface input — register a JS columnar dataset as
 // `arrowstream('<name>')` and read it through the regular builder. Single-pass
@@ -7,6 +8,238 @@ import { registerArrowTable, selectFrom, chTable, ChdbCompileError, Session } fr
 // repeated reads against the same table.
 
 describe('registerArrowTable — round-trips JS data through the engine', () => {
+  it('generates distinct opaque names for independent Arrow sources', async () => {
+    const session = new Session()
+    const batch = new Table({ v: vectorFromArray([7], new Int32()) }).batches[0]!
+    const one = registerArrowSource(batch, { session })
+    const two = registerArrowSource(batch, { session })
+    try {
+      expect(one.name).toMatch(/^__chdb_arrow_[0-9a-f]{32}$/)
+      expect(two.name).not.toBe(one.name)
+      const result = await session.queryAsync(
+        `SELECT a.v + b.v AS total FROM arrowstream('${one.name}') AS a CROSS JOIN arrowstream('${two.name}') AS b`,
+        { format: 'CSV' },
+      )
+      expect(result.text().trim()).toBe('14')
+    } finally {
+      one.close()
+      two.close()
+      session.close()
+    }
+  })
+
+  it('accepts a one-batch apache-arrow Table with nullable primitive buffers', async () => {
+    const input = new Table({
+      v: vectorFromArray([1, null, 3], new Int32()),
+      s: vectorFromArray(['é', null, '東京'], new Utf8()),
+    })
+    expect(input.batches).toHaveLength(1)
+    const t = registerArrowTable('arr_js_table', input)
+    try {
+      const rows = (await selectFrom(chTable.arrowstream('arr_js_table').as('t'))
+        .select(['v', 's']).execute()) as { v: number | null; s: string | null }[]
+      expect(rows).toEqual([{ v: 1, s: 'é' }, { v: null, s: null }, { v: 3, s: '東京' }])
+    } finally {
+      t.close()
+    }
+  })
+
+  it('accepts Int64, Float64, and bit-packed Bool from a RecordBatch', async () => {
+    const input = new Table({
+      big: vectorFromArray([9_223_372_036_854_775_807n, 2n], new Int64()),
+      score: vectorFromArray([1.25, 2.5], new Float64()),
+      flag: vectorFromArray([true, false], new Bool()),
+    })
+    const t = registerArrowTable('arr_js_primitives', input.batches[0]!)
+    try {
+      const rows = (await selectFrom(chTable.arrowstream('arr_js_primitives').as('t'))
+        .select(['big', 'score', 'flag']).execute()) as { big: string; score: number; flag: boolean }[]
+      expect(rows).toEqual([
+        { big: '9223372036854775807', score: 1.25, flag: true },
+        { big: '2', score: 2.5, flag: false },
+      ])
+    } finally {
+      t.close()
+    }
+  })
+
+  it('accepts unsigned integers, Float32, and Binary from a RecordBatch', async () => {
+    const input = new Table({
+      u: vectorFromArray([18_446_744_073_709_551_615n, 2n], new Uint64()),
+      f: vectorFromArray([1.5, 2.5], new Float32()),
+      b: vectorFromArray([new Uint8Array([0, 255]), new Uint8Array([65])], new Binary()),
+    })
+    const session = new Session()
+    const t = registerArrowTable('arr_js_more_primitives', input.batches[0]!, { session })
+    try {
+      const result = await session.queryAsync(
+        "SELECT toString(u) AS u, f, hex(b) AS encoded FROM arrowstream('arr_js_more_primitives')",
+        { format: 'JSONEachRow' },
+      )
+      expect(result.text().trim().split('\n').map((line) => JSON.parse(line))).toEqual([
+        { u: '18446744073709551615', f: 1.5, encoded: '00FF' },
+        { u: '2', f: 2.5, encoded: '41' },
+      ])
+    } finally {
+      t.close()
+      session.close()
+    }
+  })
+
+  it('preserves a timezone-tagged Arrow timestamp as DateTime64', async () => {
+    const session = new Session()
+    const input = new Table({ ts: vectorFromArray([1577836800123], new TimestampMillisecond('UTC')) })
+    const t = registerArrowSource(input, { session })
+    try {
+      const result = await session.queryAsync(
+        `SELECT toUnixTimestamp64Milli(ts) FROM arrowstream('${t.name}')`, { format: 'CSV' },
+      )
+      expect(result.text().trim()).toBe('1577836800123')
+    } finally {
+      t.close()
+      session.close()
+    }
+  })
+
+  it('imports a Decimal128 source without a JS numeric conversion', async () => {
+    const session = new Session()
+    const input = new Table({ d: vectorFromArray([new Uint32Array([123, 0, 0, 0])], new Decimal(2, 18, 128)) })
+    const t = registerArrowSource(input, { session })
+    try {
+      const result = await session.queryAsync(
+        `SELECT toString(d) FROM arrowstream('${t.name}')`, { format: 'CSV' },
+      )
+      expect(result.text().trim()).toBe('"1.23"')
+      const wide = new Table({ d: vectorFromArray(
+        [new Uint32Array([123, 0, 0, 0, 0, 0, 0, 0])], new Decimal(2, 76, 256),
+      ) })
+      const wideHandle = registerArrowSource(wide, { session })
+      try {
+        const value = await session.queryAsync(
+          `SELECT toString(d) FROM arrowstream('${wideHandle.name}')`, { format: 'CSV' },
+        )
+        expect(value.text().trim()).toBe('"1.23"')
+      } finally {
+        wideHandle.close()
+      }
+    } finally {
+      t.close()
+      session.close()
+    }
+  })
+
+  it('reads a materialized multi-batch Table and refreshes its one-shot C Stream', async () => {
+    const single = new Table({ v: vectorFromArray([1, 2], new Int32()) })
+    const chunks = new Table([single.batches[0]!, single.batches[0]!])
+    expect(chunks.batches.length).toBeGreaterThan(1)
+    const t = registerArrowTable('arr_multi_batch', chunks)
+    try {
+      const read = async () => (await selectFrom(chTable.arrowstream('arr_multi_batch').as('t'))
+        .select('v').orderBy('v').execute()) as { v: number }[]
+      expect(await read()).toEqual([{ v: 1 }, { v: 1 }, { v: 2 }, { v: 2 }])
+      t.refresh()
+      expect(await read()).toEqual([{ v: 1 }, { v: 1 }, { v: 2 }, { v: 2 }])
+    } finally {
+      t.close()
+    }
+  })
+
+  it('reads the default dictionary-encoded JS string Table', async () => {
+    const dictionary = new Table({ s: vectorFromArray(['x', null, 'z']) })
+    const t = registerArrowTable('arr_dictionary', dictionary)
+    try {
+      const rows = (await selectFrom(chTable.arrowstream('arr_dictionary').as('t'))
+        .select('s').execute()) as { s: string | null }[]
+      expect(rows).toEqual([{ s: 'x' }, { s: null }, { s: 'z' }])
+    } finally {
+      t.close()
+    }
+  })
+
+  it('reads a sliced dictionary-index column with nulls', async () => {
+    const dictionary = new Table({ s: vectorFromArray(['a', null, 'c', 'd']) }).slice(1, 4)
+    const t = registerArrowTable('arr_dictionary_slice', dictionary)
+    try {
+      const rows = (await selectFrom(chTable.arrowstream('arr_dictionary_slice').as('t'))
+        .select('s').execute()) as { s: string | null }[]
+      expect(rows).toEqual([{ s: null }, { s: 'c' }, { s: 'd' }])
+    } finally {
+      t.close()
+    }
+  })
+
+  it('rejects unsupported nested input explicitly instead of flattening rows', () => {
+    const input = new Table({ items: vectorFromArray([[1, 2]], new List(new Field('item', new Int32(), true))) })
+    expect(() => registerArrowSource(input)).toThrow(/unsupported Arrow type/)
+  })
+
+  it('rebases sliced validity and bit-packed Bool without materializing rows', async () => {
+    const table = new Table({
+      v: vectorFromArray([1, null, 3], new Int32()),
+      s: vectorFromArray(['a', null, 'c'], new Utf8()),
+      b: vectorFromArray([true, false, true], new Bool()),
+    })
+    const t = registerArrowTable('arr_slice', table.slice(1))
+    try {
+      const rows = (await selectFrom(chTable.arrowstream('arr_slice').as('t'))
+        .select(['v', 's', 'b']).execute()) as { v: number | null; s: string | null; b: boolean }[]
+      expect(rows).toEqual([{ v: null, s: null, b: false }, { v: 3, s: 'c', b: true }])
+    } finally {
+      t.close()
+    }
+  })
+
+  it('rebases a slice starting past the first bitmap byte', async () => {
+    const values = Array.from({ length: 20 }, (_, i) => i === 10 ? null : i)
+    const table = new Table({
+      v: vectorFromArray(values, new Int32()),
+      b: vectorFromArray(values.map((_, i) => i % 2 === 0), new Bool()),
+    })
+    const t = registerArrowTable('arr_slice_bits', table.slice(9, 13))
+    try {
+      const rows = (await selectFrom(chTable.arrowstream('arr_slice_bits').as('t'))
+        .select(['v', 'b']).execute()) as { v: number | null; b: boolean }[]
+      expect(rows).toEqual([
+        { v: 9, b: false }, { v: null, b: true }, { v: 11, b: false }, { v: 12, b: true },
+      ])
+    } finally {
+      t.close()
+    }
+  })
+
+  it('keeps the original registration after a duplicate Arrow batch fails', async () => {
+    const input = new Table({ v: vectorFromArray([7], new Int32()) })
+    const t = registerArrowTable('arr_duplicate_batch', input.batches[0]!)
+    try {
+      expect(() => registerArrowTable('arr_duplicate_batch', input.batches[0]!)).toThrow(/failed/)
+      const rows = (await selectFrom(chTable.arrowstream('arr_duplicate_batch').as('t'))
+        .select('v').execute()) as { v: number }[]
+      expect(rows).toEqual([{ v: 7 }])
+    } finally {
+      t.close()
+    }
+  })
+
+  it('keeps the schema for an empty RecordBatch', async () => {
+    const empty = new Table({ v: vectorFromArray([], new Int32()) })
+    const session = new Session()
+    try {
+      const t = registerArrowTable('arr_empty_batch', empty.batches[0]!, { session })
+      try {
+        const result = await session.queryAsync(
+          "SELECT v FROM arrowstream('arr_empty_batch')", { format: 'arrow' },
+        )
+        const output = result.toArrow() as Table
+        expect(output.numRows).toBe(0)
+        expect(output.schema.fields.map((f) => [f.name, f.type.toString()])).toEqual([['v', 'Int32']])
+      } finally {
+        t.close()
+      }
+    } finally {
+      session.close()
+    }
+  })
+
   it('registers and unregisters on the supplied Session connection', async () => {
     const session = new Session()
     try {
@@ -48,6 +281,138 @@ describe('registerArrowTable — round-trips JS data through the engine', () => 
     expect(() => t.refresh()).toThrow(/session has no active connection/)
     expect(() => t.close()).not.toThrow()
     expect(() => t.close()).not.toThrow()
+  })
+
+  it('defers close during an async scan and rejects refresh until it drains', async () => {
+    const session = new Session()
+    const t = registerArrowTable('arr_close_during_scan', [
+      { name: 'x', type: 'Int32', data: new Int32Array([7, 8, 9]) },
+    ], { session })
+    try {
+      const query = session.queryAsync(
+        "SELECT x, sleepEachRow(0.05) FROM arrowstream('arr_close_during_scan') ORDER BY x",
+        { format: 'JSONEachRow' },
+      )
+      expect(() => t.refresh()).toThrow(/active/)
+      t.close()
+      const result = await query
+      expect(result.text().trim().split('\n').map((line) => JSON.parse(line).x)).toEqual([7, 8, 9])
+      await drainPending()
+      await expect(session.queryAsync(
+        "SELECT x FROM arrowstream('arr_close_during_scan')", { format: 'JSONEachRow' },
+      )).rejects.toThrow(/arr_close_during_scan|not found/i)
+    } finally {
+      t.close()
+      session.close()
+    }
+  })
+
+  it('keeps a source registered until an idle lazy stream is cancelled', async () => {
+    const session = new Session()
+    const t = registerArrowTable('arr_lazy_close', [
+      { name: 'x', type: 'Int32', data: new Int32Array([1]) },
+    ], { session })
+    try {
+      const stream = session.queryStream("SELECT x FROM arrowstream('arr_lazy_close')")
+      t.close()
+      stream.cancel()
+      await drainPending()
+      await expect(session.queryAsync(
+        "SELECT x FROM arrowstream('arr_lazy_close')", { format: 'JSONEachRow' },
+      )).rejects.toThrow(/arr_lazy_close|not found/i)
+    } finally {
+      t.close()
+      session.close()
+    }
+  })
+
+  it('waits for an in-flight Arrow fetch and its cancellation cleanup', async () => {
+    const session = new Session()
+    const t = registerArrowTable('arr_fetch_close', [
+      { name: 'x', type: 'Int32', data: new Int32Array([1, 2, 3]) },
+    ], { session })
+    try {
+      const stream = session.queryStream(
+        "SELECT x, sleepEachRow(0.05) FROM arrowstream('arr_fetch_close') SETTINGS max_block_size=1",
+      )
+      const reader = stream[Symbol.asyncIterator]()
+      const next = reader.next()
+      t.close()
+      stream.cancel()
+      await next
+      await reader.return?.()
+      await drainPending()
+      await expect(session.queryAsync(
+        "SELECT x FROM arrowstream('arr_fetch_close')", { format: 'JSONEachRow' },
+      )).rejects.toThrow(/arr_fetch_close|not found/i)
+    } finally {
+      t.close()
+      session.close()
+      await drainPending()
+    }
+  })
+
+  it('does not let a stale default-connection handle remove a later registration', async () => {
+    const stale = registerArrowTable('arr_default_reused', [
+      { name: 'x', type: 'Int32', data: new Int32Array([1]) },
+    ])
+    const session = new Session() // evicts the previous default connection
+    session.close()
+    const current = registerArrowTable('arr_default_reused', [
+      { name: 'x', type: 'Int32', data: new Int32Array([2]) },
+    ])
+    try {
+      stale.close()
+      const rows = (await selectFrom(chTable.arrowstream('arr_default_reused').as('t'))
+        .select('x').execute()) as { x: number }[]
+      expect(rows).toEqual([{ x: 2 }])
+    } finally {
+      stale.close()
+      current.close()
+    }
+  })
+
+  it('keeps a default Arrow registration when Session construction fails', async () => {
+    const source = registerArrowSource(new Table({ x: vectorFromArray([7], new Int32()) }))
+    try {
+      expect(() => new Session('', { connectionArgs: ['--path=/invalid'] }))
+        .toThrow(/--path/)
+      const result = await selectFrom(chTable.arrowstream(source.name)).select('x').execute()
+      expect(result).toEqual([{ x: 7 }])
+      source.close()
+      const replacement = registerArrowTable(source.name,
+        new Table({ x: vectorFromArray([8], new Int32()) }))
+      replacement.close()
+    } finally { source.close(); await drainPending() }
+  })
+
+  it('waits for another Session\'s lazy stream before closing a source connection', async () => {
+    const source = new Session()
+    const reader = new Session(source.path)
+    const t = registerArrowTable('arr_cross_session', [
+      { name: 'x', type: 'Int32', data: new Int32Array([1, 2]) },
+    ], { session: source })
+    try {
+      const stream = reader.queryStream("SELECT x FROM arrowstream('arr_cross_session')")
+      source.close()
+      t.close()
+      // A stream is an open cursor even before its first fetch. Native source
+      // teardown must wait for cancellation rather than dangling its buffers.
+      let drained = false
+      const draining = drainPending().then(() => { drained = true })
+      await Promise.resolve()
+      expect(drained).toBe(false)
+      stream.cancel()
+      await draining
+      await expect(reader.queryAsync(
+        "SELECT x FROM arrowstream('arr_cross_session')", { format: 'JSONEachRow' },
+      )).rejects.toThrow(/arr_cross_session|not found/i)
+    } finally {
+      t.close()
+      source.close()
+      reader.close()
+      await drainPending()
+    }
   })
 
   it('reads Int32, Float64, and Utf8 columns in row order', async () => {
@@ -102,25 +467,20 @@ describe('registerArrowTable — round-trips JS data through the engine', () => 
     }
   })
 
-  it('nulls show up as null after a Nullable cast', async () => {
+  it('preserves nullable Int32 and UTF-8 values without a cast', async () => {
     const t = registerArrowTable('arr_nulls', [
       { name: 'v', type: 'Int32', data: new Int32Array([1, 0, 3]), nulls: [true, false, true] },
+      { name: 's', type: 'String', data: ['é', '', '東京'], nulls: [true, false, true] },
     ])
     try {
-      // chdb's arrowstream column comes through as the non-nullable inferred type;
-      // a `nullIf`/`Nullable` projection surfaces the original NULL semantics.
       const rows = (await selectFrom(chTable.arrowstream('arr_nulls').as('t'))
-        .select('v')
-        .orderBy('v')
-        .execute()) as { v: number }[]
-      // The non-null rows are 1 and 3; one row's data slot is 0 (the null
-      // placeholder), and that's what the engine reads since we don't cast
-      // through a Nullable schema here. We assert "all three rows come back"
-      // and that the two non-null values are present.
-      expect(rows).toHaveLength(3)
-      const values = rows.map((r) => r.v).sort((a, b) => a - b)
-      expect(values).toContain(1)
-      expect(values).toContain(3)
+        .select(['v', 's'])
+        .execute()) as { v: number | null; s: string | null }[]
+      expect(rows).toEqual([
+        { v: 1, s: 'é' },
+        { v: null, s: null },
+        { v: 3, s: '東京' },
+      ])
     } finally {
       t.close()
     }
