@@ -145,10 +145,17 @@ describe('Session.queryArrowStream — incremental C Data batches', () => {
         'SELECT toLowCardinality(toString(number % 2)) AS s FROM numbers(7) SETTINGS max_block_size=2',
         { lowCardinalityAsDictionary: true },
       )
-      const values: string[] = []
-      for await (const value of reader) values.push(...(value as RecordBatch).toArray().map((row) => row.s))
+      const batches: RecordBatch[] = []
+      for await (const value of reader) batches.push(value as RecordBatch)
+      const values = new (require('apache-arrow').Table)(reader.schema, batches)
+        .toArray().map((row: { s: string }) => row.s)
       expect(values).toEqual(['0', '1', '0', '1', '0', '1', '0'])
       expect((reader.schema as Schema).fields[0]!.type.toString()).toBe('Dictionary<Uint32, Utf8>')
+      const bound = await session.queryArrowBind(
+        'SELECT toLowCardinality(toString(number % 2)) AS s FROM numbers(5) WHERE number < {limit:UInt64} SETTINGS max_block_size=1',
+        { limit: 4 }, { lowCardinalityAsDictionary: true },
+      ) as Table
+      expect(bound.toArray().map((row) => row.s)).toEqual(['0', '1', '0', '1'])
     } finally {
       session.close()
     }
@@ -192,5 +199,60 @@ describe('Session.queryArrowStream — incremental C Data batches', () => {
       session.close()
       await drainPending()
     }
+  })
+
+  it('rejects a synchronous start while this connection has async work', async () => {
+    const session = new Session()
+    try {
+      const pending = session.queryAsync('SELECT sleep(0.15)', { format: 'CSV' })
+      expect(() => session.queryArrowStream('SELECT toInt32(1) AS x')).toThrow(/in-flight operation/)
+      await pending
+      const reader = session.queryArrowStream('SELECT toInt32(1) AS x')
+      for await (const _ of reader) { /* drains normally once idle */ }
+    } finally { session.close(); await drainPending() }
+  })
+
+  it('rejects overlapping native fetches and defers direct cancel until the worker finishes', async () => {
+    const native = require('../../build/Release/chdb_node.node') as {
+      StartArrowStream(conn: unknown, sql: string, opts: object): unknown
+      FetchArrowStream(handle: unknown): Promise<unknown>
+      CancelArrowStream(handle: unknown): void
+    }
+    const session = new Session()
+    const handle = native.StartArrowStream(session.connection,
+      'SELECT toInt32(number) AS x FROM numbers(4) WHERE sleepEachRow(0.03)=0', {})
+    try {
+      const first = native.FetchArrowStream(handle)
+      await expect(native.FetchArrowStream(handle)).rejects.toThrow(/already in progress/)
+      native.CancelArrowStream(handle)
+      await first
+      await expect(native.FetchArrowStream(handle)).rejects.toThrow(/closed/)
+    } finally { native.CancelArrowStream(handle); session.close(); await drainPending() }
+  })
+
+  it('allows only one active JS iterator for a native stream', async () => {
+    const session = new Session()
+    const reader = session.queryArrowStream('SELECT toInt32(number) AS x FROM numbers(3)')
+    try {
+      const first = reader[Symbol.asyncIterator]()
+      const second = reader[Symbol.asyncIterator]()
+      const pending = first.next()
+      await expect(second.next()).rejects.toThrow(/active iterator/)
+      await pending
+      await first.return?.()
+      await drainPending()
+    } finally { reader.cancel(); session.close(); await drainPending() }
+  })
+
+  it('preserves a mid-stream engine error instead of a generic fetch failure', async () => {
+    const session = new Session()
+    try {
+      const reader = session.queryArrowStream(
+        "SELECT throwIf(number = 2, 'arrow stream failure') AS x FROM numbers(4) SETTINGS max_block_size=1",
+      )
+      await expect((async () => {
+        for await (const _ of reader) { /* consume until the engine fails */ }
+      })()).rejects.toThrow(/arrow stream failure/)
+    } finally { session.close(); await drainPending() }
   })
 })

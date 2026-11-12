@@ -63,8 +63,16 @@ export async function registerArrowReader(
     // Do not cross apache-arrow's independent ESM/CJS constructors: build a
     // zero-row structural batch from the public schema shape instead.
     firstBatch = { schema, numCols: schema.fields.length, numRows: 0,
-      data: { children: schema.fields.map(() => ({ offset: 0, length: 0, nullCount: 0,
-        values: new Uint8Array(0), valueOffsets: new Int32Array([0]) })) } }
+      data: { children: schema.fields.map((field) => {
+        const type = field.type as { toString(): string; indices?: { toString(): string } }
+        const dictionary = type.toString().startsWith('Dictionary<')
+          ? { data: [{ offset: 0, length: 0, nullCount: 0,
+            values: new Uint8Array(0), valueOffsets: new Int32Array([0]) }] }
+          : undefined
+        return { offset: 0, length: 0, nullCount: 0,
+          values: type.indices?.toString() === 'Uint32' ? new Uint32Array(0) : new Int32Array(0),
+          valueOffsets: new Int32Array([0]), dictionary }
+      }) } }
   } else firstBatch = first.value
 
   const rt = runtime()
@@ -92,7 +100,7 @@ export async function registerArrowReader(
       }
     } catch (e) {
       if (!closing) {
-        rt._arrowFinishReader(native, (e as Error).message || String(e) || 'Arrow reader producer failed')
+        rt._arrowFinishReader(native, (e instanceof Error ? e.message : String(e)) || 'Arrow reader producer failed')
         throw e
       }
     }

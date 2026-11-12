@@ -86,6 +86,10 @@ The native queue holds at most two batches not yet handed to
 core; producing another waits for capacity. Core can retain delivered batches,
 so this is not a bound on the entire query's memory. A cancelled producer
 should cooperate with iterator `return()` to release its own resources.
+Use `queryAsync` or another async query API while a JS Arrow reader is
+registered: synchronous `query`/`queryBind` on its connection are rejected
+because blocking the event loop would prevent the producer from refilling
+the queue.
 
 ## Read typed results
 
@@ -116,6 +120,11 @@ Use `queryArrowBind` and `queryArrowStreamBind` for server-side
 `await session.queryArrowBind('SELECT {id:Int32} AS id', { id: 7 })`.
 For TypeScript return types without making the base `chdb` import require
 `apache-arrow`, use the helpers from `chdb/arrow`.
+Only one iterator may consume a given Arrow result reader at a time; cancel
+it before closing its Session if you stop early.
+Await earlier operations on the same Session before opening a direct Arrow
+stream: its synchronous startup rejects a busy connection instead of blocking
+the JS event loop.
 
 ## Limits and errors
 

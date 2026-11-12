@@ -462,12 +462,15 @@ class ChdbArrowReader {
     this._handle = handle;
     this._closed = false;
     this._inflight = null;
+    this._iterating = false;
     this.schema = null; // available after the first fetch, even for zero rows
     activeStreams.add(this);
   }
   get closed() { return this._closed; }
 
   async *[Symbol.asyncIterator]() {
+    if (this._iterating) throw new ChdbStreamError("Arrow reader already has an active iterator");
+    this._iterating = true;
     try {
       while (!this._closed) {
         let raw;
@@ -485,6 +488,7 @@ class ChdbArrowReader {
         } finally {
           this._inflight = null;
         }
+        if (this._closed) break;
         const table = arrowTableFromDirect(raw);
         this.schema = table.schema;
         if (raw.done) {
@@ -499,6 +503,7 @@ class ChdbArrowReader {
         for (const batch of table.batches) yield batch;
       }
     } finally {
+      this._iterating = false;
       this.cancel();
     }
   }
@@ -821,10 +826,6 @@ class Session {
     try {
       const key = this.path ? resolvePath(this.path) : this.path;
       this._key = key; // normalized directory, for the deferred-teardown bookkeeping
-      // Creating a Session can evict the default connection. Its Arrow names
-      // belong to that old connection, even if a new default is opened later.
-      defaultArrowGeneration++;
-      retireArrowRegistrations(null);
       this.connection = connectionArgs
         ? chdbNode.CreateConnection(key, connectionArgs)
         : chdbNode.CreateConnection(key);
@@ -836,6 +837,10 @@ class Session {
       if (this.isTemp) { try { this.#removeTempDir(); } catch (_) {} }
       throw new ChdbConnectionError("Failed to create connection");
     }
+    // A successful bind can evict the default connection. A rejected bind
+    // leaves it alive, so keep its Arrow registration tokens in that case.
+    defaultArrowGeneration++;
+    retireArrowRegistrations(null);
 
     ensureExitHook();
     openSessions.add(this);

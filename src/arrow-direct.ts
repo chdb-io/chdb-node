@@ -45,9 +45,9 @@ export function arrowTableFromDirect(raw: NativeArrowResult): unknown {
       default: throw new ChdbArrowError(`Unsupported direct Arrow format: ${format}`)
     }
   }
-  const fields = raw.fields.map((field) => new arrow.Field(field.name,
+  const fields = raw.fields.map((field, i) => new arrow.Field(field.name,
     field.dictionaryFormat
-      ? new arrow.Dictionary(typeFor(field.dictionaryFormat), typeFor(field.format) as Uint32)
+      ? new arrow.Dictionary(typeFor(field.dictionaryFormat), typeFor(field.format) as Uint32, i)
       : typeFor(field.format), field.nullable))
   const schema = new arrow.Schema(fields)
   const view = (buffer: Buffer): Uint8Array => new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)

@@ -372,6 +372,20 @@ describe('registerArrowTable — round-trips JS data through the engine', () => 
     }
   })
 
+  it('keeps a default Arrow registration when Session construction fails', async () => {
+    const source = registerArrowSource(new Table({ x: vectorFromArray([7], new Int32()) }))
+    try {
+      expect(() => new Session('', { connectionArgs: ['--path=/invalid'] }))
+        .toThrow(/--path/)
+      const result = await selectFrom(chTable.arrowstream(source.name)).select('x').execute()
+      expect(result).toEqual([{ x: 7 }])
+      source.close()
+      const replacement = registerArrowTable(source.name,
+        new Table({ x: vectorFromArray([8], new Int32()) }))
+      replacement.close()
+    } finally { source.close(); await drainPending() }
+  })
+
   it('waits for another Session\'s lazy stream before closing a source connection', async () => {
     const source = new Session()
     const reader = new Session(source.path)

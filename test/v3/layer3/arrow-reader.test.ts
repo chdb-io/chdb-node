@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { spawnSync } from 'node:child_process'
-import { Int32, Table, vectorFromArray } from 'apache-arrow'
-import { registerArrowReader, Session, drainPending } from '../../../index.js'
+import { Binary, Dictionary, Int32, Table, Utf8, vectorFromArray } from 'apache-arrow'
+import { registerArrowReader, registerArrowSource, Session, drainPending } from '../../../index.js'
 
 function batch(values: number[]) {
   return new Table({ x: vectorFromArray(values, new Int32()) }).batches[0]!
@@ -159,6 +159,99 @@ describe('registerArrowReader — bounded C Stream input', () => {
       session.close()
       await drainPending()
     }
+  })
+
+  it('registers an empty reader with a supported dictionary schema', async () => {
+    const session = new Session()
+    const schema = new Table({ s: vectorFromArray(['a'], new Dictionary(new Utf8(), new Int32())) }).schema
+    const source = await registerArrowReader({ schema, async *[Symbol.asyncIterator]() {} }, { session })
+    try {
+      const result = await session.queryAsync(`SELECT count() FROM arrowstream('${source.name}')`, { format: 'CSV' })
+      expect(result.text().trim()).toBe('0')
+    } finally { await source.close(); session.close(); await drainPending() }
+  })
+
+  it('unblocks SQL when a producer rejects with null', async () => {
+    const session = new Session()
+    async function* broken() { yield batch([1]); throw null }
+    const source = await registerArrowReader(broken(), { session })
+    try {
+      await expect(session.queryAsync(`SELECT x FROM arrowstream('${source.name}')`, { format: 'CSV' }))
+        .rejects.toThrow(/null/)
+      await expect(source.producerDone).rejects.toBeNull()
+    } finally { await source.close(); session.close(); await drainPending() }
+  })
+
+  it('rejects a dictionary-to-plain schema change in a reader and materialized batches', async () => {
+    const session = new Session()
+    const dictionary = new Table({ x: vectorFromArray(['a'], new Dictionary(new Utf8(), new Int32())) }).batches[0]!
+    const plain = batch([1]) // same field and Int32 index format, but no dictionary
+    const differentValues = new Table({
+      x: vectorFromArray([new Uint8Array([65])], new Dictionary(new Binary(), new Int32())),
+    }).batches[0]!
+    expect(() => registerArrowSource({ batches: [dictionary, plain] } as Table, { session }))
+      .toThrow(/schemas must match/)
+    expect(() => registerArrowSource({ batches: [dictionary, differentValues] } as Table, { session }))
+      .toThrow(/schemas must match/)
+    const source = await registerArrowReader([dictionary, plain], { session })
+    try {
+      await expect(session.queryAsync(`SELECT x FROM arrowstream('${source.name}')`, { format: 'CSV' }))
+        .rejects.toThrow(/schema changed/)
+      await expect(source.producerDone).rejects.toThrow(/schema changed/)
+    } finally { await source.close(); session.close(); await drainPending() }
+  })
+
+  it('rejects synchronous SQL before a JS producer can deadlock the event loop', () => {
+    const script = `
+      const a = require('apache-arrow'), m = require('./index.js');
+      (async () => {
+        const s = new m.Session();
+        const b = new a.Table({x: a.vectorFromArray([1], new a.Int32())}).batches[0];
+        async function* batches() { for (let i = 0; i < 10; i++) yield b; }
+        const h = await m.registerArrowReader(batches(), {session:s});
+        const sql = "SELECT count() FROM arrowstream('" + h.name + "')";
+        try {
+          for (const run of [() => s.query(sql), () => s.queryBind(sql, {})]) {
+            try { run(); throw Error('sync query unexpectedly ran'); }
+            catch (e) { if (!/requires an async query/.test(e.message)) throw e; }
+          }
+          const result = await s.queryAsync(sql, {format:'CSV'});
+          if (result.text().trim() !== '10') throw Error('async query failed');
+        } finally { await h.close(); s.close(); await m.drainPending(); }
+        console.log('done');
+      })().catch(e => { console.error(e); process.exitCode = 1; });
+    `
+    const child = spawnSync(process.execPath, ['-e', script], {
+      cwd: process.cwd(), encoding: 'utf8', timeout: 5_000,
+    })
+    expect(child.error).toBeUndefined()
+    expect(child.status).toBe(0)
+    expect(child.stdout).toContain('done')
+  })
+
+  it('can stream direct Arrow output from a live async reader without blocking its producer', () => {
+    const script = `
+      const a = require('apache-arrow'), m = require('./index.js');
+      (async () => {
+        const s = new m.Session();
+        const b = new a.Table({x: a.vectorFromArray([1], new a.Int32())}).batches[0];
+        async function* batches() { for (let i = 0; i < 10; i++) yield b; }
+        const h = await m.registerArrowReader(batches(), {session:s});
+        try {
+          const out = s.queryArrowStream("SELECT sum(x) AS total FROM arrowstream('" + h.name + "')");
+          const rows = [];
+          for await (const part of out) rows.push(...part.toArray());
+          if (rows[0].total !== 10n) throw Error('wrong result: ' + String(rows[0].total));
+        } finally { await h.close(); s.close(); await m.drainPending(); }
+        console.log('done');
+      })().catch(e => { console.error(e); process.exitCode = 1; });
+    `
+    const child = spawnSync(process.execPath, ['-e', script], {
+      cwd: process.cwd(), encoding: 'utf8', timeout: 5_000,
+    })
+    expect(child.error).toBeUndefined()
+    expect(child.status).toBe(0)
+    expect(child.stdout).toContain('done')
   })
 
   it('rejects a changed schema and cleans up after cancellation', async () => {

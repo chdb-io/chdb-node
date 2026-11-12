@@ -85,6 +85,13 @@ struct Registry {
 static Registry g_reg;
 static std::mutex g_reg_mu;
 static std::unordered_map<chdb_connection *, napi_env> g_conn_owner;
+static bool hasLiveAsyncArrowReader(chdb_connection * conn);
+static bool rejectSyncArrowReader(Napi::Env env, chdb_connection * conn) {
+  if (!hasLiveAsyncArrowReader(conn)) return false;
+  Napi::Error::New(env, "A live Arrow reader requires an async query; synchronous query would block its JS producer")
+      .ThrowAsJavaScriptException();
+  return true;
+}
 
 // Extra argv entries are the same `--setting=value` forms a `clickhouse local`
 // invocation takes, and they have to be given at connect: `--path` and
@@ -525,6 +532,7 @@ Napi::String QueryWrapper(const Napi::CallbackInfo &info) {
     Napi::TypeError::New(env, "String expected").ThrowAsJavaScriptException();
     return Napi::String::New(env, "");
   }
+  if (rejectSyncArrowReader(env, nullptr)) return Napi::String::New(env, "");
 
   std::string query = info[0].As<Napi::String>().Utf8Value();
   std::string format = info[1].As<Napi::String>().Utf8Value();
@@ -571,6 +579,7 @@ Napi::String QueryWithParamsWrapper(const Napi::CallbackInfo &info) {
     Napi::TypeError::New(env, "Usage: sql, format, params").ThrowAsJavaScriptException();
     return Napi::String::New(env, "");
   }
+  if (rejectSyncArrowReader(env, nullptr)) return Napi::String::New(env, "");
   std::string sql = info[0].As<Napi::String>();
   std::string format = info[1].As<Napi::String>();
   std::vector<std::string> names, values;
@@ -600,6 +609,7 @@ Napi::String QueryWithParamsConnectionWrapper(const Napi::CallbackInfo &info) {
     return Napi::String::New(env, "");
   }
   ChdbConnection conn = info[0].As<Napi::External<void>>().Data();
+  if (rejectSyncArrowReader(env, static_cast<chdb_connection *>(conn))) return Napi::String::New(env, "");
   std::string sql = info[1].As<Napi::String>();
   std::string format = info[2].As<Napi::String>();
   std::vector<std::string> names, values;
@@ -1159,6 +1169,7 @@ Napi::String QueryWithConnectionWrapper(const Napi::CallbackInfo & info) {
     }
 
     ChdbConnection conn = info[0].As<Napi::External<void>>().Data();
+    if (rejectSyncArrowReader(env, static_cast<chdb_connection *>(conn))) return Napi::String::New(env, "");
     std::string query = info[1].As<Napi::String>().Utf8Value();
     std::string format = info[2].As<Napi::String>().Utf8Value();
 
@@ -1514,10 +1525,13 @@ struct DirectArrowStreamState {
   chdb_connection conn;
   chdb_result * handle;
   bool closed = false;
+  bool fetching = false;       // managed on the owning JS event loop
+  bool cancelRequested = false;
 };
 
 static void closeDirectArrowStream(DirectArrowStreamState * state) {
   if (!state || state->closed) return;
+  if (state->fetching) { state->cancelRequested = true; return; }
   state->closed = true;
   if (state->handle) {
     chdb_stream_cancel_query(state->conn, state->handle);
@@ -1536,6 +1550,16 @@ Napi::Value StartArrowStreamWrapper(const Napi::CallbackInfo & info) {
   if (!conn || !*conn) {
     Napi::Error::New(env, "No active connection available").ThrowAsJavaScriptException();
     return env.Undefined();
+  }
+  // Starting the stream calls into the connection synchronously. A worker on
+  // that same connection may need this event loop to refill an Arrow reader.
+  {
+    std::lock_guard<std::mutex> lock(g_reg_mu);
+    if (inflight_locked(*conn) > 0) {
+      Napi::Error::New(env, "Cannot start Arrow stream while this connection has an in-flight operation")
+          .ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
   }
   chdb_arrow_options options;
   if (!parseDirectArrowOptions(env, info.Length() >= 3 ? info[2] : env.Undefined(), options)) return env.Undefined();
@@ -1572,7 +1596,7 @@ Napi::Value StartArrowStreamWrapper(const Napi::CallbackInfo & info) {
     Napi::Error::New(env, message).ThrowAsJavaScriptException();
     return env.Undefined();
   }
-  auto * state = new DirectArrowStreamState{*conn, handle, false};
+  auto * state = new DirectArrowStreamState{*conn, handle};
   return Napi::External<DirectArrowStreamState>::New(env, state, [](Napi::Env, DirectArrowStreamState * s) {
     closeDirectArrowStream(s);
     delete s;
@@ -1587,32 +1611,36 @@ public:
   Napi::Promise GetPromise() { return deferred_.Promise(); }
 
   void Execute() override {
-    if (!state_ || state_->closed || !state_->handle) { done_ = true; return; }
+    // The event loop owns state mutation. While fetching=true it defers cancel
+    // and the External is pinned by handleRef_, so this handle stays live.
     AbiArrayStream batch{};
     const chdb_state status = chdb_stream_fetch_arrow(
         state_->conn, state_->handle, reinterpret_cast<chdb_arrow_stream>(&batch));
     std::string error;
-    if (status != CHDBSuccess) error = "chdb_stream_fetch_arrow failed";
+    if (status != CHDBSuccess) {
+      if (const char * nativeError = chdb_result_error(state_->handle)) error = nativeError;
+      if (error.empty()) error = "chdb_stream_fetch_arrow failed";
+    }
     if (error.empty()) readDirectArrowStream(batch, fields_, batches_, error);
     if (batch.release) batch.release(&batch);
     if (!error.empty()) {
-      closeDirectArrowStream(state_);
       SetError(error);
       return;
     }
-    if (batches_.empty()) {
-      done_ = true;
-      chdb_destroy_query_result(state_->handle);
-      state_->handle = nullptr;
-      state_->closed = true;
-    }
+    done_ = batches_.empty();
   }
   void OnOK() override {
     Napi::Object out = directArrowResultToJs(Env(), fields_, batches_);
     out.Set("done", Napi::Boolean::New(Env(), done_));
+    state_->fetching = false;
+    if (done_ || state_->cancelRequested) closeDirectArrowStream(state_);
     deferred_.Resolve(out);
   }
-  void OnError(const Napi::Error & e) override { deferred_.Reject(e.Value()); }
+  void OnError(const Napi::Error & e) override {
+    state_->fetching = false;
+    closeDirectArrowStream(state_);
+    deferred_.Reject(e.Value());
+  }
 
 private:
   Napi::Promise::Deferred deferred_;
@@ -1628,6 +1656,9 @@ Napi::Value FetchArrowStreamWrapper(const Napi::CallbackInfo & info) {
   Napi::Env env = info.Env();
   if (info.Length() < 1 || !info[0].IsExternal()) return rejectedPromise(env, "Usage: Arrow stream handle");
   auto * state = info[0].As<Napi::External<DirectArrowStreamState>>().Data();
+  if (state->closed || state->cancelRequested) return rejectedPromise(env, "Arrow stream is closed");
+  if (state->fetching) return rejectedPromise(env, "Arrow stream fetch already in progress");
+  state->fetching = true;
   auto * worker = new FetchArrowWorker(env, state, info[0]);
   worker->Queue();
   return worker->GetPromise();
@@ -1844,10 +1875,16 @@ struct LiveAsyncArrowStream {
   ~LiveAsyncArrowStream() { if (releaseTsfn && !tsfnReleased) releaseTsfn.Release(); }
 };
 static std::unordered_map<LiveArrowKey, std::shared_ptr<LiveAsyncArrowStream>, LiveArrowKeyHash> g_live_arrow_async;
+static std::mutex g_live_arrow_mu;
+static bool hasLiveAsyncArrowReader(chdb_connection * conn) {
+  std::lock_guard<std::mutex> lock(g_live_arrow_mu);
+  for (const auto & entry : g_live_arrow_async)
+    if (!conn || entry.first.first == conn) return true;
+  return false;
+}
 static std::atomic<uint64_t> g_async_arrow_delivered{0};
 static std::atomic<uint64_t> g_async_arrow_released{0};
 static std::atomic<uint64_t> g_arrow_input_schema_released{0};
-static std::mutex g_live_arrow_mu;
 
 static void countedArrowSchemaRelease(AbiSchema * schema) {
   ++g_arrow_input_schema_released;
@@ -2205,6 +2242,16 @@ static std::unique_ptr<LiveArrowTable> makeLiveArrowTable(Napi::Env env, Napi::A
   return live;
 }
 
+static bool sameLiveArrowSchema(const LiveArrowTable & a, const LiveArrowTable & b) {
+  if (a.nameStorage != b.nameStorage || a.formatStorage != b.formatStorage) return false;
+  for (size_t i = 0; i < a.childSchemas.size(); ++i) {
+    const AbiSchema * ad = a.childSchemas[i].dictionary;
+    const AbiSchema * bd = b.childSchemas[i].dictionary;
+    if (!!ad != !!bd || (ad && std::string(ad->format) != bd->format)) return false;
+  }
+  return true;
+}
+
 // nativeArrowRegisterColumns(conn, tableName, columns)
 Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
   Napi::Env env = info.Env();
@@ -2266,7 +2313,7 @@ Napi::Value ArrowRegisterBatchesWrapper(const Napi::CallbackInfo & info) {
     if (!batch) return env.Undefined();
     if (!live->batches.empty()) {
       const auto & first = *live->batches.front();
-      if (batch->nameStorage != first.nameStorage || batch->formatStorage != first.formatStorage) {
+      if (!sameLiveArrowSchema(*batch, first)) {
         Napi::TypeError::New(env, "Arrow batch schemas must match").ThrowAsJavaScriptException();
         return env.Undefined();
       }
@@ -2337,8 +2384,7 @@ Napi::Value ArrowPushReaderBatchWrapper(const Napi::CallbackInfo & info) {
   auto state = info[0].As<Napi::External<AsyncArrowHandle>>().Data()->state;
   auto batch = makeLiveArrowTable(env, info[1].As<Napi::Array>());
   if (!batch) return env.Undefined();
-  if (batch->nameStorage != state->schemaBatch->nameStorage ||
-      batch->formatStorage != state->schemaBatch->formatStorage) {
+  if (!sameLiveArrowSchema(*batch, *state->schemaBatch)) {
     Napi::TypeError::New(env, "Arrow reader batch schema changed").ThrowAsJavaScriptException();
     return env.Undefined();
   }

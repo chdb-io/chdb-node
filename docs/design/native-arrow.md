@@ -50,6 +50,10 @@ sequenceDiagram
 The queue admits at most two **not-yet-delivered** batches and one waiting
 producer request. It applies backpressure to JS production, not to batches
 that core has already dequeued and retained (for example, for sorting).
+Synchronous queries cannot consume a live JS reader on the same connection:
+they would block the event loop that must feed this queue. Stream creation
+also refuses an in-flight operation on its connection, and fetches on one
+stream handle are serialized.
 Closing during a scan defers unregister and input release until query cleanup;
 the thread-safe callback releases JS-owned references on their isolate. On
 output, the copy precedes C release, so a returned batch outlives the native
