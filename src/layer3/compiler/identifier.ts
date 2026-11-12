@@ -18,6 +18,14 @@ function quoteSegment(segment: string): string {
   return '`' + segment.replace(/\\/g, '\\\\').replace(/`/g, '\\`') + '`'
 }
 
+/** Quote one literal field name, where a dot is part of the name. */
+export function quoteIdentifierSegment(name: string): string {
+  if (typeof name !== 'string' || name.length === 0) {
+    throw new ChdbCompileError(`Invalid field name ${JSON.stringify(name)}: must be non-empty`)
+  }
+  return quoteSegment(name)
+}
+
 /**
  * Quote a possibly-dotted identifier. An empty name or an empty segment
  * (leading/trailing/double dot) is a build-time error, since it can only come

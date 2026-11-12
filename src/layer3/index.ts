@@ -74,8 +74,12 @@ export type { CompiledQuery } from './compiler/compile'
 export type { ExecuteOptions, ExecContext } from './execute/terminal'
 
 // Arrow C Data Interface input — JS columnar data as `arrowstream('<name>')`.
-export { registerArrowTable } from './execute/arrow-input'
-export type { ArrowColumnInput, ArrowTableHandle } from './execute/arrow-input'
+export { registerArrowTable, registerArrowSource } from './execute/arrow-input'
+export type { ArrowColumnInput, ArrowRecordBatchInput, ArrowTableInput, ArrowTableHandle, ArrowSourceHandle } from './execute/arrow-input'
+export { insertArrow, insertArrowReader } from './execute/arrow-insert'
+export type { ArrowInsertInput, ArrowInsertSession, ArrowInsertSummary } from './execute/arrow-insert'
+export { registerArrowReader } from './execute/arrow-reader'
+export type { ArrowReaderSource, ArrowReaderHandle } from './execute/arrow-reader'
 
 // AST node types.
 export type * from './compiler/nodes'

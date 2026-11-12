@@ -19,6 +19,7 @@
 
 import { runtime, type Runtime } from '../runtime'
 import { ChdbCompileError } from '../../errors'
+import { randomUUID } from 'node:crypto'
 
 /**
  * Best-effort safety net: if a handle is garbage-collected without an explicit
@@ -40,15 +41,15 @@ const arrowFinalizers = new FinalizationRegistry<{
   conn: unknown
   session?: { readonly connection: unknown }
   name: string
-  state: { live: boolean }
+  state: { live: boolean; token: unknown }
 }>(({ rt, conn, session, name, state }) => {
   if (!state.live) return
   state.live = false
-  // Session.close() releases the native connection and its Arrow registrations.
-  // The External captured at registration is no longer safe to pass to native.
+  // Session.close() releases the native connection and its Arrow registrations
+  // after outstanding scans drain. Its old External must not be used again.
   if (session !== undefined && session.connection !== conn) return
   try {
-    rt._arrowUnregister(conn, name)
+    rt._arrowUnregister(conn, name, state.token)
   } catch {
     // best effort: connection may already be closed, table already erased, etc.
   }
@@ -70,18 +71,171 @@ interface NativeArrowColumn {
   nullCount: number
   /** [validity bitmap or null, data buffer, optional offsets buffer]. */
   buffers: (Buffer | null)[]
+  dictionary?: { format: string; length: number; nullCount: number; buffers: (Buffer | null)[] }
+}
+
+// Structural rather than an apache-arrow type import: it is an optional peer,
+// and clients that only use SQL must still be able to typecheck without it.
+export interface ArrowRecordBatchInput {
+  readonly schema: { readonly fields: ReadonlyArray<{ readonly name: string; readonly type: { toString(): string } }> }
+  readonly data: { readonly children: ReadonlyArray<unknown> }
+  readonly numRows: number
+  readonly numCols: number
+}
+export interface ArrowTableInput { readonly batches: ReadonlyArray<ArrowRecordBatchInput> }
+
+interface ArrowDataInput {
+  readonly offset?: number
+  readonly length: number
+  readonly nullCount: number
+  readonly nullBitmap?: Uint8Array
+  readonly values?: ArrayBufferView
+  readonly valueOffsets?: Int32Array
+}
+
+function rebaseBits(bits: Uint8Array, offset: number, length: number): Buffer {
+  const output = Buffer.alloc(Math.ceil(length / 8))
+  for (let i = 0; i < length; i++) {
+    if (bits[(offset + i) >> 3]! & (1 << ((offset + i) & 7))) output[i >> 3]! |= 1 << (i & 7)
+  }
+  return output
+}
+
+/**
+ * A deliberately narrow bridge from apache-arrow JS buffers to the C Data
+ * descriptor supported by the current addon. Materialized multi-batch tables
+ * use the native C Stream adapter; sliced bitmaps are rebased and one-chunk
+ * dictionary buffers stay columnar without flattening their rows.
+ */
+export function encodeArrowBatch(input: unknown): NativeArrowColumn[] {
+  // apache-arrow publishes separate CJS and ESM constructors. A Table made by
+  // one entry point need not pass instanceof against the other (notably under
+  // Vitest), so inspect the public batch/schema shape instead.
+  const source = input as ArrowTableInput & ArrowRecordBatchInput
+  const batch = source?.batches
+    ? source.batches.length === 1 ? source.batches[0]! : null
+    : source?.data?.children && source?.schema ? source : null
+  if (!batch) {
+    throw new ChdbCompileError('registerArrowTable: expected a RecordBatch or an apache-arrow Table with a batch')
+  }
+  if (batch.numCols === 0) throw new ChdbCompileError('registerArrowTable: at least one column required')
+  if (!Number.isSafeInteger(batch.numRows) || batch.numRows < 0 ||
+      batch.schema.fields.length !== batch.numCols || batch.data.children.length !== batch.numCols) {
+    throw new ChdbCompileError('registerArrowTable: invalid Arrow batch shape')
+  }
+
+  return batch.schema.fields.map((field, i) => {
+    const data = batch.data.children[i] as ArrowDataInput | undefined
+    const offset = data?.offset ?? 0
+    if (!data || !Number.isSafeInteger(offset) || offset < 0 || data.length !== batch.numRows ||
+        !Number.isSafeInteger(data.nullCount) || data.nullCount < 0 || data.nullCount > data.length) {
+      throw new ChdbCompileError(`registerArrowTable: column "${field.name}" has an invalid offset or length`)
+    }
+    let format: string
+    let views: ArrayBufferView[]
+    const kind = field.type.toString()
+    if (kind.startsWith('Dictionary<')) {
+      const dictionaryType = field.type as { indices: { toString(): string }; dictionary: { toString(): string } }
+      if (dictionaryType.dictionary.toString().startsWith('Dictionary<')) {
+        throw new ChdbCompileError('nested Arrow dictionaries are unsupported')
+      }
+      const vector = (data as ArrowDataInput & { dictionary?: { data?: ReadonlyArray<unknown> } }).dictionary
+      if (vector?.data?.length !== 1) {
+        throw new ChdbCompileError(`registerArrowTable: dictionary for "${field.name}" needs one unsliced value chunk`)
+      }
+      const dictionaryData = vector.data[0] as ArrowDataInput
+      const index = encodeArrowBatch({ schema: { fields: [{ name: field.name, type: dictionaryType.indices }] },
+        data: { children: [data] }, numCols: 1, numRows: batch.numRows })[0]!
+      const values = encodeArrowBatch({ schema: { fields: [{ name: '', type: dictionaryType.dictionary }] },
+        data: { children: [dictionaryData] }, numCols: 1, numRows: dictionaryData.length })[0]!
+      if (!['i', 'I'].includes(index.format) || !['u', 'z'].includes(values.format)) {
+        throw new ChdbCompileError(`registerArrowTable: unsupported dictionary layout for "${field.name}"`)
+      }
+      return { ...index, dictionary: { format: values.format, length: values.length,
+        nullCount: values.nullCount, buffers: values.buffers } }
+    }
+    const fixedFormats: Record<string, string> = {
+      Int8: 'c', Uint8: 'C', Int16: 's', Uint16: 'S',
+      Int32: 'i', Uint32: 'I', Int64: 'l', Uint64: 'L',
+      Float32: 'f', Float64: 'g',
+    }
+    if (fixedFormats[kind]) {
+      format = fixedFormats[kind]!
+      views = [data.values ?? new Uint8Array(0)]
+    } else if (kind.startsWith('Timestamp<')) {
+      const timestamp = field.type as { unit?: number; timezone?: string | null }
+      const unit = timestamp.unit == null ? undefined : 'smun'[timestamp.unit]
+      if (!unit) throw new ChdbCompileError(`registerArrowTable: unsupported timestamp unit for "${field.name}"`)
+      format = `ts${unit}:${timestamp.timezone ?? ''}`
+      views = [data.values ?? new BigInt64Array(0)]
+    } else if (kind.startsWith('Decimal[')) {
+      const decimal = field.type as { precision?: number; scale?: number; bitWidth?: number }
+      if (!decimal.precision || ![128, 256].includes(decimal.bitWidth ?? 128)) {
+        throw new ChdbCompileError(`registerArrowTable: unsupported decimal for "${field.name}"`)
+      }
+      format = `d:${decimal.precision},${decimal.scale ?? 0}${decimal.bitWidth === 256 ? ',256' : ''}`
+      views = [data.values ?? new Uint32Array(0)]
+    } else if (kind === 'Bool') {
+      format = 'b'
+      const bits = data.values as Uint8Array | undefined
+      if (offset && (!bits || bits.byteLength < Math.ceil((offset + data.length) / 8))) {
+        throw new ChdbCompileError(`registerArrowTable: truncated Bool values for "${field.name}"`)
+      }
+      views = [offset ? rebaseBits(bits!, offset, data.length) : bits ?? new Uint8Array(0)]
+    } else if (kind === 'Utf8' || kind === 'Binary') {
+      format = kind === 'Utf8' ? 'u' : 'z'
+      views = [data.valueOffsets ?? new Int32Array([0]), data.values ?? new Uint8Array(0)]
+    } else {
+      throw new ChdbCompileError(`registerArrowTable: unsupported Arrow type ${field.type} for "${field.name}"`)
+    }
+    const validity = data.nullCount > 0 ? data.nullBitmap : null
+    if (data.nullCount > 0 && (!validity || !ArrayBuffer.isView(validity) ||
+        validity.byteLength < Math.ceil((offset + data.length) / 8))) {
+      throw new ChdbCompileError(`registerArrowTable: missing validity bitmap for "${field.name}"`)
+    }
+    const variable = format === 'u' || format === 'z'
+    const width = format.startsWith('d:') ? (format.endsWith(',256') ? 32 : 16)
+      : 'cC'.includes(format) ? 1 : 'sS'.includes(format) ? 2
+      : 'iIf'.includes(format) ? 4 : 8
+    const expected = variable ? (data.length + 1) * 4
+      : format === 'b' ? Math.ceil(data.length / 8) : data.length * width
+    if (!views.every((v) => v && ArrayBuffer.isView(v) && !(v.buffer instanceof SharedArrayBuffer)) ||
+        (validity && validity.buffer instanceof SharedArrayBuffer) || views[0]!.byteLength < expected) {
+      throw new ChdbCompileError(`registerArrowTable: invalid or shared buffer for "${field.name}"`)
+    }
+    if (variable) {
+      const offsets = views[0] as Int32Array
+      let valid = offsets[0]! >= 0 && offsets[data.length]! <= views[1]!.byteLength
+      for (let j = 1; j <= data.length; j++) valid &&= offsets[j]! >= offsets[j - 1]!
+      if (!valid) {
+        throw new ChdbCompileError(`registerArrowTable: invalid UTF-8 offsets for "${field.name}"`)
+      }
+    }
+    const buffer = (view: ArrayBufferView): Buffer => Buffer.from(view.buffer, view.byteOffset, view.byteLength)
+    const bitmapView = validity && offset ? rebaseBits(validity, offset, data.length) : validity
+    return {
+      name: field.name, format, length: data.length, nullCount: data.nullCount,
+      buffers: [bitmapView ? buffer(bitmapView) : null, ...views.map(buffer)],
+    }
+  })
 }
 
 /** A handle returned by `registerArrowTable`. */
 export interface ArrowTableHandle {
-  /** Drop the table from the engine and release JS-side buffer pins. */
+  /** Close the handle; native unregister waits for active queries/streams. */
   close(): void
   /**
    * Re-register the same data so a follow-up query can read it again.
    * The engine consumes the underlying array on each scan, so use this
-   * between repeated queries against the same table.
+   * between completed queries against the same table. Throws while a query
+   * or stream is active, since re-registering would invalidate that scan.
    */
   refresh(): void
+}
+
+export interface ArrowSourceHandle extends ArrowTableHandle {
+  /** Unique process-wide name to use in `arrowstream(name)` SQL. */
+  readonly name: string
 }
 
 /** Validate name + same row count + at least one column. */
@@ -164,54 +318,80 @@ function encodeColumn(col: ArrowColumnInput): NativeArrowColumn {
 }
 
 /**
- * Pin a JS columnar dataset as an `arrowstream('<name>')` table the engine can
- * read with zero IPC copy. Returns a handle owning the JS-side buffer
- * references; call `.close()` to release everything.
+ * Pin JS columns, one apache-arrow RecordBatch, or a single-batch Table as an
+ * `arrowstream('<name>')` source. Arrow objects support primitive numeric,
+ * Bool, Utf8, Binary, Timestamp, Decimal and one-chunk Dictionary buffers;
+ * sliced bitmaps are rebased. Multi-batch tables use a C Stream. This avoids Arrow IPC, but the engine may
+ * still copy buffers while mapping them to ClickHouse columns.
+ *
+ * Returns a handle owning JS-side buffer references. close() is idempotent;
+ * native unregister and buffer release are deferred while a query or lazy
+ * stream is active. Exhaust or cancel streams so deferred cleanup can finish.
  */
 export function registerArrowTable(
   name: string,
-  columns: ReadonlyArray<ArrowColumnInput>,
+  columns: ReadonlyArray<ArrowColumnInput> | ArrowTableInput | ArrowRecordBatchInput,
   opts: { session?: { readonly connection: unknown } } = {},
 ): ArrowTableHandle {
-  validate(name, columns)
-  const encoded = columns.map(encodeColumn)
+  if (typeof name !== 'string' || name === '') {
+    throw new ChdbCompileError('registerArrowTable: name must be a non-empty string')
+  }
+  let encoded: NativeArrowColumn[]
+  let encodedBatches: NativeArrowColumn[][] | undefined
+  if (Array.isArray(columns)) {
+    validate(name, columns)
+    encoded = columns.map(encodeColumn)
+  } else if ('batches' in columns && columns.batches.length > 1) {
+    encodedBatches = columns.batches.map(encodeArrowBatch)
+    encoded = encodedBatches[0]!
+  } else {
+    encoded = encodeArrowBatch(columns)
+  }
   const session = opts.session
   const conn = session !== undefined ? session.connection : null
   if (session !== undefined && conn == null) {
     throw new ChdbCompileError('registerArrowTable: session has no active connection')
   }
   const rt = runtime()
+  if (!Array.isArray(columns)) rt._assertArrowCore()
   const sessionStillOwnsConnection = (): boolean => session === undefined || session.connection === conn
   // Shared between close/refresh and the GC finalizer so all three agree on
   // whether the table is currently registered.
-  const state = { live: false }
+  const state: { live: boolean; closed: boolean; token: unknown } = {
+    live: false, closed: false, token: undefined,
+  }
   const register = (): void => {
     if (!sessionStillOwnsConnection()) {
       throw new ChdbCompileError('registerArrowTable: session has no active connection')
     }
-    rt._arrowRegisterColumns(conn, name, encoded)
+    state.token = encodedBatches
+      ? rt._arrowRegisterBatches(conn, name, encodedBatches)
+      : rt._arrowRegisterColumns(conn, name, encoded)
     state.live = true
   }
-  const unregister = (): void => {
+  const unregister = (defer = true): void => {
     if (!state.live) return
     if (!sessionStillOwnsConnection()) {
       // Closing the Session has already dropped its native Arrow registrations.
       state.live = false
       return
     }
-    rt._arrowUnregister(conn, name)
+    rt._arrowUnregister(conn, name, state.token, defer)
     state.live = false
   }
   register()
   const handle: ArrowTableHandle = {
     close(): void {
+      if (state.closed) return
       unregister()
+      state.closed = true
       // Explicitly closed: drop the GC safety net so the finalizer can't fire
       // a redundant unregister later.
       arrowFinalizers.unregister(handle)
     },
     refresh(): void {
-      unregister()
+      if (state.closed) throw new ChdbCompileError('registerArrowTable: handle is closed')
+      unregister(false)
       register()
     },
   }
@@ -219,4 +399,15 @@ export function registerArrowTable(
   // `close()` can cancel it.
   arrowFinalizers.register(handle, { rt, conn, session, name, state }, handle)
   return handle
+}
+
+/** Register a materialized Arrow source under a generated opaque SQL name. */
+export function registerArrowSource(
+  input: ReadonlyArray<ArrowColumnInput> | ArrowTableInput | ArrowRecordBatchInput,
+  opts: { session?: { readonly connection: unknown } } = {},
+): ArrowSourceHandle {
+  runtime()._assertArrowCore()
+  const name = `__chdb_arrow_${randomUUID().replaceAll('-', '')}`
+  const handle = registerArrowTable(name, input, opts)
+  return Object.assign(handle, { name })
 }

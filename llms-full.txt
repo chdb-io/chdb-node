@@ -136,7 +136,43 @@ Codegen / introspection:
                         Drizzle / Prisma schema file.
   introspectDatabase / introspectTable / describeSource / emitDatabase  (programmatic)
   parseDrizzleFile / parseDrizzleSource / parsePrismaSchema             (static conversion)
-  registerArrowTable(...)  register an in-memory Arrow/columnar dataset as arrowstream('name')
+  registerArrowTable(name, columns|batch|table, {session?})  register an in-memory
+    source as arrowstream('name'). apache-arrow RecordBatch and single-batch Table
+    accept unsliced primitive numeric/Bool/Utf8/Binary buffers; materialized
+    multi-batch Tables use C Stream. One-chunk Int32/UInt32-indexed Utf8/Binary
+    dictionaries and sliced primitive/bitmap buffers are supported; nested
+    input is not yet supported.
+    No IPC on input; this does not
+    guarantee zero ClickHouse-column copies. handle.close() defers native release
+    during active queries/streams; finish or cancel a lazy stream to let it drain.
+  registerArrowSource(columns|batch|table, {session?})  same input path, with a
+    generated process-unique name returned on its closable handle.
+  registerArrowReader(asyncIterable<RecordBatch>, {session})  one-shot Arrow
+    reader as an engine SQL source, with a bounded native prefetch queue and
+    async close(). The first batch establishes schema; empty sources need
+    source.schema. Reader errors propagate to SQL; no IPC or readAll().
+  insertArrow(table, columns|batch|table, {session})  bulk insert one Arrow batch
+    using an internal scoped registration and INSERT SELECT. Destination columns
+    are matched by name. rowsSubmitted is input size, not a storage write ledger.
+  insertArrowReader(table, reader, {session})  same field-name mapping and
+    INSERT SELECT over the bounded reader source; rowsSubmitted is not a
+    storage-side write ledger.
+  Session.queryArrow(sql)  direct C Data output as an apache-arrow Table (not IPC).
+    Primitive signed/unsigned integers, Float32/64, Bool, Utf8, Binary,
+    Timestamp and Decimal128 are
+    supported; buffers are copied before C stream release, so the result
+    outlives the Session. stringAsString:false exports String as Binary.
+  Session.queryArrowStream(sql, options?)  pull one typed apache-arrow
+    RecordBatch per core C Data fetch; cancel() on partial consumption.
+    schema is available after the first fetch, including zero-row results.
+    lowCardinalityAsDictionary:true preserves Utf8/Binary dictionaries with
+    Int32/UInt32 indices across batches; other dictionary layouts reject.
+  Session.queryArrowStreamBind(sql, params, options?)  same batch reader with
+    server-side {name:Type} binding. queryArrowBind materializes that direct
+    stream as a Table; neither interpolates values into SQL.
+  chdb/arrow  optional typed subpath: queryArrow/queryArrowBind return
+    apache-arrow Table; queryArrowStream/queryArrowStreamBind yield RecordBatch.
+    Import this subpath when the optional apache-arrow peer is installed.
 
 ================================================================
 LAYER 2 — @clickhouse/client integration (import 'chdb/connection')

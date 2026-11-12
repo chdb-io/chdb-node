@@ -724,11 +724,9 @@ this package:
 
 1. Publish `@chdb/lib-<platform>` packages built from a tree that binds the
    durable ABI. `optionalDependencies` and `update_libchdb.sh` already name
-   `26.11.0-rc.2.1`, and the release workflow derives the subpackage version
-   from the latter — but nothing has been tagged since, so that version is not
-   on npm at all. The newest published is `26.7.0-stable.1` (main `chdb@3.3.0`
-   pins it), which carries an addon from before this work and exports none of
-   the four entry points.
+   `26.11.0-rc.3.1`, and the release workflow derives the subpackage version
+   from the latter — but this version has not yet been published on npm. The
+   currently published rc.2.1 packages do not contain the rc.3 ownership fix.
 
    Two different failures follow, depending on what is installed. A fresh
    install resolves no subpackage — an unsatisfiable *optional* dependency is

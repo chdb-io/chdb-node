@@ -16,6 +16,11 @@ export const insert = mod.insert
 export const Session = mod.Session
 export const version = mod.version
 export const drainPending = mod.drainPending
+export const registerArrowTable = mod.registerArrowTable
+export const registerArrowSource = mod.registerArrowSource
+export const registerArrowReader = mod.registerArrowReader
+export const insertArrow = mod.insertArrow
+export const insertArrowReader = mod.insertArrowReader
 
 // Layer 3: ChdbCompileError is the only net-new error class; export it as a
 // named ESM binding so it is catchable by class. The fluent builder surface

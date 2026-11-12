@@ -240,6 +240,23 @@ export interface ChdbQueryStream extends AsyncIterable<StreamChunk> {
   cancel(): void;
 }
 
+/** Incremental Arrow C Data reader; batches are apache-arrow RecordBatch objects. */
+export interface ChdbArrowReader extends AsyncIterable<unknown> {
+  readonly closed: boolean;
+  /** Available after the first fetch, including for an empty result. */
+  readonly schema: unknown | null;
+  cancel(): void;
+}
+
+export interface DirectArrowOptions {
+  /** Degrade otherwise unmappable engine types to Arrow Binary. Default false. */
+  unsupportedAsBinary?: boolean;
+  /** Export ClickHouse String as Arrow Utf8 (default) or Binary. */
+  stringAsString?: boolean;
+  /** Preserve LowCardinality as a dictionary (Utf8/Binary values, Int32/UInt32 indices). */
+  lowCardinalityAsDictionary?: boolean;
+}
+
 /**
  * Options for constructing a {@link Session}.
  */
@@ -347,6 +364,18 @@ export class Session {
    * Executes a session-bound query asynchronously (non-blocking).
    */
   queryAsync(query: string, opts?: QueryOptions): Promise<ChdbResult>;
+
+  /** Direct Arrow C Data output (no IPC); requires the optional apache-arrow peer. */
+  queryArrow(query: string, opts?: DirectArrowOptions): Promise<unknown>;
+
+  /** Materialize direct C Data batches with server-side {name:Type} parameters. */
+  queryArrowBind(query: string, params: object, opts?: DirectArrowOptions): Promise<unknown>;
+
+  /** Pulls one typed Arrow batch per native fetch; cancel on partial consumption. */
+  queryArrowStream(query: string, opts?: DirectArrowOptions): ChdbArrowReader;
+
+  /** Incremental direct C Data result with server-side {name:Type} parameters. */
+  queryArrowStreamBind(query: string, params: object, opts?: DirectArrowOptions): ChdbArrowReader;
 
   /**
    * Executes a session-bound parameterized query asynchronously.

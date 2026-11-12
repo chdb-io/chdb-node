@@ -14,6 +14,7 @@ const {
   ChdbTimeoutError,
   ChdbInsertError,
   ChdbStreamError,
+  ChdbBinaryVersionMismatchError,
   mapNativeError,
 } = require('./dist/errors.js');
 
@@ -35,6 +36,7 @@ function prepArrow(query, opts, defaultFormat) {
 }
 const { formatParamValue } = require('./dist/serialize.js');
 const { ChdbResult } = require('./dist/result.js');
+const { arrowTableFromDirect } = require('./dist/arrow-direct.js');
 const { buildInsertSQL } = require('./dist/insert.js');
 const { buildRawInsertPrefix, isRawValues, isStreamValues } = require('./dist/rawInsert.js');
 const { streamInsert } = require('./dist/streamInsert.js');
@@ -318,6 +320,24 @@ function asConnectionError(e) {
   return new ChdbConnectionError(message, { cause: e });
 }
 
+// The full native Arrow contract is first tested against chdb-core
+// v26.11.0-rc.3 (including the #323 ownership fix). SELECT version() reports a different
+// ClickHouse build number; EngineVersion is the release identity to compare.
+function _assertArrowCore() {
+  const version = String(chdbNode.EngineVersion());
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/.exec(version);
+  const current = match && match.slice(1, 4).map(Number);
+  const minimum = [26, 11, 0];
+  const older = !current || current.some((part, i) => {
+    for (let j = 0; j < i; j++) if (current[j] !== minimum[j]) return false;
+    return part < minimum[i];
+  });
+  if (older || (current.every((v, i) => v === minimum[i]) && match[4] && Number(match[4]) < 3)) {
+    throw new ChdbBinaryVersionMismatchError(
+      `Native Arrow requires chdb-core >= v26.11.0-rc.3 (loaded ${version})`);
+  }
+}
+
 // One materialized chunk of a streaming result.
 class StreamChunk {
   constructor(bytes, numRows, format) {
@@ -347,6 +367,7 @@ class ChdbQueryStream {
     this._signal = signal;
     this._closed = false;
     this._inflight = null; // the fetch currently on a libuv thread, if any
+    activeStreams.add(this);
   }
 
   get closed() { return this._closed; }
@@ -370,12 +391,28 @@ class ChdbQueryStream {
           this._inflight = trackNative(chdbNode.StreamFetch(this._handle));
           raw = await this._inflight;
         } catch (e) {
+          const cancelling = this._closed;
           this._closed = true;
+          // cancel() may already be waiting for this fetch before destroying
+          // the native handle. In that case only its destroy callback retires
+          // the stream; releasing Arrow input here would be too early.
+          if (!cancelling) {
+            activeStreams.delete(this);
+            flushArrowIdle();
+          }
           throw new ChdbStreamError(asQueryError(e).message, { cause: e });
         } finally {
           this._inflight = null;
         }
-        if (raw.done) { this._closed = true; break; }
+        if (raw.done) {
+          const cancelling = this._closed;
+          this._closed = true;
+          if (!cancelling) {
+            activeStreams.delete(this);
+            flushArrowIdle();
+          }
+          break;
+        }
         yield new StreamChunk(raw.bytes, raw.numRows, this._format);
       }
     } finally {
@@ -401,11 +438,79 @@ class ChdbQueryStream {
     this._closed = true;
     const destroy = () => {
       try { chdbNode.StreamCancel(this._handle); } catch (_) { /* best effort */ }
+      activeStreams.delete(this);
+      flushArrowIdle();
     };
     // StreamCancel destroys the stream handle synchronously, and the fetch worker
     // reads that handle without holding a lock. Destroying it while a fetch is
     // executing pulls it out from under the worker. Wait for the fetch, and
     // register the wait so a Session.close() defers behind the destroy too.
+    if (this._inflight) {
+      const deferred = this._inflight.then(destroy, destroy);
+      pendingNativeOps.add(deferred);
+      deferred.finally(() => pendingNativeOps.delete(deferred));
+    } else {
+      destroy();
+    }
+  }
+}
+
+// Typed C Data stream. Each native fetch produces at most one RecordBatch;
+// bytes are copied and C callbacks released before the JS batch is exposed.
+class ChdbArrowReader {
+  constructor(handle) {
+    this._handle = handle;
+    this._closed = false;
+    this._inflight = null;
+    this.schema = null; // available after the first fetch, even for zero rows
+    activeStreams.add(this);
+  }
+  get closed() { return this._closed; }
+
+  async *[Symbol.asyncIterator]() {
+    try {
+      while (!this._closed) {
+        let raw;
+        try {
+          this._inflight = trackNative(chdbNode.FetchArrowStream(this._handle));
+          raw = await this._inflight;
+        } catch (e) {
+          const cancelling = this._closed;
+          this._closed = true;
+          if (!cancelling) {
+            activeStreams.delete(this);
+            flushArrowIdle();
+          }
+          throw asQueryError(e);
+        } finally {
+          this._inflight = null;
+        }
+        const table = arrowTableFromDirect(raw);
+        this.schema = table.schema;
+        if (raw.done) {
+          const cancelling = this._closed;
+          this._closed = true;
+          if (!cancelling) {
+            activeStreams.delete(this);
+            flushArrowIdle();
+          }
+          break;
+        }
+        for (const batch of table.batches) yield batch;
+      }
+    } finally {
+      this.cancel();
+    }
+  }
+
+  cancel() {
+    if (this._closed) return;
+    this._closed = true;
+    const destroy = () => {
+      try { chdbNode.CancelArrowStream(this._handle); } catch (_) { /* best effort */ }
+      activeStreams.delete(this);
+      flushArrowIdle();
+    };
     if (this._inflight) {
       const deferred = this._inflight.then(destroy, destroy);
       pendingNativeOps.add(deferred);
@@ -504,10 +609,45 @@ const openSessions = new Set();
 // the abort/timeout ones — close() landing mid-flight on an untracked op was the
 // macos-14/Node-20 120s hang (chdb-io/chdb-node#53).
 const pendingNativeOps = new Set();
+// Arrow sources are process-wide in core. A registration cannot be released
+// while *any* native query or lazy stream may still be scanning its buffers.
+// Keep teardown waits separate from native work so a deferred close does not
+// wait on itself. This deliberately errs on the side of delaying release when
+// an unrelated stream is open rather than guessing which SQL reads a name.
+const activeNativeOps = new Set();
+const activeStreams = new Set();
+const arrowIdleTasks = new Set();
+const arrowRegistrations = new Map();
+let defaultArrowGeneration = 0;
+
+function arrowBusy() {
+  return activeNativeOps.size > 0 || activeStreams.size > 0;
+}
+function flushArrowIdle() {
+  if (arrowBusy()) return;
+  for (const task of [...arrowIdleTasks]) {
+    arrowIdleTasks.delete(task);
+    task();
+  }
+}
+function whenArrowIdle(task) {
+  if (arrowBusy()) arrowIdleTasks.add(task);
+  else task();
+}
+function retireArrowRegistrations(connection) {
+  for (const [token, entry] of arrowRegistrations) {
+    if (entry.connection === connection) arrowRegistrations.delete(token);
+  }
+}
 function trackNative(nativePromise) {
   const done = nativePromise.then(() => {}, () => {});
   pendingNativeOps.add(done);
-  done.then(() => pendingNativeOps.delete(done));
+  activeNativeOps.add(done);
+  done.then(() => {
+    pendingNativeOps.delete(done);
+    activeNativeOps.delete(done);
+    flushArrowIdle();
+  });
   return nativePromise;
 }
 
@@ -681,6 +821,10 @@ class Session {
     try {
       const key = this.path ? resolvePath(this.path) : this.path;
       this._key = key; // normalized directory, for the deferred-teardown bookkeeping
+      // Creating a Session can evict the default connection. Its Arrow names
+      // belong to that old connection, even if a new default is opened later.
+      defaultArrowGeneration++;
+      retireArrowRegistrations(null);
       this.connection = connectionArgs
         ? chdbNode.CreateConnection(key, connectionArgs)
         : chdbNode.CreateConnection(key);
@@ -738,6 +882,52 @@ class Session {
     if (!query) return Promise.resolve(emptyResult());
     const { sql, format } = prepArrow(query, opts, "CSV");
     return withAbortTimeout(chdbNode.QueryAsyncConnection(this.connection, sql, format), opts);
+  }
+
+  // Direct C Data result, not Arrow IPC. The native worker copies each C
+  // buffer before releasing its stream; JS then constructs an apache-arrow
+  // Table from those owned bytes. Keep the native promise tracked through
+  // completion so close() cannot tear down the connection mid-query.
+  queryArrow(query, opts = {}) {
+    if (!this.connection) return Promise.reject(new ChdbClosedError("No active connection available"));
+    if (!query) return Promise.reject(new ChdbStreamError("queryArrow requires a non-empty query"));
+    try { _assertArrowCore(); } catch (e) { return Promise.reject(e); }
+    let native;
+    try { native = chdbNode.QueryArrowAsync(this.connection, query, opts); }
+    catch (e) { return Promise.reject(e); }
+    trackNative(native);
+    return native.then((raw) => arrowTableFromDirect(raw), (e) => { throw asQueryError(e); });
+  }
+
+  queryArrowStream(query, opts = {}) {
+    return this.#startArrowStream(query, opts);
+  }
+
+  queryArrowStreamBind(query, params = {}, opts = {}) {
+    return this.#startArrowStream(query, opts, formatParams(params));
+  }
+
+  async queryArrowBind(query, params = {}, opts = {}) {
+    const reader = this.queryArrowStreamBind(query, params, opts);
+    const batches = [];
+    for await (const batch of reader) batches.push(batch);
+    const arrow = require('apache-arrow');
+    return new arrow.Table(reader.schema, batches);
+  }
+
+  #startArrowStream(query, opts, bound) {
+    if (!this.connection) throw new ChdbClosedError("No active connection available");
+    if (!query) throw new ChdbStreamError("queryArrowStream requires a non-empty query");
+    _assertArrowCore();
+    if (this._activeStream && !this._activeStream.closed) {
+      throw new ChdbStreamError("a stream is already active on this session; finish or cancel it first");
+    }
+    let handle;
+    try { handle = chdbNode.StartArrowStream(this.connection, query, opts, bound); }
+    catch (e) { throw asQueryError(e); }
+    const stream = new ChdbArrowReader(handle);
+    this._activeStream = stream;
+    return stream;
   }
 
   queryBindAsync(query, params = {}, opts = {}) {
@@ -826,6 +1016,7 @@ class Session {
     const conn = this.connection;
     this.connection = null;
     const teardown = () => {
+      retireArrowRegistrations(conn);
       if (conn) { try { chdbNode.CloseConnection(conn); } catch (_) { /* best effort */ } }
       if (this.isTemp) { try { this.#removeTempDir(); } catch (_) { /* best effort */ } }
     };
@@ -836,16 +1027,21 @@ class Session {
     // until they drain rather than racing them. _drainPendingOps() awaits these
     // deferred closes too, so a new session is never created before the prior
     // connection is fully released.
-    if (conn && pendingNativeOps.size > 0) {
+    const hasArrowSources = [...arrowRegistrations.values()].some((entry) => entry.connection === conn);
+    if (conn && (pendingNativeOps.size > 0 || (hasArrowSources && activeStreams.size > 0))) {
       const key = this._key;
       addPendingTeardown(key);
       // Removed in the same tick as the teardown it guards, not in a later
       // .finally: the entry exists to answer "is this connection still alive",
       // and a caller that resumes between the two would be told yes about a
       // connection that is already gone.
-      const deferred = Promise.allSettled([...pendingNativeOps]).then(() => {
-        try { teardown(); } finally { removePendingTeardown(key); }
-      });
+      const deferred = Promise.allSettled([...pendingNativeOps]).then(() => new Promise((resolve) => {
+        const finish = () => {
+          try { teardown(); } finally { removePendingTeardown(key); resolve(); }
+        };
+        if (hasArrowSources) whenArrowIdle(finish);
+        else finish();
+      }));
       pendingNativeOps.add(deferred);
       deferred.finally(() => pendingNativeOps.delete(deferred));
     } else {
@@ -920,22 +1116,80 @@ function version() {
   };
 }
 
-// Arrow C Data Interface — low-level binding. The high-level helper lives in
-// Layer 3 (`src/layer3/execute/arrow-input.ts`); this module just routes the
-// call to the native addon. The connection arg is `Session.connection` (the
-// External returned by CreateConnection) or null for the process-wide default.
+// Arrow C Data Interface — low-level binding and registration lifetime seam.
+// The high-level helper lives in Layer 3 (`src/layer3/execute/arrow-input.ts`).
+// The connection arg is `Session.connection` (the External returned by
+// CreateConnection) or null for the process-wide default.
 function _arrowRegisterColumns(connection, tableName, columns) {
-  return chdbNode.ArrowRegisterColumns(connection ?? null, tableName, columns);
+  chdbNode.ArrowRegisterColumns(connection ?? null, tableName, columns);
+  return recordArrowRegistration(connection, tableName);
 }
-function _arrowUnregister(connection, tableName) {
-  return chdbNode.ArrowUnregister(connection ?? null, tableName);
+function _arrowRegisterBatches(connection, tableName, batches) {
+  _assertArrowCore();
+  chdbNode.ArrowRegisterBatches(connection ?? null, tableName, batches);
+  return recordArrowRegistration(connection, tableName);
+}
+function _arrowRegisterReader(connection, tableName, firstBatch) {
+  _assertArrowCore();
+  const handle = chdbNode.ArrowRegisterReader(connection, tableName, firstBatch);
+  return { handle, token: recordArrowRegistration(connection, tableName) };
+}
+function _arrowPushReaderBatch(handle, batch) {
+  return chdbNode.ArrowPushReaderBatch(handle, batch);
+}
+function _arrowFinishReader(handle, error) {
+  return chdbNode.ArrowFinishReader(handle, error);
+}
+function _arrowCancelReader(handle) {
+  return chdbNode.ArrowCancelReader(handle);
+}
+function recordArrowRegistration(connection, tableName) {
+  const token = Symbol('arrow registration');
+  arrowRegistrations.set(token, { connection: connection ?? null, tableName,
+    generation: defaultArrowGeneration });
+  return token;
+}
+function _arrowUnregister(connection, tableName, token, defer = true) {
+  // Direct callers of this internal helper retain its original immediate
+  // behavior; high-level handles pass their registration token so an old
+  // handle cannot unregister a later registration using the same name.
+  if (token === undefined) return chdbNode.ArrowUnregister(connection ?? null, tableName);
+  const entry = arrowRegistrations.get(token);
+  if (!entry) return true; // its connection was already closed/evicted
+  if (entry.connection !== (connection ?? null) || entry.tableName !== tableName) {
+    throw new TypeError('Arrow registration token does not match its connection and name');
+  }
+  if (entry.connection === null && entry.generation !== defaultArrowGeneration) {
+    arrowRegistrations.delete(token);
+    return true;
+  }
+  if (arrowBusy() && !defer) {
+    throw new Error('Cannot refresh an Arrow source while a query or stream is active');
+  }
+  const release = () => {
+    if (arrowRegistrations.get(token) !== entry) return;
+    try {
+      chdbNode.ArrowUnregister(entry.connection, entry.tableName);
+    } finally {
+      arrowRegistrations.delete(token);
+    }
+  };
+  if (!arrowBusy()) { release(); return true; }
+  whenArrowIdle(() => {
+    try { release(); } catch (e) {
+      process.emitWarning(`chdb: deferred Arrow unregister failed: ${e.message}`);
+    }
+  });
+  return false;
 }
 
 module.exports = {
   query, queryBind, queryAsync, queryBindAsync, insert,
   Session, version, drainPending,
   _closeAllSessions, _drainPendingOps,
-  _arrowRegisterColumns, _arrowUnregister,
+  _arrowRegisterColumns, _arrowRegisterBatches, _arrowRegisterReader,
+  _assertArrowCore,
+  _arrowPushReaderBatch, _arrowFinishReader, _arrowCancelReader, _arrowUnregister,
 };
 
 // Layer 3: the fluent, immutable query builder. It sits on Layer 1, a sibling of

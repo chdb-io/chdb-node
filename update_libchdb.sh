@@ -17,15 +17,17 @@ set -e
 # without them. v26.7.3 is the first stable release that exports them.
 #
 # The pin is currently a release candidate, and chdb_version() on it returns the
-# full "26.11.0-rc.2", suffix and all. Durable records that string in
+# full "26.11.0-rc.3", suffix and all. Durable records that string in
 # head.engine.version and raises min_reader to it on every write. A pre-release
 # sorts below the release it leads to, so an object written against this RC
-# stays readable by the eventual stable, but every earlier engine (26.11.0-rc.1,
+# stays readable by the eventual stable, but every earlier engine (26.11.0-rc.2,
 # 26.9.x and before) is refused it with engine_incompatible from then on.
+# The Arrow A1–A6 ABI and chdb-core#323's registration ownership fixes are
+# present in rc.3. See docs/arrow-rc3-conformance.md for validation scope.
 #
 # Keep the pin on its own line and literal: the release check greps for it when
 # it proposes a bump.
-CHDB_ENGINE_PIN=v26.11.0-rc.2
+CHDB_ENGINE_PIN=v26.11.0-rc.3
 
 # CHDB_ENGINE_VERSION overrides the pin, which is how the release check runs the
 # suite against an engine this repository has not adopted yet. It is a different
@@ -53,7 +55,7 @@ LATEST_RELEASE="${CHDB_ENGINE_VERSION:-$CHDB_ENGINE_PIN}"
 # ERR_DLOPEN_FAILED instead.
 #
 # The publish and cleanroom workflows read CHDB_LIB_VERSION from here.
-LIBCHDB_NPM_VERSION=26.11.0-rc.2.1
+LIBCHDB_NPM_VERSION=26.11.0-rc.3.1
 
 # Download the correct version based on the platform
 case "$(uname -s)" in

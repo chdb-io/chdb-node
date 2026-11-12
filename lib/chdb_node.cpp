@@ -7,6 +7,9 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <utility>
@@ -71,11 +74,9 @@ char * QueryWithConnection(ChdbConnection conn, const char * query, const char *
 // chdb_connect (dereferenced for chdb_query, passed as-is to chdb_close_conn),
 // matching the External handle layout v2 exposed to JS.
 //
-// Thread-safety: registry mutations happen on the Node main thread (the N-API
-// wrappers below), so they are already serialized by the event loop; queries run
-// on libuv worker threads but only touch a connection handle, never this registry.
-// g_reg_mu is a defensive guard so the invariants hold even if a future caller
-// mutates the registry off the main thread.
+// Thread-safety: each N-API wrapper runs on its isolate's event loop; several
+// worker_threads can mutate this process-wide registry concurrently. g_reg_mu
+// serializes those changes. libuv query workers only touch retained handles.
 struct Registry {
   std::string boundKey;                  // path the EmbeddedServer is bound to (valid while !conns.empty())
   std::set<chdb_connection *> conns;     // every live connection (sessions + the default)
@@ -83,6 +84,7 @@ struct Registry {
 };
 static Registry g_reg;
 static std::mutex g_reg_mu;
+static std::unordered_map<chdb_connection *, napi_env> g_conn_owner;
 
 // Extra argv entries are the same `--setting=value` forms a `clickhouse local`
 // invocation takes, and they have to be given at connect: `--path` and
@@ -212,6 +214,7 @@ static void hard_close_all() {
     if (c) chdb_close_conn(c);
   }
   g_reg.conns.clear();
+  g_conn_owner.clear();
   g_reg.defaultConn = nullptr;
   g_reg.boundKey.clear();
 }
@@ -256,6 +259,21 @@ static bool g_atexit_registered = false;
 // its env cleanup hook counts it out. ExitTeardownWrapper reads it.
 static std::atomic<int> g_live_envs{0};
 
+static void close_for_env(napi_env owner) {
+  std::lock_guard<std::mutex> lk(g_reg_mu);
+  for (auto it = g_reg.conns.begin(); it != g_reg.conns.end();) {
+    chdb_connection * conn = *it;
+    auto found = g_conn_owner.find(conn);
+    if (found == g_conn_owner.end() || found->second != owner) { ++it; continue; }
+    erase_arrow_tables_for_conn(conn);
+    chdb_close_conn(conn);
+    g_conn_owner.erase(found);
+    if (g_reg.defaultConn == conn) g_reg.defaultConn = nullptr;
+    it = g_reg.conns.erase(it);
+  }
+  if (g_reg.conns.empty()) g_reg.boundKey.clear();
+}
+
 static void ensure_atexit() {
   if (!g_atexit_registered) {
     std::atexit(shutdown_on_process_exit);
@@ -265,9 +283,17 @@ static void ensure_atexit() {
 
 // Default connection for standalone query()/queryBind() (lazy, in-memory). A
 // single shared default per process; reused across standalone calls.
-static chdb_connection *get_default_conn(char **error_message) {
+static chdb_connection *get_default_conn(char **error_message, napi_env owner) {
   std::lock_guard<std::mutex> lk(g_reg_mu);
-  if (g_reg.defaultConn) return g_reg.defaultConn;
+  if (g_reg.defaultConn) {
+    auto found = g_conn_owner.find(g_reg.defaultConn);
+    if (found != g_conn_owner.end() && found->second != owner) {
+      if (error_message && !*error_message)
+        *error_message = strdup("Default connection belongs to another Node isolate; use a Session");
+      return nullptr;
+    }
+    return g_reg.defaultConn;
+  }
   // No default up. If a session holds a real data directory, "" cannot bind a
   // second one (one EmbeddedServer path per process) — reject, as v2 did.
   if (!g_reg.conns.empty()) {
@@ -283,6 +309,7 @@ static chdb_connection *get_default_conn(char **error_message) {
     return nullptr;
   }
   g_reg.defaultConn = c;
+  g_conn_owner[c] = owner;
   g_reg.boundKey = "";
   g_reg.conns.insert(c);
   // Register only after chdb_connect started the engine, so the backstop runs
@@ -322,6 +349,7 @@ static chdb_connection *acquire_session_conn(const std::string &path,
         }
         erase_arrow_tables_for_conn(g_reg.defaultConn);
         chdb_close_conn(g_reg.defaultConn);
+        g_conn_owner.erase(g_reg.defaultConn);
         g_reg.conns.erase(g_reg.defaultConn);
         g_reg.defaultConn = nullptr;
       }
@@ -356,6 +384,7 @@ static void release_session_conn(chdb_connection *conn) {
   // JS buffer references aren't orphaned in g_live_arrow_tables.
   erase_arrow_tables_for_conn(conn);
   chdb_close_conn(conn);
+  g_conn_owner.erase(conn);
   g_reg.conns.erase(it);
   if (conn == g_reg.defaultConn) g_reg.defaultConn = nullptr;
   // Last connection out unbinds the EmbeddedServer so a different path may bind.
@@ -387,8 +416,8 @@ static char *exec_query(chdb_connection conn, const char *query,
 }
 
 // Query function without session (uses the registry default connection)
-char *Query(const char *query, const char *format, char **error_message) {
-  chdb_connection *conn_ptr = get_default_conn(error_message);
+char *Query(const char *query, const char *format, char **error_message, napi_env owner) {
+  chdb_connection *conn_ptr = get_default_conn(error_message, owner);
   if (!conn_ptr) return nullptr;
   return exec_query(*conn_ptr, query, format, error_message);
 }
@@ -502,7 +531,7 @@ Napi::String QueryWrapper(const Napi::CallbackInfo &info) {
 
   char *error_message = nullptr;
 
-  char *result = Query(query.c_str(), format.c_str(), &error_message);
+  char *result = Query(query.c_str(), format.c_str(), &error_message, env);
 
   if (result == NULL) {
     if (error_message != NULL) {
@@ -551,7 +580,7 @@ Napi::String QueryWithParamsWrapper(const Napi::CallbackInfo &info) {
   }
 
   char *err = nullptr;
-  chdb_connection *conn_ptr = get_default_conn(&err);
+  chdb_connection *conn_ptr = get_default_conn(&err, env);
   char *out = conn_ptr ? exec_query_params(*conn_ptr, sql, format, names, values, &err) : nullptr;
   if (!out) {
     if (err) { Napi::Error::New(env, err).ThrowAsJavaScriptException(); free(err); }
@@ -695,7 +724,7 @@ Napi::Value QueryAsyncWrapper(const Napi::CallbackInfo &info) {
     return rejectedPromise(env, "param values must be pre-formatted strings");
 
   char *err = nullptr;
-  chdb_connection *conn_ptr = get_default_conn(&err); // registry: main thread only
+  chdb_connection *conn_ptr = get_default_conn(&err, env);
   if (!conn_ptr) {
     Napi::Value p = rejectedPromise(env, err ? err : "Failed to acquire default connection");
     if (err) free(err);
@@ -840,7 +869,7 @@ Napi::Value InsertRawAsyncWrapper(const Napi::CallbackInfo &info) {
   std::string prefix = info[0].As<Napi::String>();
 
   char *err = nullptr;
-  chdb_connection *conn_ptr = get_default_conn(&err); // registry: main thread only
+  chdb_connection *conn_ptr = get_default_conn(&err, env);
   if (!conn_ptr) {
     Napi::Value p = rejectedPromise(env, err ? err : "Failed to acquire default connection");
     if (err) free(err);
@@ -1100,6 +1129,10 @@ Napi::Value CreateConnectionWrapper(const Napi::CallbackInfo & info) {
         return env.Null();
     }
 
+    {
+        std::lock_guard<std::mutex> lock(g_reg_mu);
+        g_conn_owner[static_cast<chdb_connection *>(conn)] = env;
+    }
     return Napi::External<void>::New(env, conn);
 }
 
@@ -1183,6 +1216,429 @@ struct AbiArray {
   void * private_data;
 };
 
+struct AbiArrayStream {
+  int (*get_schema)(AbiArrayStream *, AbiSchema *);
+  int (*get_next)(AbiArrayStream *, AbiArray *);
+  const char * (*get_last_error)(AbiArrayStream *);
+  void (*release)(AbiArrayStream *);
+  void * private_data;
+};
+
+struct DirectArrowColumn {
+  std::string name;
+  std::string format;
+  bool nullable = false;
+  std::string dictionaryFormat;
+};
+struct DirectArrowDictionary {
+  int64_t length = 0;
+  int64_t nullCount = 0;
+  std::vector<std::vector<uint8_t>> buffers;
+};
+struct DirectArrowBatch {
+  int64_t length = 0;
+  // Each column has validity, values, and (for Utf8) offsets/data buffers.
+  std::vector<std::vector<std::vector<uint8_t>>> columns;
+  std::vector<int64_t> nullCounts;
+  std::vector<DirectArrowDictionary> dictionaries;
+};
+
+// Copy while the C Data array is alive. Never retain its pointers in a JS
+// Buffer after invoking release(); external ArrayBuffers require a separate
+// ownership bridge and are not implied by this direct (non-IPC) path.
+static bool copyDirectArrowBuffer(const void * ptr, size_t size,
+                                  std::vector<uint8_t> & out, std::string & error) {
+  constexpr size_t maxBuffer = 512ULL * 1024 * 1024;
+  if (size > maxBuffer || (size && !ptr)) {
+    error = "Arrow buffer is missing or exceeds the 512 MiB per-buffer limit";
+    return false;
+  }
+  if (size) {
+    const auto * bytes = static_cast<const uint8_t *>(ptr);
+    out.assign(bytes, bytes + size);
+  }
+  return true;
+}
+
+static void readDirectArrowStream(AbiArrayStream & stream,
+                                  std::vector<DirectArrowColumn> & fields,
+                                  std::vector<DirectArrowBatch> & batches,
+                                  std::string & error) {
+  if (!stream.release || !stream.get_schema || !stream.get_next) {
+    error = "Invalid Arrow result stream"; return;
+  }
+  AbiSchema schema{};
+  if (stream.get_schema(&stream, &schema) != 0) error = "Arrow get_schema failed";
+  else if (!schema.format || std::strcmp(schema.format, "+s") != 0 || schema.n_children < 0)
+    error = "Arrow result is not a struct schema";
+  if (error.empty()) {
+    for (int64_t i = 0; i < schema.n_children; ++i) {
+      const AbiSchema * field = schema.children ? schema.children[i] : nullptr;
+      if (!field || !field->format || !field->name || field->n_children) {
+        error = "Unsupported Arrow result field"; break;
+      }
+      const std::string format = field->format;
+      const bool timestamp = format.size() >= 4 && format[0] == 't' && format[1] == 's' &&
+          format[3] == ':' && std::strchr("smun", format[2]);
+      int precision = 0, scale = 0, bitWidth = 128;
+      const bool decimal = format.rfind("d:", 0) == 0 &&
+          std::sscanf(format.c_str(), "d:%d,%d,%d", &precision, &scale, &bitWidth) >= 2 &&
+          precision > 0 && (bitWidth == 128 || bitWidth == 256);
+      if (format != "c" && format != "C" && format != "s" && format != "S" &&
+          format != "i" && format != "I" && format != "l" && format != "L" &&
+          format != "f" && format != "g" && format != "b" && format != "u" && format != "z" &&
+          !timestamp && !decimal) {
+        error = "Unsupported Arrow result format: " + format; break;
+      }
+      std::string dictionaryFormat;
+      if (field->dictionary) {
+        if (!field->dictionary->format || field->dictionary->n_children || field->dictionary->dictionary ||
+            (format != "i" && format != "I") ||
+            (std::strcmp(field->dictionary->format, "u") != 0 &&
+             std::strcmp(field->dictionary->format, "z") != 0)) {
+          error = "Unsupported Arrow dictionary layout"; break;
+        }
+        dictionaryFormat = field->dictionary->format;
+      }
+      fields.push_back({field->name, format, (field->flags & 2) != 0, dictionaryFormat});
+    }
+  }
+  while (error.empty()) {
+    AbiArray array{};
+    if (stream.get_next(&stream, &array) != 0) {
+      error = stream.get_last_error && stream.get_last_error(&stream)
+          ? stream.get_last_error(&stream) : "Arrow get_next failed";
+    } else if (!array.release) {
+      break;
+    } else {
+      DirectArrowBatch batch;
+      batch.length = array.length;
+      if (array.length < 0 || array.offset != 0 || array.n_children != static_cast<int64_t>(fields.size()))
+        error = "Unsupported Arrow result array layout";
+      for (size_t i = 0; error.empty() && i < fields.size(); ++i) {
+        const AbiArray * child = array.children ? array.children[i] : nullptr;
+        if (!child || child->length != array.length || child->offset != 0 ||
+            child->null_count < 0 || child->null_count > child->length || !child->buffers) {
+          error = "Unsupported Arrow result child layout"; break;
+        }
+        const auto & format = fields[i].format;
+        const bool variable = format == "u" || format == "z";
+        const int needed = variable ? 3 : 2;
+        if (child->n_buffers < needed) { error = "Missing Arrow result buffers"; break; }
+        std::vector<std::vector<uint8_t>> buffers(needed);
+        const size_t validitySize = child->null_count ? static_cast<size_t>((child->length + 7) / 8) : 0;
+        if (!copyDirectArrowBuffer(child->buffers[0], validitySize, buffers[0], error)) break;
+        size_t valuesSize = 0;
+        if (variable) valuesSize = static_cast<size_t>(child->length + 1) * 4;
+        else if (format == "b") valuesSize = static_cast<size_t>((child->length + 7) / 8);
+        else {
+          int decimalPrecision = 0, decimalScale = 0, decimalBitWidth = 128;
+          const bool decimal = format.rfind("d:", 0) == 0 &&
+              std::sscanf(format.c_str(), "d:%d,%d,%d", &decimalPrecision, &decimalScale,
+                          &decimalBitWidth) >= 2;
+          const size_t width = decimal ? static_cast<size_t>(decimalBitWidth / 8)
+              : format == "c" || format == "C" ? 1
+              : format == "s" || format == "S" ? 2
+              : format == "i" || format == "I" || format == "f" ? 4 : 8;
+          valuesSize = static_cast<size_t>(child->length) * width;
+        }
+        if (!copyDirectArrowBuffer(child->buffers[1], valuesSize, buffers[1], error)) break;
+        if (variable) {
+          const auto * offsets = reinterpret_cast<const int32_t *>(child->buffers[1]);
+          if (!offsets || offsets[child->length] < 0) {
+            error = "Invalid Arrow UTF-8 offsets"; break;
+          }
+          if (!copyDirectArrowBuffer(child->buffers[2], static_cast<size_t>(offsets[child->length]),
+                                     buffers[2], error)) break;
+        }
+        batch.columns.push_back(std::move(buffers));
+        batch.nullCounts.push_back(child->null_count);
+        DirectArrowDictionary dictionary;
+        if (!fields[i].dictionaryFormat.empty()) {
+          const AbiArray * source = child->dictionary;
+          if (!source || source->length < 0 || source->offset != 0 || source->n_buffers < 3 ||
+              source->null_count < 0 || source->null_count > source->length || !source->buffers) {
+            error = "Invalid Arrow dictionary array"; break;
+          }
+          dictionary.length = source->length;
+          dictionary.nullCount = source->null_count;
+          dictionary.buffers.resize(3);
+          if (!copyDirectArrowBuffer(source->buffers[0], source->null_count ?
+              static_cast<size_t>((source->length + 7) / 8) : 0, dictionary.buffers[0], error)) break;
+          if (!copyDirectArrowBuffer(source->buffers[1], static_cast<size_t>(source->length + 1) * 4,
+                                     dictionary.buffers[1], error)) break;
+          const auto * offsets = reinterpret_cast<const int32_t *>(source->buffers[1]);
+          if (!offsets || offsets[source->length] < 0) { error = "Invalid Arrow dictionary offsets"; break; }
+          if (!copyDirectArrowBuffer(source->buffers[2], static_cast<size_t>(offsets[source->length]),
+                                     dictionary.buffers[2], error)) break;
+        }
+        batch.dictionaries.push_back(std::move(dictionary));
+      }
+      array.release(&array);
+      array.release = nullptr;
+      if (error.empty()) batches.push_back(std::move(batch));
+    }
+    if (!error.empty()) {
+      if (array.release) array.release(&array);
+      break;
+    }
+  }
+  if (schema.release) schema.release(&schema);
+}
+
+static Napi::Object directArrowResultToJs(Napi::Env env,
+                                          const std::vector<DirectArrowColumn> & fieldData,
+                                          const std::vector<DirectArrowBatch> & batchData) {
+  Napi::Array fields = Napi::Array::New(env, fieldData.size());
+  for (size_t i = 0; i < fieldData.size(); ++i) {
+    Napi::Object field = Napi::Object::New(env);
+    field.Set("name", fieldData[i].name);
+    field.Set("format", fieldData[i].format);
+    field.Set("nullable", Napi::Boolean::New(env, fieldData[i].nullable));
+    if (!fieldData[i].dictionaryFormat.empty()) field.Set("dictionaryFormat", fieldData[i].dictionaryFormat);
+    fields.Set(i, field);
+  }
+  Napi::Array batches = Napi::Array::New(env, batchData.size());
+  for (size_t i = 0; i < batchData.size(); ++i) {
+    Napi::Object batch = Napi::Object::New(env);
+    batch.Set("length", Napi::Number::New(env, static_cast<double>(batchData[i].length)));
+    Napi::Array columns = Napi::Array::New(env, batchData[i].columns.size());
+    for (size_t j = 0; j < batchData[i].columns.size(); ++j) {
+      Napi::Object column = Napi::Object::New(env);
+      column.Set("nullCount", Napi::Number::New(env, static_cast<double>(batchData[i].nullCounts[j])));
+      Napi::Array buffers = Napi::Array::New(env, batchData[i].columns[j].size());
+      for (size_t k = 0; k < batchData[i].columns[j].size(); ++k) {
+        const auto & data = batchData[i].columns[j][k];
+        buffers.Set(k, Napi::Buffer<uint8_t>::Copy(env, data.data(), data.size()));
+      }
+      column.Set("buffers", buffers);
+      if (!fieldData[j].dictionaryFormat.empty()) {
+        const auto & source = batchData[i].dictionaries[j];
+        Napi::Object dictionary = Napi::Object::New(env);
+        dictionary.Set("length", Napi::Number::New(env, static_cast<double>(source.length)));
+        dictionary.Set("nullCount", Napi::Number::New(env, static_cast<double>(source.nullCount)));
+        Napi::Array dataBuffers = Napi::Array::New(env, source.buffers.size());
+        for (size_t k = 0; k < source.buffers.size(); ++k) {
+          const auto & data = source.buffers[k];
+          dataBuffers.Set(k, Napi::Buffer<uint8_t>::Copy(env, data.data(), data.size()));
+        }
+        dictionary.Set("buffers", dataBuffers);
+        column.Set("dictionary", dictionary);
+      }
+      columns.Set(j, column);
+    }
+    batch.Set("columns", columns);
+    batches.Set(i, batch);
+  }
+  Napi::Object out = Napi::Object::New(env);
+  out.Set("fields", fields);
+  out.Set("batches", batches);
+  return out;
+}
+
+static bool parseDirectArrowOptions(Napi::Env env, Napi::Value input, chdb_arrow_options & options) {
+  options = {0, 0, 1};
+  if (input.IsUndefined() || input.IsNull()) return true;
+  if (!input.IsObject()) {
+    Napi::TypeError::New(env, "Arrow options must be an object").ThrowAsJavaScriptException();
+    return false;
+  }
+  Napi::Object object = input.As<Napi::Object>();
+  for (const char * key : {"unsupportedAsBinary", "stringAsString", "lowCardinalityAsDictionary"}) {
+    Napi::Value value = object.Get(key);
+    if (!value.IsUndefined() && !value.IsBoolean()) {
+      Napi::TypeError::New(env, std::string("Arrow option ") + key + " must be boolean").ThrowAsJavaScriptException();
+      return false;
+    }
+  }
+  Napi::Value unsupported = object.Get("unsupportedAsBinary");
+  Napi::Value stringAsString = object.Get("stringAsString");
+  Napi::Value dictionary = object.Get("lowCardinalityAsDictionary");
+  if (!unsupported.IsUndefined()) options.unsupported_as_binary = unsupported.As<Napi::Boolean>().Value();
+  if (!stringAsString.IsUndefined()) options.string_as_string = stringAsString.As<Napi::Boolean>().Value();
+  if (!dictionary.IsUndefined()) options.low_cardinality_as_dictionary = dictionary.As<Napi::Boolean>().Value();
+  return true;
+}
+
+class QueryArrowWorker : public Napi::AsyncWorker {
+public:
+  QueryArrowWorker(Napi::Env env, chdb_connection conn, std::string sql, chdb_arrow_options options)
+      : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)),
+        conn_(conn), sql_(std::move(sql)), options_(options), guard_(conn) {}
+  Napi::Promise GetPromise() { return deferred_.Promise(); }
+
+  void Execute() override {
+    AbiArrayStream stream{};
+    chdb_result * result = chdb_query_arrow_n(
+        conn_, sql_.data(), sql_.size(), reinterpret_cast<chdb_arrow_stream>(&stream), &options_);
+    if (!result) { SetError("chdb_query_arrow_n returned a null result"); return; }
+    std::string error;
+    if (const char * nativeError = chdb_result_error(result)) error = nativeError;
+    if (error.empty()) readDirectArrowStream(stream, fields_, batches_, error);
+    if (stream.release) stream.release(&stream);
+    chdb_destroy_query_result(result);
+    if (!error.empty()) SetError(error);
+  }
+
+  void OnOK() override {
+    deferred_.Resolve(directArrowResultToJs(Env(), fields_, batches_));
+  }
+  void OnError(const Napi::Error & e) override { deferred_.Reject(e.Value()); }
+
+private:
+  Napi::Promise::Deferred deferred_;
+  chdb_connection conn_;
+  std::string sql_;
+  chdb_arrow_options options_;
+  std::vector<DirectArrowColumn> fields_;
+  std::vector<DirectArrowBatch> batches_;
+  ConnGuard guard_;
+};
+
+Napi::Value QueryArrowAsyncWrapper(const Napi::CallbackInfo & info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsExternal() || !info[1].IsString()) {
+    Napi::TypeError::New(env, "Usage: connection, SQL").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  auto * conn = static_cast<chdb_connection *>(info[0].As<Napi::External<void>>().Data());
+  if (!conn || !*conn) return rejectedPromise(env, "No active connection available");
+  chdb_arrow_options options;
+  if (!parseDirectArrowOptions(env, info.Length() >= 3 ? info[2] : env.Undefined(), options)) return env.Undefined();
+  auto * worker = new QueryArrowWorker(env, *conn, info[1].As<Napi::String>().Utf8Value(), options);
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+struct DirectArrowStreamState {
+  chdb_connection conn;
+  chdb_result * handle;
+  bool closed = false;
+};
+
+static void closeDirectArrowStream(DirectArrowStreamState * state) {
+  if (!state || state->closed) return;
+  state->closed = true;
+  if (state->handle) {
+    chdb_stream_cancel_query(state->conn, state->handle);
+    chdb_destroy_query_result(state->handle);
+    state->handle = nullptr;
+  }
+}
+
+Napi::Value StartArrowStreamWrapper(const Napi::CallbackInfo & info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsExternal() || !info[1].IsString()) {
+    Napi::TypeError::New(env, "Usage: connection, SQL").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  auto * conn = static_cast<chdb_connection *>(info[0].As<Napi::External<void>>().Data());
+  if (!conn || !*conn) {
+    Napi::Error::New(env, "No active connection available").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_arrow_options options;
+  if (!parseDirectArrowOptions(env, info.Length() >= 3 ? info[2] : env.Undefined(), options)) return env.Undefined();
+  const std::string sql = info[1].As<Napi::String>().Utf8Value();
+  chdb_result * handle = nullptr;
+  if (info.Length() >= 4 && info[3].IsObject()) {
+    std::vector<std::string> names, values;
+    if (!collectParams(info[3].As<Napi::Object>(), names, values)) {
+      Napi::TypeError::New(env, "Arrow stream parameter values must be pre-formatted strings")
+          .ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    const size_t count = names.size();
+    std::vector<const char *> cNames(count), cValues(count);
+    std::vector<size_t> valueLengths(count);
+    for (size_t i = 0; i < count; ++i) {
+      cNames[i] = names[i].c_str();
+      cValues[i] = values[i].data();
+      valueLengths[i] = values[i].size();
+    }
+    handle = chdb_stream_query_arrow_with_params_n(*conn, sql.data(), sql.size(), &options,
+        count ? cNames.data() : nullptr, nullptr,
+        count ? cValues.data() : nullptr, count ? valueLengths.data() : nullptr, count);
+  } else {
+    handle = chdb_stream_query_arrow_n(*conn, sql.data(), sql.size(), &options);
+  }
+  if (!handle) {
+    Napi::Error::New(env, "chdb_stream_query_arrow_n returned a null handle").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  if (const char * error = chdb_result_error(handle)) {
+    const std::string message = error;
+    chdb_destroy_query_result(handle);
+    Napi::Error::New(env, message).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  auto * state = new DirectArrowStreamState{*conn, handle, false};
+  return Napi::External<DirectArrowStreamState>::New(env, state, [](Napi::Env, DirectArrowStreamState * s) {
+    closeDirectArrowStream(s);
+    delete s;
+  });
+}
+
+class FetchArrowWorker : public Napi::AsyncWorker {
+public:
+  FetchArrowWorker(Napi::Env env, DirectArrowStreamState * state, Napi::Value handle)
+      : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)),
+        state_(state), handleRef_(Napi::Persistent(handle)), guard_(state ? state->conn : nullptr) {}
+  Napi::Promise GetPromise() { return deferred_.Promise(); }
+
+  void Execute() override {
+    if (!state_ || state_->closed || !state_->handle) { done_ = true; return; }
+    AbiArrayStream batch{};
+    const chdb_state status = chdb_stream_fetch_arrow(
+        state_->conn, state_->handle, reinterpret_cast<chdb_arrow_stream>(&batch));
+    std::string error;
+    if (status != CHDBSuccess) error = "chdb_stream_fetch_arrow failed";
+    if (error.empty()) readDirectArrowStream(batch, fields_, batches_, error);
+    if (batch.release) batch.release(&batch);
+    if (!error.empty()) {
+      closeDirectArrowStream(state_);
+      SetError(error);
+      return;
+    }
+    if (batches_.empty()) {
+      done_ = true;
+      chdb_destroy_query_result(state_->handle);
+      state_->handle = nullptr;
+      state_->closed = true;
+    }
+  }
+  void OnOK() override {
+    Napi::Object out = directArrowResultToJs(Env(), fields_, batches_);
+    out.Set("done", Napi::Boolean::New(Env(), done_));
+    deferred_.Resolve(out);
+  }
+  void OnError(const Napi::Error & e) override { deferred_.Reject(e.Value()); }
+
+private:
+  Napi::Promise::Deferred deferred_;
+  DirectArrowStreamState * state_;
+  Napi::Reference<Napi::Value> handleRef_;
+  bool done_ = false;
+  std::vector<DirectArrowColumn> fields_;
+  std::vector<DirectArrowBatch> batches_;
+  ConnGuard guard_;
+};
+
+Napi::Value FetchArrowStreamWrapper(const Napi::CallbackInfo & info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsExternal()) return rejectedPromise(env, "Usage: Arrow stream handle");
+  auto * state = info[0].As<Napi::External<DirectArrowStreamState>>().Data();
+  auto * worker = new FetchArrowWorker(env, state, info[0]);
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+Napi::Value CancelArrowStreamWrapper(const Napi::CallbackInfo & info) {
+  if (info.Length() >= 1 && info[0].IsExternal())
+    closeDirectArrowStream(info[0].As<Napi::External<DirectArrowStreamState>>().Data());
+  return info.Env().Undefined();
+}
+
 // No-op release callbacks. chdb-arrow.cpp saves each child's release into a
 // vector before scanning, then restores it; passing NULL would segfault there.
 static void AbiSchemaNoopRelease(AbiSchema * s) { s->release = nullptr; }
@@ -1219,7 +1675,7 @@ static bool resolveArrowConn(Napi::Env env, Napi::Value handle, chdb_connection 
   }
   if (handle.IsNull() || handle.IsUndefined()) {
     char * err = nullptr;
-    chdb_connection * c = get_default_conn(&err);
+    chdb_connection * c = get_default_conn(&err, env);
     if (c == nullptr) {
       std::string msg = err ? err : "no default connection available";
       if (err) free(err);
@@ -1327,9 +1783,13 @@ struct LiveArrowTable {
   std::string format;                // "+s" + child format strings (owned strings below)
   std::vector<std::string> formatStorage;
   std::vector<std::string> nameStorage;
+  std::vector<std::string> dictionaryFormatStorage;
   // Children are stored contiguously and pointed at via pointer-arrays below.
   std::vector<AbiSchema> childSchemas;
   std::vector<AbiArray> childArrays;
+  std::vector<AbiSchema> dictionarySchemas;
+  std::vector<AbiArray> dictionaryArrays;
+  std::vector<std::vector<const void *>> dictionaryBufferPtrs;
   std::vector<AbiSchema *> childSchemaPtrs;
   std::vector<AbiArray *> childArrayPtrs;
   AbiSchema rootSchema{};
@@ -1346,52 +1806,230 @@ struct LiveArrowKeyHash {
   }
 };
 static std::unordered_map<LiveArrowKey, std::unique_ptr<LiveArrowTable>, LiveArrowKeyHash> g_live_arrow_tables;
+struct LiveArrowStream {
+  AbiArrayStream stream{};
+  std::vector<std::unique_ptr<LiveArrowTable>> batches;
+  size_t next = 0;
+};
+static std::unordered_map<LiveArrowKey, std::unique_ptr<LiveArrowStream>, LiveArrowKeyHash> g_live_arrow_streams;
+struct LiveAsyncArrowStream;
+struct AsyncArrowLease {
+  std::shared_ptr<LiveAsyncArrowStream> state;
+  std::unique_ptr<LiveArrowTable> batch;
+};
+struct AsyncArrowSignal {
+  std::shared_ptr<LiveAsyncArrowStream> state;
+  AsyncArrowLease * released = nullptr;
+};
+struct PendingAsyncArrowBatch {
+  std::unique_ptr<LiveArrowTable> batch;
+  Napi::Promise::Deferred deferred;
+};
+struct LiveAsyncArrowStream {
+  explicit LiveAsyncArrowStream(Napi::Env owner) : env(owner) {}
+  Napi::Env env;
+  AbiArrayStream stream{};
+  std::unique_ptr<LiveArrowTable> schemaBatch;
+  std::deque<std::unique_ptr<LiveArrowTable>> queue;
+  std::deque<PendingAsyncArrowBatch> waiting;
+  std::mutex mu;
+  std::condition_variable cv;
+  Napi::ThreadSafeFunction releaseTsfn;
+  std::weak_ptr<LiveAsyncArrowStream> self;
+  size_t outstanding = 0;
+  bool ended = false;
+  bool cancelled = false;
+  bool tsfnReleased = false;
+  std::string error;
+  ~LiveAsyncArrowStream() { if (releaseTsfn && !tsfnReleased) releaseTsfn.Release(); }
+};
+static std::unordered_map<LiveArrowKey, std::shared_ptr<LiveAsyncArrowStream>, LiveArrowKeyHash> g_live_arrow_async;
+static std::atomic<uint64_t> g_async_arrow_delivered{0};
+static std::atomic<uint64_t> g_async_arrow_released{0};
+static std::atomic<uint64_t> g_arrow_input_schema_released{0};
 static std::mutex g_live_arrow_mu;
 
-// Drop every registered Arrow table belonging to `conn`, releasing the pinned
-// JS buffer references and C-side struct storage. Called from the connection
-// close paths so a session closed without an explicit Unregister doesn't leak.
+static void countedArrowSchemaRelease(AbiSchema * schema) {
+  ++g_arrow_input_schema_released;
+  schema->release = nullptr;
+}
+
+static void cancelAsyncArrowStream(const std::shared_ptr<LiveAsyncArrowStream> & state) {
+  if (!state) return;
+  std::deque<PendingAsyncArrowBatch> waiting;
+  bool releaseTsfn = false;
+  {
+    std::lock_guard<std::mutex> lock(state->mu);
+    state->cancelled = true;
+    state->ended = true;
+    if (state->error.empty()) state->error = "Arrow reader cancelled";
+    state->queue.clear();
+    waiting.swap(state->waiting);
+    if (state->outstanding == 0 && !state->tsfnReleased) {
+      state->tsfnReleased = true;
+      releaseTsfn = true;
+    }
+  }
+  state->cv.notify_all();
+  if (releaseTsfn) state->releaseTsfn.Release();
+  for (auto & pending : waiting)
+    pending.deferred.Reject(Napi::Error::New(state->env, "Arrow reader closed").Value());
+}
+
+static int liveAsyncArrowGetSchema(AbiArrayStream * stream, AbiSchema * out) {
+  auto * live = static_cast<LiveAsyncArrowStream *>(stream->private_data);
+  if (!live || !live->schemaBatch) return 1;
+  *out = live->schemaBatch->rootSchema;
+  out->release = countedArrowSchemaRelease;
+  return 0;
+}
+static const char * liveAsyncArrowGetLastError(AbiArrayStream * stream) {
+  auto * live = static_cast<LiveAsyncArrowStream *>(stream->private_data);
+  return live && !live->error.empty() ? live->error.c_str() : nullptr;
+}
+static void liveAsyncArrowRelease(AbiArrayStream * stream) { stream->release = nullptr; }
+
+static void deliverAsyncArrowSignal(Napi::Env env, Napi::Function, AsyncArrowSignal * signal) {
+  auto state = signal->state;
+  if (signal->released) delete signal->released; // Napi::Reference: main thread only
+  const bool released = signal->released != nullptr;
+  if (released) ++g_async_arrow_released;
+  delete signal;
+  std::optional<Napi::Promise::Deferred> ready;
+  bool releaseTsfn = false;
+  {
+    std::lock_guard<std::mutex> lock(state->mu);
+    if (released) --state->outstanding;
+    if (state->cancelled && state->outstanding == 0 && !state->tsfnReleased) {
+      state->tsfnReleased = true;
+      releaseTsfn = true;
+    }
+    if (!state->cancelled && !state->waiting.empty() && state->queue.size() < 2) {
+      auto pending = std::move(state->waiting.front());
+      state->waiting.pop_front();
+      state->queue.push_back(std::move(pending.batch));
+      ready = pending.deferred;
+    }
+  }
+  state->cv.notify_all();
+  if (releaseTsfn) state->releaseTsfn.Release();
+  if (ready) ready->Resolve(env.Undefined());
+}
+
+static void liveAsyncArrowArrayRelease(AbiArray * array) {
+  auto * lease = static_cast<AsyncArrowLease *>(array->private_data);
+  array->release = nullptr;
+  array->private_data = nullptr;
+  if (!lease) return;
+  // C Data release may run on a core worker. Napi::Reference destruction and
+  // producer promise resolution must happen on the owning JS isolate instead.
+  auto * signal = new AsyncArrowSignal{lease->state, lease};
+  napi_status status = lease->state->releaseTsfn.NonBlockingCall(signal, deliverAsyncArrowSignal);
+  // During isolate shutdown there is no safe thread on which to drop pinned
+  // JS references. Leave the lease for process teardown rather than release it
+  // on a core worker. Normal operation never takes this path.
+  (void)status;
+}
+
+static int liveAsyncArrowGetNext(AbiArrayStream * stream, AbiArray * out) {
+  auto * live = static_cast<LiveAsyncArrowStream *>(stream->private_data);
+  if (!live) return 1;
+  std::unique_lock<std::mutex> lock(live->mu);
+  live->cv.wait(lock, [live] { return !live->queue.empty() || live->ended || live->cancelled; });
+  if (live->cancelled || !live->error.empty()) return 1;
+  if (live->queue.empty()) { *out = {}; return 0; }
+  auto batch = std::move(live->queue.front());
+  live->queue.pop_front();
+  ++live->outstanding;
+  lock.unlock();
+  // The state is also owned by the registration map and its JS handle. The
+  // weak self reference avoids a permanent ownership cycle.
+  auto * lease = new AsyncArrowLease{live->self.lock(), std::move(batch)};
+  ++g_async_arrow_delivered;
+  auto * capacity = new AsyncArrowSignal{lease->state, nullptr};
+  (void)live->releaseTsfn.NonBlockingCall(capacity, deliverAsyncArrowSignal);
+  *out = lease->batch->rootArray;
+  out->release = liveAsyncArrowArrayRelease;
+  out->private_data = lease;
+  return 0;
+}
+
+static int liveArrowGetSchema(AbiArrayStream * stream, AbiSchema * out) {
+  auto * live = static_cast<LiveArrowStream *>(stream->private_data);
+  if (!live || live->batches.empty()) return 1;
+  *out = live->batches.front()->rootSchema;
+  out->release = countedArrowSchemaRelease;
+  return 0;
+}
+static int liveArrowGetNext(AbiArrayStream * stream, AbiArray * out) {
+  auto * live = static_cast<LiveArrowStream *>(stream->private_data);
+  if (!live) return 1;
+  if (live->next >= live->batches.size()) {
+    *out = {};
+    return 0;
+  }
+  *out = live->batches[live->next++]->rootArray;
+  out->release = AbiArrayNoopRelease;
+  return 0;
+}
+static const char * liveArrowGetLastError(AbiArrayStream *) { return nullptr; }
+static void liveArrowRelease(AbiArrayStream * stream) { stream->release = nullptr; }
+
+// Unregister BEFORE releasing the JS buffers and C-side structs. Core's Arrow
+// registry is process-wide and chdb_close_conn does not remove its entries;
+// erasing only our map left dangling pointers and reserved names behind.
 static void erase_arrow_tables_for_conn(chdb_connection *conn) {
   std::lock_guard<std::mutex> lock(g_live_arrow_mu);
   for (auto it = g_live_arrow_tables.begin(); it != g_live_arrow_tables.end();) {
-    if (it->first.first == conn) it = g_live_arrow_tables.erase(it);
+    if (it->first.first == conn) {
+      chdb_arrow_unregister_table(*conn, it->first.second.c_str());
+      it = g_live_arrow_tables.erase(it);
+    }
     else ++it;
+  }
+  for (auto it = g_live_arrow_streams.begin(); it != g_live_arrow_streams.end();) {
+    if (it->first.first == conn) {
+      chdb_arrow_unregister_table(*conn, it->first.second.c_str());
+      it = g_live_arrow_streams.erase(it);
+    } else ++it;
+  }
+  for (auto it = g_live_arrow_async.begin(); it != g_live_arrow_async.end();) {
+    if (it->first.first == conn) {
+      chdb_arrow_unregister_table(*conn, it->first.second.c_str());
+      cancelAsyncArrowStream(it->second);
+      it = g_live_arrow_async.erase(it);
+    } else ++it;
   }
 }
 
 // Drop the entire registry (process teardown backstop).
 static void clear_all_arrow_tables() {
   std::lock_guard<std::mutex> lock(g_live_arrow_mu);
+  // Only called by atexit. The core registry's static destructor may have
+  // already run; normal connection closes unregister before reaching here.
   g_live_arrow_tables.clear();
+  g_live_arrow_streams.clear();
+  g_live_arrow_async.clear();
 }
 
-// nativeArrowRegisterColumns(conn, tableName, columns)
-//   columns: Array<{ name, format, length, nullCount, buffers: Array<Buffer|null> }>
-//     - format: an Arrow C Data Interface format string ("i"/"l"/"g"/"b"/"u"/...)
-//     - buffers[0] = validity bitmap (null if nullCount === 0)
-//     - buffers[1] = data
-//     - buffers[2] = offsets (utf8 only)
-Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
-  Napi::Env env = info.Env();
-  if (info.Length() < 3 || !info[1].IsString() || !info[2].IsArray()) {
-    Napi::TypeError::New(env, "Usage: connection, tableName, columns[]").ThrowAsJavaScriptException();
-    return env.Undefined();
-  }
-  chdb_connection * conn = nullptr;
-  if (!resolveArrowConn(env, info[0], &conn)) return env.Undefined();
-  std::string tableName = info[1].As<Napi::String>().Utf8Value();
-  Napi::Array columns = info[2].As<Napi::Array>();
+// Build one caller-owned C Data batch from JS column buffers. Used by both
+// chdb_arrow_array_scan and the multi-batch C Stream adapter below.
+static std::unique_ptr<LiveArrowTable> makeLiveArrowTable(Napi::Env env, Napi::Array columns) {
   uint32_t ncols = columns.Length();
   if (ncols == 0) {
     Napi::TypeError::New(env, "registerArrowTable: at least one column required").ThrowAsJavaScriptException();
-    return env.Undefined();
+    return nullptr;
   }
 
   auto live = std::make_unique<LiveArrowTable>();
   live->formatStorage.reserve(ncols);
   live->nameStorage.reserve(ncols);
+  live->dictionaryFormatStorage.reserve(ncols);
   live->childSchemas.resize(ncols);
   live->childArrays.resize(ncols);
+  live->dictionarySchemas.resize(ncols);
+  live->dictionaryArrays.resize(ncols);
+  live->dictionaryBufferPtrs.resize(ncols);
   live->childSchemaPtrs.resize(ncols);
   live->childArrayPtrs.resize(ncols);
   live->buffers.bufferPtrs.resize(ncols);
@@ -1403,7 +2041,7 @@ Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
     Napi::Value colv = columns[i];
     if (!colv.IsObject()) {
       Napi::TypeError::New(env, "Each column must be an object").ThrowAsJavaScriptException();
-      return env.Undefined();
+      return nullptr;
     }
     Napi::Object col = colv.As<Napi::Object>();
     Napi::Value nameV = col.Get("name");
@@ -1413,7 +2051,7 @@ Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
     Napi::Value buffersV = col.Get("buffers");
     if (!nameV.IsString() || !formatV.IsString() || !lengthV.IsNumber() || !buffersV.IsArray()) {
       Napi::TypeError::New(env, "Column needs { name, format, length, buffers }").ThrowAsJavaScriptException();
-      return env.Undefined();
+      return nullptr;
     }
     live->nameStorage.emplace_back(nameV.As<Napi::String>().Utf8Value());
     live->formatStorage.emplace_back(formatV.As<Napi::String>().Utf8Value());
@@ -1423,7 +2061,7 @@ Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
     // ArrowArray.length, and a negative nullCount mismatches the validity bitmap.
     if (length < 0 || nullCount < 0) {
       Napi::TypeError::New(env, "Column length and nullCount must be non-negative").ThrowAsJavaScriptException();
-      return env.Undefined();
+      return nullptr;
     }
     // A separate flag (not a -1 sentinel) so a column whose length is legitimately
     // any value, including 0, sets the root length on the first column.
@@ -1432,7 +2070,7 @@ Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
       rootLengthSet = true;
     } else if (rootLength != length) {
       Napi::TypeError::New(env, "All columns must have the same length").ThrowAsJavaScriptException();
-      return env.Undefined();
+      return nullptr;
     }
 
     Napi::Array bufs = buffersV.As<Napi::Array>();
@@ -1447,7 +2085,7 @@ Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
       }
       if (!bv.IsBuffer()) {
         Napi::TypeError::New(env, "Column buffers must be Node Buffers or null").ThrowAsJavaScriptException();
-        return env.Undefined();
+        return nullptr;
       }
       Napi::Buffer<uint8_t> buf = bv.As<Napi::Buffer<uint8_t>>();
       ptrs.push_back(buf.Data());
@@ -1484,6 +2122,56 @@ Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
     ca.release = AbiArrayNoopRelease;
     ca.private_data = nullptr;
     live->childArrayPtrs[i] = &ca;
+
+    Napi::Value dictionary = col.Get("dictionary");
+    if (!dictionary.IsUndefined() && !dictionary.IsNull()) {
+      if (!dictionary.IsObject()) {
+        Napi::TypeError::New(env, "Arrow dictionary must be an object").ThrowAsJavaScriptException();
+        return nullptr;
+      }
+      Napi::Object dict = dictionary.As<Napi::Object>();
+      Napi::Value fmt = dict.Get("format"), count = dict.Get("length"),
+          nulls = dict.Get("nullCount"), values = dict.Get("buffers");
+      if (!fmt.IsString() || !count.IsNumber() || !nulls.IsNumber() || !values.IsArray()) {
+        Napi::TypeError::New(env, "Arrow dictionary needs format, length, nullCount, buffers").ThrowAsJavaScriptException();
+        return nullptr;
+      }
+      const int64_t dictLength = count.As<Napi::Number>().Int64Value();
+      const int64_t dictNulls = nulls.As<Napi::Number>().Int64Value();
+      if (dictLength < 0 || dictNulls < 0 || dictNulls > dictLength) {
+        Napi::TypeError::New(env, "Arrow dictionary length/nullCount invalid").ThrowAsJavaScriptException();
+        return nullptr;
+      }
+      live->dictionaryFormatStorage.emplace_back(fmt.As<Napi::String>().Utf8Value());
+      Napi::Array dictBuffers = values.As<Napi::Array>();
+      auto & pointers = live->dictionaryBufferPtrs[i];
+      pointers.reserve(dictBuffers.Length());
+      for (uint32_t j = 0; j < dictBuffers.Length(); ++j) {
+        Napi::Value value = dictBuffers[j];
+        if (value.IsNull() || value.IsUndefined()) { pointers.push_back(nullptr); continue; }
+        if (!value.IsBuffer()) {
+          Napi::TypeError::New(env, "Arrow dictionary buffers must be Buffers").ThrowAsJavaScriptException();
+          return nullptr;
+        }
+        pointers.push_back(value.As<Napi::Buffer<uint8_t>>().Data());
+        live->buffers.jsRefs.push_back(Napi::Reference<Napi::Value>::New(value, 1));
+      }
+      AbiSchema & ds = live->dictionarySchemas[i];
+      ds = {};
+      ds.format = live->dictionaryFormatStorage.back().c_str();
+      ds.name = "";
+      ds.flags = 2;
+      ds.release = AbiSchemaNoopRelease;
+      cs.dictionary = &ds;
+      AbiArray & da = live->dictionaryArrays[i];
+      da = {};
+      da.length = dictLength;
+      da.null_count = dictNulls;
+      da.n_buffers = static_cast<int64_t>(pointers.size());
+      da.buffers = pointers.data();
+      da.release = AbiArrayNoopRelease;
+      ca.dictionary = &da;
+    }
   }
 
   // Root struct schema.
@@ -1514,6 +2202,22 @@ Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
   live->rootArray.release = AbiArrayNoopRelease;
   live->rootArray.private_data = nullptr;
 
+  return live;
+}
+
+// nativeArrowRegisterColumns(conn, tableName, columns)
+Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[1].IsString() || !info[2].IsArray()) {
+    Napi::TypeError::New(env, "Usage: connection, tableName, columns[]").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection * conn = nullptr;
+  if (!resolveArrowConn(env, info[0], &conn)) return env.Undefined();
+  std::string tableName = info[1].As<Napi::String>().Utf8Value();
+  auto live = makeLiveArrowTable(env, info[2].As<Napi::Array>());
+  if (!live) return env.Undefined();
+
   chdb_state st = chdb_arrow_array_scan(
       *conn,
       tableName.c_str(),
@@ -1531,6 +2235,161 @@ Napi::Value ArrowRegisterColumnsWrapper(const Napi::CallbackInfo & info) {
     g_live_arrow_tables[key] = std::move(live);
   }
   return env.Undefined();
+}
+
+// A materialized apache-arrow Table may contain several RecordBatches. The
+// C Stream callbacks only read prebuilt native descriptors and pinned Buffer
+// pointers; no JS callback is invoked from a core query worker thread.
+Napi::Value ArrowRegisterBatchesWrapper(const Napi::CallbackInfo & info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[1].IsString() || !info[2].IsArray()) {
+    Napi::TypeError::New(env, "Usage: connection, tableName, batches[]").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection * conn = nullptr;
+  if (!resolveArrowConn(env, info[0], &conn)) return env.Undefined();
+  std::string tableName = info[1].As<Napi::String>().Utf8Value();
+  Napi::Array batches = info[2].As<Napi::Array>();
+  if (!batches.Length()) {
+    Napi::TypeError::New(env, "Arrow Table needs at least one batch").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  auto live = std::make_unique<LiveArrowStream>();
+  live->batches.reserve(batches.Length());
+  for (uint32_t i = 0; i < batches.Length(); ++i) {
+    Napi::Value value = batches[i];
+    if (!value.IsArray()) {
+      Napi::TypeError::New(env, "Each Arrow batch must contain columns[]").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    auto batch = makeLiveArrowTable(env, value.As<Napi::Array>());
+    if (!batch) return env.Undefined();
+    if (!live->batches.empty()) {
+      const auto & first = *live->batches.front();
+      if (batch->nameStorage != first.nameStorage || batch->formatStorage != first.formatStorage) {
+        Napi::TypeError::New(env, "Arrow batch schemas must match").ThrowAsJavaScriptException();
+        return env.Undefined();
+      }
+    }
+    live->batches.push_back(std::move(batch));
+  }
+  live->stream.get_schema = liveArrowGetSchema;
+  live->stream.get_next = liveArrowGetNext;
+  live->stream.get_last_error = liveArrowGetLastError;
+  live->stream.release = liveArrowRelease;
+  live->stream.private_data = live.get();
+  if (chdb_arrow_scan(*conn, tableName.c_str(), reinterpret_cast<chdb_arrow_stream>(&live->stream)) != CHDBSuccess) {
+    Napi::Error::New(env, "chdb_arrow_scan failed for table " + tableName).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_live_arrow_mu);
+    g_live_arrow_streams[LiveArrowKey{conn, tableName}] = std::move(live);
+  }
+  return env.Undefined();
+}
+
+struct AsyncArrowHandle { std::shared_ptr<LiveAsyncArrowStream> state; };
+
+Napi::Value ArrowRegisterReaderWrapper(const Napi::CallbackInfo & info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[1].IsString() || !info[2].IsArray()) {
+    Napi::TypeError::New(env, "Usage: connection, tableName, firstBatchColumns[]").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  chdb_connection * conn = nullptr;
+  if (!resolveArrowConn(env, info[0], &conn)) return env.Undefined();
+  std::string tableName = info[1].As<Napi::String>().Utf8Value();
+  auto schemaBatch = makeLiveArrowTable(env, info[2].As<Napi::Array>());
+  auto firstBatch = makeLiveArrowTable(env, info[2].As<Napi::Array>());
+  if (!schemaBatch || !firstBatch) return env.Undefined();
+  auto state = std::make_shared<LiveAsyncArrowStream>(env);
+  state->self = state;
+  state->schemaBatch = std::move(schemaBatch);
+  state->queue.push_back(std::move(firstBatch));
+  state->releaseTsfn = Napi::ThreadSafeFunction::New(env,
+      Napi::Function::New(env, [](const Napi::CallbackInfo &) {}), "Arrow batch release", 0, 1);
+  state->releaseTsfn.Unref(env);
+  state->stream.get_schema = liveAsyncArrowGetSchema;
+  state->stream.get_next = liveAsyncArrowGetNext;
+  state->stream.get_last_error = liveAsyncArrowGetLastError;
+  state->stream.release = liveAsyncArrowRelease;
+  state->stream.private_data = state.get();
+  if (chdb_arrow_scan(*conn, tableName.c_str(), reinterpret_cast<chdb_arrow_stream>(&state->stream)) != CHDBSuccess) {
+    Napi::Error::New(env, "chdb_arrow_scan failed for reader " + tableName).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_live_arrow_mu);
+    g_live_arrow_async[LiveArrowKey{conn, tableName}] = state;
+  }
+  auto * handle = new AsyncArrowHandle{state};
+  return Napi::External<AsyncArrowHandle>::New(env, handle, [](Napi::Env, AsyncArrowHandle * h) {
+    cancelAsyncArrowStream(h->state);
+    delete h;
+  });
+}
+
+Napi::Value ArrowPushReaderBatchWrapper(const Napi::CallbackInfo & info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsExternal() || !info[1].IsArray())
+    return rejectedPromise(env, "Usage: readerHandle, batchColumns[]");
+  auto state = info[0].As<Napi::External<AsyncArrowHandle>>().Data()->state;
+  auto batch = makeLiveArrowTable(env, info[1].As<Napi::Array>());
+  if (!batch) return env.Undefined();
+  if (batch->nameStorage != state->schemaBatch->nameStorage ||
+      batch->formatStorage != state->schemaBatch->formatStorage) {
+    Napi::TypeError::New(env, "Arrow reader batch schema changed").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  auto deferred = Napi::Promise::Deferred::New(env);
+  {
+    std::lock_guard<std::mutex> lock(state->mu);
+    if (state->cancelled || state->ended) {
+      deferred.Reject(Napi::Error::New(env, "Arrow reader is closed").Value());
+    } else if (state->queue.size() < 2) {
+      state->queue.push_back(std::move(batch));
+      state->cv.notify_all();
+      deferred.Resolve(env.Undefined());
+    } else if (state->waiting.empty()) {
+      state->waiting.push_back({std::move(batch), deferred});
+    } else {
+      deferred.Reject(Napi::Error::New(env, "Arrow reader producer must await backpressure").Value());
+    }
+  }
+  return deferred.Promise();
+}
+
+Napi::Value ArrowFinishReaderWrapper(const Napi::CallbackInfo & info) {
+  if (info.Length() < 1 || !info[0].IsExternal()) return info.Env().Undefined();
+  auto state = info[0].As<Napi::External<AsyncArrowHandle>>().Data()->state;
+  std::deque<PendingAsyncArrowBatch> waiting;
+  {
+    std::lock_guard<std::mutex> lock(state->mu);
+    state->ended = true;
+    if (info.Length() > 1 && info[1].IsString()) {
+      state->error = info[1].As<Napi::String>().Utf8Value();
+      waiting.swap(state->waiting);
+    }
+  }
+  state->cv.notify_all();
+  for (auto & pending : waiting)
+    pending.deferred.Reject(Napi::Error::New(info.Env(), state->error).Value());
+  return info.Env().Undefined();
+}
+
+Napi::Value ArrowCancelReaderWrapper(const Napi::CallbackInfo & info) {
+  if (info.Length() >= 1 && info[0].IsExternal())
+    cancelAsyncArrowStream(info[0].As<Napi::External<AsyncArrowHandle>>().Data()->state);
+  return info.Env().Undefined();
+}
+
+Napi::Value ArrowLifetimeStatsWrapper(const Napi::CallbackInfo & info) {
+  Napi::Object result = Napi::Object::New(info.Env());
+  result.Set("delivered", Napi::Number::New(info.Env(), static_cast<double>(g_async_arrow_delivered.load())));
+  result.Set("released", Napi::Number::New(info.Env(), static_cast<double>(g_async_arrow_released.load())));
+  result.Set("schemaReleased", Napi::Number::New(info.Env(), static_cast<double>(g_arrow_input_schema_released.load())));
+  return result;
 }
 
 // nativeArrowUnregister(conn, tableName) — drops the registry entry.
@@ -1555,6 +2414,12 @@ Napi::Value ArrowUnregisterWrapper(const Napi::CallbackInfo & info) {
   {
     std::lock_guard<std::mutex> lock(g_live_arrow_mu);
     g_live_arrow_tables.erase(LiveArrowKey{ conn, tableName });
+    g_live_arrow_streams.erase(LiveArrowKey{ conn, tableName });
+    auto async = g_live_arrow_async.find(LiveArrowKey{conn, tableName});
+    if (async != g_live_arrow_async.end()) {
+      cancelAsyncArrowStream(async->second);
+      g_live_arrow_async.erase(async);
+    }
   }
   return env.Undefined();
 }
@@ -1828,6 +2693,7 @@ Napi::Value ExitTeardownWrapper(const Napi::CallbackInfo &info) {
       if (c) {
         erase_arrow_tables_for_conn(c);
         chdb_close_conn(c);
+        g_conn_owner.erase(c);
       }
       if (c == g_reg.defaultConn) g_reg.defaultConn = nullptr;
       it = g_reg.conns.erase(it);
@@ -1877,20 +2743,28 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("ArrowRegisterArray", Napi::Function::New(env, ArrowRegisterArrayWrapper));
   exports.Set("ArrowRegisterStream", Napi::Function::New(env, ArrowRegisterStreamWrapper));
   exports.Set("ArrowRegisterColumns", Napi::Function::New(env, ArrowRegisterColumnsWrapper));
+  exports.Set("ArrowRegisterBatches", Napi::Function::New(env, ArrowRegisterBatchesWrapper));
+  exports.Set("ArrowRegisterReader", Napi::Function::New(env, ArrowRegisterReaderWrapper));
+  exports.Set("ArrowPushReaderBatch", Napi::Function::New(env, ArrowPushReaderBatchWrapper));
+  exports.Set("ArrowFinishReader", Napi::Function::New(env, ArrowFinishReaderWrapper));
+  exports.Set("ArrowCancelReader", Napi::Function::New(env, ArrowCancelReaderWrapper));
+  exports.Set("ArrowLifetimeStats", Napi::Function::New(env, ArrowLifetimeStatsWrapper));
   exports.Set("ArrowUnregister", Napi::Function::New(env, ArrowUnregisterWrapper));
+  exports.Set("QueryArrowAsync", Napi::Function::New(env, QueryArrowAsyncWrapper));
+  exports.Set("StartArrowStream", Napi::Function::New(env, StartArrowStreamWrapper));
+  exports.Set("FetchArrowStream", Napi::Function::New(env, FetchArrowStreamWrapper));
+  exports.Set("CancelArrowStream", Napi::Function::New(env, CancelArrowStreamWrapper));
 
   // For index.js's process 'exit' hook.
   exports.Set("ExitTeardown", Napi::Function::New(env, ExitTeardownWrapper));
 
-  // Close every live connection on env teardown, ahead of the std::atexit
-  // backstop. Both call the idempotent hard_close_all, so running twice is
-  // harmless. Node runs no cleanup hooks on process.exit(), which is one reason
-  // index.js closes on the 'exit' event instead (ExitTeardownWrapper). The
-  // hook also counts this environment out of g_live_envs.
+  // Each isolate closes only its own connections. The process exit hook and
+  // atexit backstop handle remaining process-wide connections after workers
+  // have stopped, without closing another live isolate's session.
   g_live_envs.fetch_add(1);
-  env.AddCleanupHook([] {
+  env.AddCleanupHook([owner = static_cast<napi_env>(env)] {
+    close_for_env(owner);
     g_live_envs.fetch_sub(1);
-    hard_close_all();
   });
 
   return exports;
