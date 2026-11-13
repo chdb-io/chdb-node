@@ -142,6 +142,25 @@ describe('Session.queryArrow — direct C Data output', () => {
 })
 
 describe('Session.queryArrowStream — incremental C Data batches', () => {
+  it('reports abort after a yielded batch instead of silently ending the iterator', async () => {
+    const session = new Session()
+    const controller = new AbortController()
+    const reader = session.queryArrowStream(
+      'SELECT toInt32(number) AS x FROM numbers(4) SETTINGS max_block_size=1',
+      { signal: controller.signal },
+    )
+    try {
+      const iterator = reader[Symbol.asyncIterator]()
+      const first = await iterator.next()
+      expect(first.done).toBe(false)
+      controller.abort()
+      await expect(iterator.next()).rejects.toMatchObject({ name: 'AbortError', code: 'CHDB_ABORT' })
+      await drainPending()
+      expect(reader.closed).toBe(true)
+      expect((await session.queryArrow('SELECT toInt32(7) AS x') as Table).toArray()[0]!.x).toBe(7)
+    } finally { reader.cancel(); session.close(); await drainPending() }
+  })
+
   it('aborts an in-flight fetch, then leaves the Session usable', async () => {
     const session = new Session()
     const controller = new AbortController()

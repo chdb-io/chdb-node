@@ -533,7 +533,12 @@ class ChdbArrowReader {
           }
           break;
         }
-        for (const batch of table.batches) yield batch;
+        for (const batch of table.batches) {
+          yield batch;
+          // An abort while the caller holds a batch closes this reader. When
+          // iteration resumes, report truncation instead of silently ending.
+          if (this._signal && this._signal.aborted) throw new ChdbAbortError('Arrow stream aborted');
+        }
       }
     } finally {
       this._iterating = false;
