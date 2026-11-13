@@ -3,6 +3,32 @@ import type { RecordBatch, Schema, Table } from 'apache-arrow'
 import { Session, registerArrowReader, drainPending } from '../../index.js'
 
 describe('Session.queryArrow — direct C Data output', () => {
+  it('honors an already-aborted signal without starting a native query', async () => {
+    const session = new Session()
+    const controller = new AbortController()
+    controller.abort()
+    try {
+      await expect(session.queryArrow('SELECT 1', { signal: controller.signal }))
+        .rejects.toMatchObject({ name: 'AbortError', code: 'CHDB_ABORT' })
+      expect(() => session.queryArrowStream('SELECT 1', { signal: controller.signal }))
+        .toThrow(/aborted/)
+      expect((await session.queryArrow('SELECT toInt32(1) AS x') as Table).numRows).toBe(1)
+    } finally { session.close() }
+  })
+
+  it('settles a buffered Arrow query early on abort but drains native work before close', async () => {
+    const session = new Session()
+    const controller = new AbortController()
+    try {
+      const pending = session.queryArrow('SELECT toInt32(1) AS x WHERE sleep(0.1)=0',
+        { signal: controller.signal })
+      controller.abort()
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError', code: 'CHDB_ABORT' })
+      await drainPending()
+      expect((await session.queryArrow('SELECT toInt32(7) AS x') as Table).toArray()[0]!.x).toBe(7)
+    } finally { session.close(); await drainPending() }
+  })
+
   it('rejects rc.2 and older native engines before calling the Arrow ABI', async () => {
     const native = require('../../build/Release/chdb_node.node') as { EngineVersion(): string }
     const original = native.EngineVersion
@@ -116,6 +142,24 @@ describe('Session.queryArrow — direct C Data output', () => {
 })
 
 describe('Session.queryArrowStream — incremental C Data batches', () => {
+  it('aborts an in-flight fetch, then leaves the Session usable', async () => {
+    const session = new Session()
+    const controller = new AbortController()
+    const reader = session.queryArrowStream(
+      'SELECT toInt32(number) AS x FROM numbers(4) WHERE sleepEachRow(0.03)=0 SETTINGS max_block_size=1',
+      { signal: controller.signal },
+    )
+    try {
+      const iterator = reader[Symbol.asyncIterator]()
+      const next = iterator.next()
+      controller.abort()
+      await expect(next).rejects.toMatchObject({ name: 'AbortError', code: 'CHDB_ABORT' })
+      await drainPending()
+      expect(reader.closed).toBe(true)
+      expect((await session.queryArrow('SELECT toInt32(7) AS x') as Table).toArray()[0]!.x).toBe(7)
+    } finally { reader.cancel(); session.close(); await drainPending() }
+  })
+
   it('fetches typed batches incrementally and keeps a stable schema', async () => {
     const session = new Session()
     try {

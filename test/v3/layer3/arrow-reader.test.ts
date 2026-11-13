@@ -8,6 +8,28 @@ function batch(values: number[]) {
 }
 
 describe('registerArrowReader — bounded C Stream input', () => {
+  it('can abort registration before a network-backed first batch arrives', async () => {
+    const session = new Session()
+    const controller = new AbortController()
+    let returned = false
+    const source = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => new Promise<IteratorResult<ReturnType<typeof batch>>>(() => {}),
+          return: async () => { returned = true; return { done: true as const, value: undefined } },
+        }
+      },
+    }
+    try {
+      const registration = registerArrowReader(source, { session, signal: controller.signal })
+      controller.abort()
+      await expect(registration).rejects.toMatchObject({ name: 'AbortError', code: 'CHDB_ABORT' })
+      expect(returned).toBe(true)
+      const healthy = await session.queryAsync('SELECT 1', { format: 'CSV' })
+      expect(healthy.text().trim()).toBe('1')
+    } finally { session.close() }
+  })
+
   // chdb-core#321/#323: rc.3 must release the registration schema exactly
   // once; this regression gate is no longer conditional on the engine version.
   it(

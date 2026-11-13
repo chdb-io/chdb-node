@@ -1,5 +1,5 @@
 /** Bulk insert through one in-memory Arrow registration and an engine-side INSERT SELECT. */
-import { ChdbCompileError } from '../../errors'
+import { ChdbAbortError, ChdbCompileError } from '../../errors'
 import { quoteIdentifier, quoteIdentifierSegment } from '../compiler/identifier'
 import { registerArrowSource, type ArrowColumnInput, type ArrowRecordBatchInput, type ArrowTableInput } from './arrow-input'
 import { registerArrowReader, type ArrowReaderSource } from './arrow-reader'
@@ -38,7 +38,8 @@ export async function insertArrow(
   const batch = !Array.isArray(input) && 'batches' in input ? input.batches[0] : input
   const columns = Array.isArray(batch)
     ? batch.map((column) => column.name)
-    : (batch as ArrowRecordBatchInput).schema?.fields.map((field) => field.name)
+    : (batch as ArrowRecordBatchInput | undefined)?.schema?.fields.map((field) => field.name)
+      ?? (!Array.isArray(input) && 'batches' in input ? input.schema?.fields.map((field) => field.name) : undefined)
   if (!columns?.length || new Set(columns).size !== columns.length) {
     throw new ChdbCompileError('insertArrow: source needs unique column names')
   }
@@ -64,7 +65,7 @@ export async function insertArrow(
 export async function insertArrowReader(
   table: string,
   source: ArrowReaderSource,
-  opts: { session: ArrowInsertSession },
+  opts: { session: ArrowInsertSession; signal?: AbortSignal },
 ): Promise<ArrowInsertSummary> {
   const destination = quoteIdentifier(table)
   const reader = await registerArrowReader(source, opts)
@@ -72,10 +73,18 @@ export async function insertArrowReader(
     if (new Set(reader.fields).size !== reader.fields.length) {
       throw new ChdbCompileError('insertArrowReader: source needs unique column names')
     }
+    if (opts.signal?.aborted) throw new ChdbAbortError('Arrow insert aborted')
     const fieldList = reader.fields.map(quoteIdentifierSegment).join(', ')
-    const result = await opts.session.queryAsync(
-      `INSERT INTO ${destination} (${fieldList}) SELECT ${fieldList} FROM arrowstream('${reader.name}')`,
-    )
+    let result: Awaited<ReturnType<ArrowInsertSession['queryAsync']>>
+    try {
+      result = await opts.session.queryAsync(
+        `INSERT INTO ${destination} (${fieldList}) SELECT ${fieldList} FROM arrowstream('${reader.name}')`,
+      )
+    } catch (error) {
+      if (opts.signal?.aborted) throw new ChdbAbortError('Arrow insert aborted', { cause: error })
+      throw error
+    }
+    if (opts.signal?.aborted) throw new ChdbAbortError('Arrow insert aborted')
     await reader.producerDone
     return { rowsSubmitted: reader.rowsSubmitted, rowsRead: result.rowsRead,
       bytesRead: result.bytesRead, elapsed: result.elapsed }

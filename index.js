@@ -246,6 +246,28 @@ function withAbortTimeout(nativePromise, opts) {
   });
 }
 
+// Direct Arrow returns an apache-arrow Table rather than a ChdbResult. Match
+// queryAsync's early-settle abort without wrapping the typed value or releasing
+// the connection while its native worker is still running.
+function withArrowAbort(promise, signal) {
+  trackNative(promise);
+  if (!signal) return promise;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      fn(value);
+    };
+    const onAbort = () => finish(reject, new ChdbAbortError(
+      'Arrow query aborted (the underlying computation may still run to completion in the background)'));
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    promise.then((value) => finish(resolve, value), (error) => finish(reject, error));
+  });
+}
+
 // Parameterized queries set+reset parameter state around each call
 // (chdb-core's CApiQueryParameterGuard). With the bundled libchdb this set/reset
 // is NOT isolated per connection under real concurrency: two parameterized
@@ -458,20 +480,27 @@ class ChdbQueryStream {
 // Typed C Data stream. Each native fetch produces at most one RecordBatch;
 // bytes are copied and C callbacks released before the JS batch is exposed.
 class ChdbArrowReader {
-  constructor(handle) {
+  constructor(handle, signal) {
     this._handle = handle;
     this._closed = false;
     this._inflight = null;
     this._iterating = false;
+    this._signal = signal;
+    this._onAbort = signal ? () => this.cancel() : null;
+    if (signal) signal.addEventListener('abort', this._onAbort, { once: true });
     this.schema = null; // available after the first fetch, even for zero rows
     activeStreams.add(this);
   }
   get closed() { return this._closed; }
+  _removeAbortListener() {
+    if (this._signal) this._signal.removeEventListener('abort', this._onAbort);
+  }
 
   async *[Symbol.asyncIterator]() {
     if (this._iterating) throw new ChdbStreamError("Arrow reader already has an active iterator");
     this._iterating = true;
     try {
+      if (this._signal && this._signal.aborted) throw new ChdbAbortError('Arrow stream aborted');
       while (!this._closed) {
         let raw;
         try {
@@ -480,20 +509,24 @@ class ChdbArrowReader {
         } catch (e) {
           const cancelling = this._closed;
           this._closed = true;
+          this._removeAbortListener();
           if (!cancelling) {
             activeStreams.delete(this);
             flushArrowIdle();
           }
+          if (this._signal && this._signal.aborted) throw new ChdbAbortError('Arrow stream aborted', { cause: e });
           throw asQueryError(e);
         } finally {
           this._inflight = null;
         }
+        if (this._signal && this._signal.aborted) throw new ChdbAbortError('Arrow stream aborted');
         if (this._closed) break;
         const table = arrowTableFromDirect(raw);
         this.schema = table.schema;
         if (raw.done) {
           const cancelling = this._closed;
           this._closed = true;
+          this._removeAbortListener();
           if (!cancelling) {
             activeStreams.delete(this);
             flushArrowIdle();
@@ -511,6 +544,7 @@ class ChdbArrowReader {
   cancel() {
     if (this._closed) return;
     this._closed = true;
+    this._removeAbortListener();
     const destroy = () => {
       try { chdbNode.CancelArrowStream(this._handle); } catch (_) { /* best effort */ }
       activeStreams.delete(this);
@@ -896,12 +930,12 @@ class Session {
   queryArrow(query, opts = {}) {
     if (!this.connection) return Promise.reject(new ChdbClosedError("No active connection available"));
     if (!query) return Promise.reject(new ChdbStreamError("queryArrow requires a non-empty query"));
+    if (opts.signal && opts.signal.aborted) return Promise.reject(new ChdbAbortError('Arrow query aborted'));
     try { _assertArrowCore(); } catch (e) { return Promise.reject(e); }
     let native;
     try { native = chdbNode.QueryArrowAsync(this.connection, query, opts); }
     catch (e) { return Promise.reject(e); }
-    trackNative(native);
-    return native.then((raw) => arrowTableFromDirect(raw), (e) => { throw asQueryError(e); });
+    return withArrowAbort(native.then((raw) => arrowTableFromDirect(raw), (e) => { throw asQueryError(e); }), opts.signal);
   }
 
   queryArrowStream(query, opts = {}) {
@@ -923,6 +957,7 @@ class Session {
   #startArrowStream(query, opts, bound) {
     if (!this.connection) throw new ChdbClosedError("No active connection available");
     if (!query) throw new ChdbStreamError("queryArrowStream requires a non-empty query");
+    if (opts.signal && opts.signal.aborted) throw new ChdbAbortError('Arrow stream aborted');
     _assertArrowCore();
     if (this._activeStream && !this._activeStream.closed) {
       throw new ChdbStreamError("a stream is already active on this session; finish or cancel it first");
@@ -930,7 +965,7 @@ class Session {
     let handle;
     try { handle = chdbNode.StartArrowStream(this.connection, query, opts, bound); }
     catch (e) { throw asQueryError(e); }
-    const stream = new ChdbArrowReader(handle);
+    const stream = new ChdbArrowReader(handle, opts.signal);
     this._activeStream = stream;
     return stream;
   }

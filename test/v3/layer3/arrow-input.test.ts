@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { registerArrowTable, registerArrowSource, selectFrom, chTable, ChdbCompileError, Session, drainPending } from '../../../index.js'
-import { Table, Field, List, Int32, Int64, Uint64, Float32, Float64, Bool, Utf8, Binary, TimestampMillisecond, Decimal, vectorFromArray } from 'apache-arrow'
+import { Table, Schema, Field, List, Int32, Int64, Uint64, Float32, Float64, Bool, Utf8, Binary, TimestampMillisecond, Decimal, vectorFromArray } from 'apache-arrow'
 
 // Arrow C Data Interface input — register a JS columnar dataset as
 // `arrowstream('<name>')` and read it through the regular builder. Single-pass
@@ -8,6 +8,19 @@ import { Table, Field, List, Int32, Int64, Uint64, Float32, Float64, Bool, Utf8,
 // repeated reads against the same table.
 
 describe('registerArrowTable — round-trips JS data through the engine', () => {
+  it('registers a schema-bearing Table with no batches as a zero-row source', async () => {
+    const session = new Session()
+    const input = new Table(new Schema([new Field('x', new Int32())]))
+    expect(input.batches).toHaveLength(0)
+    const source = registerArrowSource(input, { session })
+    try {
+      const sql = `SELECT count() FROM arrowstream('${source.name}')`
+      expect((await session.queryAsync(sql, { format: 'CSV' })).text().trim()).toBe('0')
+      source.refresh()
+      expect((await session.queryAsync(sql, { format: 'CSV' })).text().trim()).toBe('0')
+    } finally { source.close(); session.close() }
+  })
+
   it('generates distinct opaque names for independent Arrow sources', async () => {
     const session = new Session()
     const batch = new Table({ v: vectorFromArray([7], new Int32()) }).batches[0]!

@@ -53,6 +53,8 @@ choose the name. Names are process-wide; prefer generated names unless you have
 a reason to coordinate them. Close the registration after the last scan. If a
 query or lazy stream is active, unregister and buffer release are deferred
 until that scan finishes or is cancelled.
+An Arrow `Table` with a non-empty schema and no batches is a valid zero-row
+source; `insertArrow` likewise accepts it as a zero-row insert.
 
 ## Insert Arrow data
 
@@ -86,6 +88,11 @@ The native queue holds at most two batches not yet handed to
 core; producing another waits for capacity. Core can retain delivered batches,
 so this is not a bound on the entire query's memory. A cancelled producer
 should cooperate with iterator `return()` to release its own resources.
+Pass `{ session, signal }` to `registerArrowReader` or `insertArrowReader` to
+cancel the native reader, including while waiting for its first batch. An
+upstream iterator blocked inside `next()` cannot be forcibly interrupted;
+the caller must arrange for it to cooperate with `return()` or its own signal.
+An insert cancelled after it starts is not promised to roll back committed rows.
 Use `queryAsync` or another async query API while a JS Arrow reader is
 registered: synchronous `query`/`queryBind` on its connection are rejected
 because blocking the event loop would prevent the producer from refilling
@@ -101,7 +108,9 @@ try {
   const small = await session.queryArrow('SELECT toInt32(number) AS id FROM numbers(3)')
   console.log(small.toArray().map(row => row.id)) // [0, 1, 2]
 
-  const reader = session.queryArrowStream('SELECT toInt32(number) AS id FROM numbers(1000)')
+  const controller = new AbortController()
+  const reader = session.queryArrowStream('SELECT toInt32(number) AS id FROM numbers(1000)',
+    { signal: controller.signal })
   try {
     for await (const batch of reader) {
       console.log(batch.numRows)
@@ -118,6 +127,11 @@ try {
 Use `queryArrowBind` and `queryArrowStreamBind` for server-side
 `{name:Type}` parameters, for example
 `await session.queryArrowBind('SELECT {id:Int32} AS id', { id: 7 })`.
+All four direct output methods accept `signal`. A buffered `queryArrow` settles
+early when aborted, but its native computation may still run to completion;
+the Session defers teardown until it finishes. A streamed reader cancels its
+native handle after any in-flight fetch completes. Neither behavior promises
+transaction rollback.
 For TypeScript return types without making the base `chdb` import require
 `apache-arrow`, use the helpers from `chdb/arrow`.
 Only one iterator may consume a given Arrow result reader at a time; cancel
@@ -135,6 +149,10 @@ the JS event loop.
   Timestamp, Decimal128/256, slices, null bitmaps, and a single-chunk
   dictionary of UTF-8/Binary values with Int32/UInt32 indices. Nested input
   and multi-chunk dictionaries are rejected rather than silently converted.
+- Direct input accepts Arrow objects and batch iterables, not an Arrow IPC
+  byte stream from a file, `fetch()` response, or Node `Readable`. Decode IPC
+  to batches with `apache-arrow` before using `registerArrowReader`; the
+  existing Arrow IPC output path is separate.
 - Supported output includes basic scalars, Timestamp, Decimal128/256, and
   LowCardinality UTF-8/Binary dictionaries. Options include
   `stringAsString`, `lowCardinalityAsDictionary`, and `unsupportedAsBinary`;
