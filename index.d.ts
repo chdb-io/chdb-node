@@ -249,6 +249,8 @@ export interface ChdbArrowReader extends AsyncIterable<unknown> {
 }
 
 export interface DirectArrowOptions {
+  /** Abort the caller's wait; an already-running buffered query finishes natively before teardown. */
+  signal?: AbortSignal;
   /** Degrade otherwise unmappable engine types to Arrow Binary. Default false. */
   unsupportedAsBinary?: boolean;
   /** Export ClickHouse String as Arrow Utf8 (default) or Binary. */

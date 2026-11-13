@@ -1,8 +1,8 @@
 /** Bounded async Arrow reader -> core C Stream source. */
 import { randomUUID } from 'node:crypto'
-import { ChdbCompileError } from '../../errors'
+import { ChdbAbortError, ChdbCompileError } from '../../errors'
 import { runtime, type Runtime } from '../runtime'
-import { encodeArrowBatch, type ArrowRecordBatchInput } from './arrow-input'
+import { encodeArrowBatch, emptyArrowBatch, type ArrowRecordBatchInput } from './arrow-input'
 
 export type ArrowReaderSource = (AsyncIterable<ArrowRecordBatchInput> | Iterable<ArrowRecordBatchInput>) & {
   /** Required only when the reader yields no batches. */
@@ -39,9 +39,10 @@ const readerFinalizers = new FinalizationRegistry<{
  */
 export async function registerArrowReader(
   source: ArrowReaderSource,
-  opts: { session: { readonly connection: unknown } },
+  opts: { session: { readonly connection: unknown }; signal?: AbortSignal },
 ): Promise<ArrowReaderHandle> {
   if (!opts?.session?.connection) throw new ChdbCompileError('registerArrowReader requires an active Session')
+  if (opts.signal?.aborted) throw new ChdbAbortError('Arrow reader registration aborted')
   runtime()._assertArrowCore()
   const conn = opts.session.connection
   const asyncMethod = (source as AsyncIterable<ArrowRecordBatchInput>)[Symbol.asyncIterator]
@@ -51,7 +52,25 @@ export async function registerArrowReader(
   }
   const iterator: AsyncIterator<ArrowRecordBatchInput> | Iterator<ArrowRecordBatchInput> =
     typeof asyncMethod === 'function' ? asyncMethod.call(source) : syncMethod.call(source)
-  const first = await iterator.next()
+  // Registration must not hold the caller hostage when a network-backed
+  // iterator has not produced its first batch. An uncooperative next() cannot
+  // be forcibly stopped; return() is requested without awaiting it.
+  const first = opts.signal ? await new Promise<IteratorResult<ArrowRecordBatchInput>>((resolve, reject) => {
+    const onAbort = () => {
+      try { void Promise.resolve(iterator.return?.()).catch(() => {}) } catch { /* best effort */ }
+      reject(new ChdbAbortError('Arrow reader registration aborted'))
+    }
+    if (opts.signal!.aborted) { onAbort(); return }
+    opts.signal!.addEventListener('abort', onAbort, { once: true })
+    Promise.resolve().then(() => iterator.next()).then(
+      (value) => { opts.signal!.removeEventListener('abort', onAbort); resolve(value) },
+      (error) => { opts.signal!.removeEventListener('abort', onAbort); reject(error) },
+    )
+  }) : await iterator.next()
+  if (opts.signal?.aborted) {
+    try { void Promise.resolve(iterator.return?.()).catch(() => {}) } catch { /* best effort */ }
+    throw new ChdbAbortError('Arrow reader registration aborted')
+  }
   if (opts.session.connection !== conn) {
     try { await iterator.return?.() } catch { /* source cleanup is best effort */ }
     throw new ChdbCompileError('registerArrowReader: Session closed while awaiting the first batch')
@@ -59,20 +78,8 @@ export async function registerArrowReader(
   let firstBatch: ArrowRecordBatchInput
   if (first.done) {
     const schema = (source as { schema?: ArrowRecordBatchInput['schema'] }).schema
-    if (!schema?.fields?.length) throw new ChdbCompileError('empty Arrow reader must provide a non-empty schema')
-    // Do not cross apache-arrow's independent ESM/CJS constructors: build a
-    // zero-row structural batch from the public schema shape instead.
-    firstBatch = { schema, numCols: schema.fields.length, numRows: 0,
-      data: { children: schema.fields.map((field) => {
-        const type = field.type as { toString(): string; indices?: { toString(): string } }
-        const dictionary = type.toString().startsWith('Dictionary<')
-          ? { data: [{ offset: 0, length: 0, nullCount: 0,
-            values: new Uint8Array(0), valueOffsets: new Int32Array([0]) }] }
-          : undefined
-        return { offset: 0, length: 0, nullCount: 0,
-          values: type.indices?.toString() === 'Uint32' ? new Uint32Array(0) : new Int32Array(0),
-          valueOffsets: new Int32Array([0]), dictionary }
-      }) } }
+    // Apache Arrow has separate ESM/CJS constructors; use its public schema shape.
+    firstBatch = emptyArrowBatch(schema)
   } else firstBatch = first.value
 
   const rt = runtime()
@@ -87,6 +94,7 @@ export async function registerArrowReader(
     throw e
   }
   let closing = false
+  let onAbort: (() => void) | undefined
   let rowsSubmitted = first.done ? 0 : firstBatch.numRows
   const producerDone = (async () => {
     try {
@@ -115,6 +123,7 @@ export async function registerArrowReader(
     async close() {
       if (!closing) {
         closing = true
+        if (onAbort) opts.signal!.removeEventListener('abort', onAbort)
         rt._arrowCancelReader(native)
         rt._arrowUnregister(conn, name, token)
         readerFinalizers.unregister(result)
@@ -127,5 +136,10 @@ export async function registerArrowReader(
     },
   }
   readerFinalizers.register(result, { rt, native, conn, name, token }, result)
+  if (opts.signal) {
+    onAbort = () => { void result.close() }
+    if (opts.signal.aborted) onAbort()
+    else opts.signal.addEventListener('abort', onAbort, { once: true })
+  }
   return result
 }

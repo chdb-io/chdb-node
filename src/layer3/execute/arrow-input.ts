@@ -82,7 +82,27 @@ export interface ArrowRecordBatchInput {
   readonly numRows: number
   readonly numCols: number
 }
-export interface ArrowTableInput { readonly batches: ReadonlyArray<ArrowRecordBatchInput> }
+export interface ArrowTableInput {
+  /** Required for a zero-batch Table; existing nonempty structural inputs need not supply it. */
+  readonly schema?: ArrowRecordBatchInput['schema']
+  readonly batches: ReadonlyArray<ArrowRecordBatchInput>
+}
+
+/** A schema-bearing empty batch for Tables/readers with no data batches. */
+export function emptyArrowBatch(schema: ArrowRecordBatchInput['schema'] | undefined): ArrowRecordBatchInput {
+  if (!schema?.fields?.length) throw new ChdbCompileError('empty Arrow source must provide a non-empty schema')
+  return { schema, numCols: schema.fields.length, numRows: 0,
+    data: { children: schema.fields.map((field) => {
+      const type = field.type as { toString(): string; indices?: { toString(): string } }
+      const dictionary = type.toString().startsWith('Dictionary<')
+        ? { data: [{ offset: 0, length: 0, nullCount: 0,
+          values: new Uint8Array(0), valueOffsets: new Int32Array([0]) }] }
+        : undefined
+      return { offset: 0, length: 0, nullCount: 0,
+        values: type.indices?.toString() === 'Uint32' ? new Uint32Array(0) : new Int32Array(0),
+        valueOffsets: new Int32Array([0]), dictionary }
+    }) } }
+}
 
 interface ArrowDataInput {
   readonly offset?: number
@@ -341,6 +361,8 @@ export function registerArrowTable(
   if (Array.isArray(columns)) {
     validate(name, columns)
     encoded = columns.map(encodeColumn)
+  } else if ('batches' in columns && columns.batches.length === 0) {
+    encoded = encodeArrowBatch(emptyArrowBatch(columns.schema))
   } else if ('batches' in columns && columns.batches.length > 1) {
     encodedBatches = columns.batches.map(encodeArrowBatch)
     encoded = encodedBatches[0]!

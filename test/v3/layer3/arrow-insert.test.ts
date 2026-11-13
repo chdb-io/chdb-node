@@ -1,8 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { Int32, Table, Utf8, vectorFromArray } from 'apache-arrow'
+import { Field, Int32, Schema, Table, Utf8, vectorFromArray } from 'apache-arrow'
 import { insertArrow, insertArrowReader, Session } from '../../../index.js'
 
 describe('insertArrow — engine-side INSERT SELECT from Arrow input', () => {
+  it('accepts an empty schema-bearing Table as a zero-row insert', async () => {
+    const session = new Session()
+    try {
+      await session.queryAsync('CREATE TABLE arrow_insert_empty (id Int32) ENGINE=Memory')
+      const input = new Table(new Schema([new Field('id', new Int32())]))
+      expect(await insertArrow('arrow_insert_empty', input, { session })).toMatchObject({ rowsSubmitted: 0 })
+      const result = await session.queryAsync('SELECT count() FROM arrow_insert_empty', { format: 'CSV' })
+      expect(result.text().trim()).toBe('0')
+    } finally { session.close() }
+  })
+
   it('maps source fields by name, preserves nulls, and reports submitted rows', async () => {
     const session = new Session()
     try {
@@ -77,6 +88,29 @@ describe('insertArrow — engine-side INSERT SELECT from Arrow input', () => {
     } finally {
       session.close()
     }
+  })
+
+  it('aborts a live reader insert and keeps the Session usable', async () => {
+    const session = new Session()
+    const controller = new AbortController()
+    let reachedSecondBatch!: () => void
+    const waitingForSecondBatch = new Promise<void>((resolve) => { reachedSecondBatch = resolve })
+    try {
+      await session.queryAsync('CREATE TABLE arrow_insert_aborted (id Int32) ENGINE=Memory')
+      async function* batches() {
+        yield new Table({ id: vectorFromArray([1], new Int32()) }).batches[0]!
+        reachedSecondBatch()
+        await new Promise<void>(() => {}) // an uncooperative upstream source
+      }
+      const pending = insertArrowReader('arrow_insert_aborted', batches(),
+        { session, signal: controller.signal })
+      await waitingForSecondBatch
+      await new Promise<void>((resolve) => setImmediate(resolve)) // let INSERT start consuming the first batch
+      controller.abort()
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError', code: 'CHDB_ABORT' })
+      const result = await session.queryAsync('SELECT 7', { format: 'CSV' })
+      expect(result.text().trim()).toBe('7')
+    } finally { session.close() }
   })
 
   it('requires a live Session and unique source field names', async () => {
