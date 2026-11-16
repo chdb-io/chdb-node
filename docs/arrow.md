@@ -2,11 +2,11 @@
 
 The direct Arrow APIs let you query in-memory Arrow data, read typed results,
 and insert batches without Arrow IPC. They require chdb-core v26.11.0-rc.3
-or newer. The matching npm platform packages are not published yet.
+or newer; this release pins v26.11.1 in its matching npm platform packages.
 
 Arrow Inter-Process Communication (IPC) encodes data as a byte stream or file. The direct APIs here exchange in-memory Arrow buffers and batches with the native engine instead; they may still copy data while converting it. A `RecordBatch` is a typed group of columnar rows, and a reader supplies successive batches.
 
-Once the matching packages are released, install `chdb` and its optional peer:
+Install `chdb` and its optional peer:
 
 ```sh
 npm install chdb apache-arrow
