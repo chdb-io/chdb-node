@@ -146,7 +146,7 @@ somewhere later.
 | Streaming results (`AsyncIterable`) | ✅ |
 | Arrow IPC **output** (`format: 'arrow'` + `toArrow()`) | ✅ |
 | AbortSignal / timeout | ✅ (single-shot is honest: rejects early; native runs to completion) |
-| Direct Arrow **scan**, reader, typed results, and bulk insert | ✅ in source (matching rc.3 native packages pending) |
+| Direct Arrow **scan**, reader, typed results, and bulk insert | ✅ with the matching native package |
 | Arrow zero-copy (M2, `{ zeroCopy: true }`) | ⏳ follow-up |
 | chDB ↔ `@clickhouse/client` integration (`chdb/connection`, **experimental**) | ✅ |
 | Durable V1 control plane (`chdb/durable`, **experimental**) | ✅ pure TS, engine injected |
@@ -155,8 +155,8 @@ somewhere later.
 
 See the [Arrow guide](docs/arrow.md) for examples, lifecycle rules, and the
 difference between direct C Data/C Stream and the existing Arrow IPC path.
-The direct APIs require chdb-core v26.11.0-rc.3; they are not in the currently
-published npm platform packages.
+The direct APIs require chdb-core v26.11.0-rc.3 or newer. This release pins
+v26.11.1 and packages its native library for each supported platform.
 
 ### chDB ↔ `@clickhouse/client` integration (`chdb/connection`, experimental)
 

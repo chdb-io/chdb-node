@@ -16,14 +16,10 @@ set -e
 # count and target-database proof. chdb/durable's engine adapter cannot be built
 # without them. v26.7.3 is the first stable release that exports them.
 #
-# The pin is currently a release candidate, and chdb_version() on it returns the
-# full "26.11.0-rc.3", suffix and all. Durable records that string in
-# head.engine.version and raises min_reader to it on every write. A pre-release
-# sorts below the release it leads to, so an object written against this RC
-# stays readable by the eventual stable, but every earlier engine (26.11.0-rc.2,
-# 26.9.x and before) is refused it with engine_incompatible from then on.
-# The Arrow A1–A6 ABI and chdb-core#323's registration ownership fixes are
-# present in rc.3. See docs/arrow-rc3-conformance.md for validation scope.
+# The pin is a stable release containing the direct Arrow ABI and registration
+# ownership fixes first validated against rc.3. Durable records the engine
+# version in head.engine.version and refuses earlier incompatible engines.
+# See docs/arrow-rc3-conformance.md for the earlier candidate's validation scope.
 #
 # Keep the pin on its own line and literal: the release check greps for it when
 # it proposes a bump.
