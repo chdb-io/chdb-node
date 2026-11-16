@@ -16,11 +16,12 @@ describe('Arrow source in a worker isolate', () => {
       const {Worker}=require('node:worker_threads'),m=require('./index.js');
       (async()=>{const s=new m.Session();
         try{const worker=new Worker(${JSON.stringify(workerCode)},{eval:true,workerData:{path:s.path}});
+          const exited=new Promise((resolve,reject)=>worker.once('exit',code=>code===0?resolve():reject(Error('exit '+code))));
           const value=await new Promise((resolve,reject)=>{
             worker.once('message',resolve);worker.once('error',reject)
           });
           if(value!=='ok')throw Error(value);
-          await new Promise((resolve,reject)=>worker.once('exit',code=>code===0?resolve():reject(Error('exit '+code))));
+          await exited;
           const result=await s.queryAsync('SELECT 7',{format:'CSV'});
           if(result.text().trim()!=='7')throw Error('main Session was closed');
           console.log('concurrent isolate OK');
