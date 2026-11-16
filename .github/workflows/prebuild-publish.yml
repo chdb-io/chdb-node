@@ -206,17 +206,19 @@ jobs:
           VER="${GITHUB_REF_NAME#v}"
           work="$(mktemp -d)"
           cp -R "$GITHUB_WORKSPACE/test/pack" "$work/test"
+          cp "$GITHUB_WORKSPACE/scripts/smoke-arrow-e2e.mjs" "$work/smoke-arrow-e2e.mjs"
           cd "$work"
           npm init -y >/dev/null
           # The version may lag in the registry right after publish; retry.
           ok=
           for i in 1 2 3 4 5 6; do
-            if npm install "chdb@$VER" vitest@2 >/tmp/i.log 2>&1; then ok=1; break; fi
+            if npm install "chdb@$VER" vitest@2 apache-arrow@21.1.0 >/tmp/i.log 2>&1; then ok=1; break; fi
             echo "install attempt $i failed (registry propagation?); retry in 15s"; sleep 15
           done
           [ -n "$ok" ] || { echo "could not install chdb@$VER"; tail -20 /tmp/i.log; exit 1; }
           node -e "console.log('verifying installed chdb', require('chdb/package.json').version, 'on', process.version, process.platform, process.arch)"
           npx vitest run test
+          node smoke-arrow-e2e.mjs
 
   verify-old-distro:
     # Every leg of `verify` runs on a GitHub runner image, and all four of them
@@ -243,15 +245,17 @@ jobs:
           echo "distro: $(. /etc/os-release; echo "$PRETTY_NAME"), glibc $(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
           work="$(mktemp -d)"
           cp -R "$GITHUB_WORKSPACE/test/pack" "$work/test"
+          cp "$GITHUB_WORKSPACE/scripts/smoke-arrow-e2e.mjs" "$work/smoke-arrow-e2e.mjs"
           cd "$work"
           npm init -y >/dev/null
           ok=
           for i in 1 2 3 4 5 6; do
-            if npm install "chdb@$VER" vitest@2 >/tmp/i.log 2>&1; then ok=1; break; fi
+            if npm install "chdb@$VER" vitest@2 apache-arrow@21.1.0 >/tmp/i.log 2>&1; then ok=1; break; fi
             echo "install attempt $i failed (registry propagation?); retry in 15s"; sleep 15
           done
           [ -n "$ok" ] || { echo "could not install chdb@$VER"; tail -20 /tmp/i.log; exit 1; }
           npx vitest run test
+          node smoke-arrow-e2e.mjs
 
   promote:
     needs: [verify, verify-old-distro]
