@@ -146,7 +146,7 @@ somewhere later.
 | Streaming results (`AsyncIterable`) | ✅ |
 | Arrow IPC **output** (`format: 'arrow'` + `toArrow()`) | ✅ |
 | AbortSignal / timeout | ✅ (single-shot is honest: rejects early; native runs to completion) |
-| Direct Arrow **scan**, reader, typed results, and bulk insert | ✅ in PR #104 (rc.3 native packages pending) |
+| Direct Arrow **scan**, reader, typed results, and bulk insert | ✅ in source (matching rc.3 native packages pending) |
 | Arrow zero-copy (M2, `{ zeroCopy: true }`) | ⏳ follow-up |
 | chDB ↔ `@clickhouse/client` integration (`chdb/connection`, **experimental**) | ✅ |
 | Durable V1 control plane (`chdb/durable`, **experimental**) | ✅ pure TS, engine injected |
