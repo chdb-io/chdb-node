@@ -147,21 +147,22 @@ Codegen / introspection:
     during active queries/streams; finish or cancel a lazy stream to let it drain.
   registerArrowSource(columns|batch|table, {session?})  same input path, with a
     generated process-unique name returned on its closable handle.
-  registerArrowReader(asyncIterable<RecordBatch>, {session})  one-shot Arrow
-    reader as an engine SQL source, with a bounded native prefetch queue and
+  registerArrowReader(sync/async Iterable<RecordBatch>, {session})  one-shot
+    Arrow reader as an engine SQL source, with a bounded native prefetch queue and
     async close(). The first batch establishes schema; empty sources need
     source.schema. Reader errors propagate to SQL; no IPC or readAll().
-  insertArrow(table, columns|batch|table, {session})  bulk insert one Arrow batch
-    using an internal scoped registration and INSERT SELECT. Destination columns
-    are matched by name. rowsSubmitted is input size, not a storage write ledger.
+  insertArrow(table, columns|batch|table, {session})  bulk insert a batch or
+    materialized multi-batch Table using a scoped registration and INSERT SELECT.
+    Destination columns are matched by name. rowsSubmitted counts input rows,
+    not a storage write ledger.
   insertArrowReader(table, reader, {session})  same field-name mapping and
     INSERT SELECT over the bounded reader source; rowsSubmitted is not a
     storage-side write ledger.
   Session.queryArrow(sql)  direct C Data output as an apache-arrow Table (not IPC).
     Primitive signed/unsigned integers, Float32/64, Bool, Utf8, Binary,
-    Timestamp and Decimal128 are
-    supported; buffers are copied before C stream release, so the result
-    outlives the Session. stringAsString:false exports String as Binary.
+    Timestamp and Decimal128/256 are supported; buffers are copied before
+    C stream release, so the result outlives the Session.
+    stringAsString:false exports String as Binary.
   Session.queryArrowStream(sql, options?)  pull one typed apache-arrow
     RecordBatch per core C Data fetch; cancel() on partial consumption.
     schema is available after the first fetch, including zero-row results.

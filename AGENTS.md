@@ -20,6 +20,7 @@ unsupported (use WSL2).
 Run SQL you have, or anything ClickHouse-specific?   -> raw SQL  (query / sql``)
 Build queries programmatically, type-safe + bound?   -> fluent   (selectFrom / insertInto)  [src/layer3/AGENTS.md]
 Read/JOIN external sources (S3/Postgres/…)?          -> connect({ url })                     [src/layer3/AGENTS.md]
+Query/insert in-memory Arrow or read typed batches?  -> direct Arrow                         [docs/arrow.md]
 Migrating from @clickhouse/client (drop-in)?         -> chdb/connection                      [src/connection/AGENTS.md]
 Need the database to survive losing the machine?     -> chdb/durable   (experimental)        [docs/design/durable-control-plane.md]
 ```
@@ -68,4 +69,5 @@ const rows = await session('./db').selectFrom('events').selectAll().where('ts', 
 - **No SQL injection** with `queryBind`, the `sql` tag, or the fluent builder (values bound server-side).
 
 Detail: fluent + federation → `src/layer3/AGENTS.md`; `@clickhouse/client` compat →
-`src/connection/AGENTS.md`; full API reference → `llms-full.txt`.
+`src/connection/AGENTS.md`; direct Arrow → `docs/arrow.md` and
+`.agents/skills/chdb-arrow/SKILL.md`; full API reference → `llms-full.txt`.
