@@ -1,13 +1,29 @@
 # Arrow with chdb in Node.js
 
 The direct Arrow APIs let you query in-memory Arrow data, read typed results,
-and insert batches without Arrow IPC. They are implemented in [PR #104](https://github.com/chdb-io/chdb-node/pull/104)
-against chdb-core v26.11.0-rc.3; the matching npm platform packages are not
-published yet. Once released, install both `chdb` and its optional peer:
+and insert batches without Arrow IPC. They require chdb-core v26.11.0-rc.3
+or newer. The matching npm platform packages are not published yet.
+
+Arrow Inter-Process Communication (IPC) encodes data as a byte stream or file. The direct APIs here exchange in-memory Arrow buffers and batches with the native engine instead; they may still copy data while converting it. A `RecordBatch` is a typed group of columnar rows, and a reader supplies successive batches.
+
+Once the matching packages are released, install `chdb` and its optional peer:
 
 ```sh
 npm install chdb apache-arrow
 ```
+
+## Arrow documentation in this Node binding
+
+| What you need | Where to look |
+| --- | --- |
+| Choose and use the direct Arrow input, output, or insert API | [Choose a path](#choose-a-path) and the examples below |
+| Run an installed-package end-to-end example | [`scripts/smoke-arrow-e2e.mjs`](../scripts/smoke-arrow-e2e.mjs) |
+| Check supported types, ownership, and release validation | [rc.3 conformance notes](arrow-rc3-conformance.md), [direct API tests](../test/v3/arrow-direct.test.ts), and [reader tests](../test/v3/layer3/arrow-reader.test.ts) |
+| Understand native worker/isolate and queue design | [Native Arrow design](design/native-arrow.md) |
+| Use the older in-memory Arrow IPC result route | [`format: 'arrow'` + `toArrow()`](../README.md); this is distinct from the direct typed API below |
+| Use Arrow Database Connectivity (ADBC) for standard results or bulk ingest | Use a verified ADBC client/driver pairing separately. General `BindStream` binds query parameters; it does not make an async iterable an arbitrary SQL `FROM` source. |
+
+This page is the entry point for the Node binding; the linked smoke test, design, and conformance files serve different purposes and are not alternative user guides.
 
 ## Choose a path
 
