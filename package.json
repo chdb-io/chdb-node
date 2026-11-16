@@ -103,6 +103,9 @@
     "example.js",
     "AGENTS.md",
     "llms-full.txt",
+    "docs/arrow.md",
+    "docs/arrow-release-validation.md",
+    ".agents/skills/chdb-arrow/SKILL.md",
     "src/layer3/AGENTS.md",
     "src/connection/AGENTS.md",
     "integrations"

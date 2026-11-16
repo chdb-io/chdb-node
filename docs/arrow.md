@@ -17,9 +17,9 @@ npm install chdb apache-arrow
 | What you need | Where to look |
 | --- | --- |
 | Choose and use the direct Arrow input, output, or insert API | [Choose a path](#choose-a-path) and the examples below |
-| Run an installed-package end-to-end example | [`scripts/smoke-arrow-e2e.mjs`](../scripts/smoke-arrow-e2e.mjs) |
-| Check supported types, ownership, and release validation | [rc.3 conformance notes](arrow-rc3-conformance.md), [direct API tests](../test/v3/arrow-direct.test.ts), and [reader tests](../test/v3/layer3/arrow-reader.test.ts) |
-| Understand native worker/isolate and queue design | [Native Arrow design](design/native-arrow.md) |
+| Run an installed-package end-to-end example | [`scripts/smoke-arrow-e2e.mjs`](https://github.com/chdb-io/chdb-node/blob/v3.6.0/scripts/smoke-arrow-e2e.mjs) |
+| Check supported types, ownership, and release validation | [v3.6.0 release validation](arrow-release-validation.md), [direct API tests](https://github.com/chdb-io/chdb-node/blob/v3.6.0/test/v3/arrow-direct.test.ts), and [reader tests](https://github.com/chdb-io/chdb-node/blob/v3.6.0/test/v3/layer3/arrow-reader.test.ts) |
+| Understand native worker/isolate and queue design | [Native Arrow design](https://github.com/chdb-io/chdb-node/blob/v3.6.0/docs/design/native-arrow.md) |
 | Use the older in-memory Arrow IPC result route | [`format: 'arrow'` + `toArrow()`](../README.md); this is distinct from the direct typed API below |
 | Use Arrow Database Connectivity (ADBC) for standard results or bulk ingest | Use a verified ADBC client/driver pairing separately. General `BindStream` binds query parameters; it does not make an async iterable an arbitrary SQL `FROM` source. |
 
@@ -173,7 +173,7 @@ the JS event loop.
   LowCardinality UTF-8/Binary dictionaries. Options include
   `stringAsString`, `lowCardinalityAsDictionary`, and `unsupportedAsBinary`;
   without the latter, unmappable types fail rather than silently falling back
-  to IPC. See [validated type scope](arrow-rc3-conformance.md).
+  to IPC. See [current release validation](arrow-release-validation.md).
 - Keep each `Session` open until its scans and readers finish. Cancel a
   partially consumed output reader, close input registrations, and await
   input reader cleanup. Error paths release the native handles.
